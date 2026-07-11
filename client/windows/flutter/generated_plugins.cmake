@@ -4,9 +4,12 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
+  desktop_drop
   flutter_secure_storage_windows
   flutter_webrtc
   local_notifier
+  media_kit_libs_windows_video
+  media_kit_video
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

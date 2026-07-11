@@ -13,6 +13,7 @@ dependencies:
   audioplayers: ^6.8.1
   crypto: ^3.0.6
   cryptography: ^2.7.0
+  desktop_drop: ^0.7.1
   file_picker: ^8.3.1
   flutter_secure_storage: ^9.2.4
   flutter_webrtc: ^0.12.7
@@ -20,6 +21,10 @@ dependencies:
   path_provider: ^2.1.5
   uuid: ^4.5.1
   web_socket_channel: ^3.0.1
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_windows_video: ^1.0.11
+  media_kit_libs_linux: ^1.2.1
 
 dev_dependencies:
   flutter_lints: ^5.0.0

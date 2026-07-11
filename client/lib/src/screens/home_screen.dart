@@ -69,6 +69,8 @@ class HomeScreen extends StatelessWidget {
                         itemBuilder: (context, index) {
                           final contact = appState.contacts[index];
                           final p2p = appState.isP2pConnected(contact.userId);
+                          final online =
+                              appState.isContactOnline(contact.userId);
                           final messages = appState.messagesFor(contact.userId);
                           final last = messages.isEmpty ? null : messages.last;
                           final initial = contact.displayName.isEmpty
@@ -80,6 +82,7 @@ class HomeScreen extends StatelessWidget {
                             leading: _AvatarView(
                               bytesBase64: contact.avatarBytesBase64,
                               fallback: initial,
+                              online: online,
                             ),
                             title: Text(contact.displayName),
                             subtitle: Text(
@@ -200,6 +203,8 @@ class HomeScreen extends StatelessWidget {
       PlainPayloadType.text => last.payload.text ?? '',
       PlainPayloadType.file => 'Plik: ${last.payload.fileName ?? 'zalacznik'}',
       PlainPayloadType.retraction => 'Wiadomosc usunieta',
+      PlainPayloadType.reaction => 'Reakcja na wiadomosc',
+      PlainPayloadType.pin => 'Przypieto wiadomosc',
     };
   }
 }
@@ -224,6 +229,7 @@ class _IdentityPanel extends StatelessWidget {
             _AvatarView(
               bytesBase64: appState.ownProfile?.avatarBytesBase64,
               fallback: initial,
+              online: appState.relayConnected,
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -290,18 +296,42 @@ class _AvatarView extends StatelessWidget {
   const _AvatarView({
     required this.bytesBase64,
     required this.fallback,
+    required this.online,
   });
 
   final String? bytesBase64;
   final String fallback;
+  final bool online;
 
   @override
   Widget build(BuildContext context) {
     final bytes = _decodeAvatar();
-    return CircleAvatar(
-      radius: 22,
-      backgroundImage: bytes == null ? null : MemoryImage(bytes),
-      child: bytes == null ? Text(fallback) : null,
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        CircleAvatar(
+          radius: 22,
+          backgroundImage: bytes == null ? null : MemoryImage(bytes),
+          child: bytes == null ? Text(fallback) : null,
+        ),
+        if (online)
+          Positioned(
+            right: -1,
+            bottom: -1,
+            child: Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: Colors.green.shade500,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.surface,
+                  width: 2,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 

@@ -2,7 +2,7 @@ enum MessageDirection { inbound, outbound, system }
 
 enum MessageStatus { pending, sent, delivered, failed }
 
-enum PlainPayloadType { text, file, retraction }
+enum PlainPayloadType { text, file, retraction, reaction, pin }
 
 class PlainPayload {
   const PlainPayload.text(this.text)
@@ -11,7 +11,9 @@ class PlainPayload {
         mimeType = null,
         fileBytesBase64 = null,
         fileSize = null,
-        targetMessageId = null;
+        targetMessageId = null,
+        reactionEmoji = null,
+        pinPinned = null;
 
   const PlainPayload.file({
     required this.fileName,
@@ -20,7 +22,9 @@ class PlainPayload {
     this.mimeType,
   })  : type = PlainPayloadType.file,
         text = null,
-        targetMessageId = null;
+        targetMessageId = null,
+        reactionEmoji = null,
+        pinPinned = null;
 
   const PlainPayload.retraction({
     required this.targetMessageId,
@@ -29,7 +33,31 @@ class PlainPayload {
         fileName = null,
         mimeType = null,
         fileBytesBase64 = null,
-        fileSize = null;
+        fileSize = null,
+        reactionEmoji = null,
+        pinPinned = null;
+
+  const PlainPayload.reaction({
+    required this.targetMessageId,
+    this.reactionEmoji,
+  })  : type = PlainPayloadType.reaction,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        pinPinned = null;
+
+  const PlainPayload.pin({
+    required this.targetMessageId,
+    required this.pinPinned,
+  })  : type = PlainPayloadType.pin,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        reactionEmoji = null;
 
   final PlainPayloadType type;
   final String? text;
@@ -38,6 +66,8 @@ class PlainPayload {
   final String? fileBytesBase64;
   final int? fileSize;
   final String? targetMessageId;
+  final String? reactionEmoji;
+  final bool? pinPinned;
 
   Map<String, dynamic> toJson() => switch (type) {
         PlainPayloadType.text => {
@@ -57,6 +87,18 @@ class PlainPayload {
             'v': 1,
             'type': 'retraction',
             'targetMessageId': targetMessageId,
+          },
+        PlainPayloadType.reaction => {
+            'v': 1,
+            'type': 'reaction',
+            'targetMessageId': targetMessageId,
+            'emoji': reactionEmoji,
+          },
+        PlainPayloadType.pin => {
+            'v': 1,
+            'type': 'pin',
+            'targetMessageId': targetMessageId,
+            'pinned': pinPinned,
           },
       };
 
@@ -78,6 +120,26 @@ class PlainPayload {
               'Brak identyfikatora cofanej wiadomosci.');
         }
         return PlainPayload.retraction(targetMessageId: targetMessageId);
+      case 'reaction':
+        final targetMessageId = json['targetMessageId'] as String?;
+        if (targetMessageId == null || targetMessageId.isEmpty) {
+          throw const FormatException(
+              'Brak identyfikatora wiadomosci dla reakcji.');
+        }
+        return PlainPayload.reaction(
+          targetMessageId: targetMessageId,
+          reactionEmoji: json['emoji'] as String?,
+        );
+      case 'pin':
+        final targetMessageId = json['targetMessageId'] as String?;
+        if (targetMessageId == null || targetMessageId.isEmpty) {
+          throw const FormatException(
+              'Brak identyfikatora wiadomosci dla przypiecia.');
+        }
+        return PlainPayload.pin(
+          targetMessageId: targetMessageId,
+          pinPinned: json['pinned'] == true,
+        );
       default:
         throw const FormatException('Nieznany typ payloadu.');
     }
@@ -93,6 +155,8 @@ class ChatMessage {
     required this.createdAt,
     required this.status,
     this.retracted = false,
+    this.pinned = false,
+    this.reactions = const {},
     this.transport,
     this.error,
   });
@@ -104,6 +168,8 @@ class ChatMessage {
   final DateTime createdAt;
   final MessageStatus status;
   final bool retracted;
+  final bool pinned;
+  final Map<String, String> reactions;
   final String? transport;
   final String? error;
 
@@ -116,6 +182,8 @@ class ChatMessage {
         'createdAt': createdAt.toUtc().toIso8601String(),
         'status': status.name,
         'retracted': retracted,
+        'pinned': pinned,
+        'reactions': reactions,
         'transport': transport,
         'error': error,
       };
@@ -130,6 +198,9 @@ class ChatMessage {
       createdAt: DateTime.parse(json['createdAt'] as String),
       status: MessageStatus.values.byName(json['status'] as String),
       retracted: json['retracted'] == true,
+      pinned: json['pinned'] == true,
+      reactions: ((json['reactions'] as Map?) ?? const {})
+          .map((key, value) => MapEntry(key.toString(), value.toString())),
       transport: json['transport'] as String?,
       error: json['error'] as String?,
     );
@@ -139,6 +210,8 @@ class ChatMessage {
     PlainPayload? payload,
     MessageStatus? status,
     bool? retracted,
+    bool? pinned,
+    Map<String, String>? reactions,
     String? transport,
     String? error,
   }) {
@@ -150,6 +223,8 @@ class ChatMessage {
       createdAt: createdAt,
       status: status ?? this.status,
       retracted: retracted ?? this.retracted,
+      pinned: pinned ?? this.pinned,
+      reactions: reactions ?? this.reactions,
       transport: transport ?? this.transport,
       error: error ?? this.error,
     );

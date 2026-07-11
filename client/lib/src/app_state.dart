@@ -40,12 +40,14 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _relayEnvelopeToMessage = {};
   final Map<String, String> _signalEnvelopeToContact = {};
   final Map<String, bool> _p2pConnected = {};
+  final Map<String, bool> _relayPresence = {};
 
   IdentityKeyMaterial? _identity;
   UserProfile? _ownProfile;
   RelaySettings? _relaySettings;
   RelayClient? _relay;
   StreamSubscription<RelayEvent>? _relaySubscription;
+  Timer? _presenceTimer;
   WebRtcTransport? _p2p;
   bool _relayConnected = false;
   bool _initializing = true;
@@ -69,6 +71,11 @@ class AppState extends ChangeNotifier {
   }
 
   bool isP2pConnected(String contactId) => _p2pConnected[contactId] == true;
+
+  bool isContactOnline(String contactId) {
+    return _p2pConnected[contactId] == true ||
+        _relayPresence[contactId] == true;
+  }
 
   Future<void> initialize() async {
     try {
@@ -124,6 +131,8 @@ class AppState extends ChangeNotifier {
 
     _relayConnected = false;
     _p2pConnected.clear();
+    _relayPresence.clear();
+    _presenceTimer?.cancel();
     _relay = RelayClient(settings: settings, identity: identity);
     _p2p = WebRtcTransport(
       localUserId: identity.userId,
@@ -265,6 +274,75 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> deleteConversationLocally(String contactId) async {
+    if (!_messages.containsKey(contactId)) return;
+    _messages.remove(contactId);
+    await _persistMessages();
+    notifyListeners();
+  }
+
+  Future<void> reactToMessage(
+    Contact contact,
+    ChatMessage message,
+    String? emoji,
+  ) async {
+    if (message.contactId != contact.userId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tego kontaktu.');
+    }
+    if (message.direction == MessageDirection.system || message.retracted) {
+      throw StateError('Nie mozna zareagowac na te wiadomosc.');
+    }
+
+    final identity = _requireIdentity();
+    final normalizedEmoji = emoji?.trim();
+    final session = await _ensureSession(contact);
+    final packet = await _crypto.encryptPayload(
+      session: session,
+      from: identity.userId,
+      to: contact.userId,
+      payload: PlainPayload.reaction(
+        targetMessageId: message.id,
+        reactionEmoji: normalizedEmoji == null || normalizedEmoji.isEmpty
+            ? null
+            : normalizedEmoji,
+      ),
+    );
+    await _sendEncryptedPacket(contact, packet);
+    _applyReaction(
+      contact.userId,
+      message.id,
+      identity.userId,
+      normalizedEmoji,
+    );
+  }
+
+  Future<void> setMessagePinned(
+    Contact contact,
+    ChatMessage message,
+    bool pinned,
+  ) async {
+    if (message.contactId != contact.userId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tego kontaktu.');
+    }
+    if (message.direction == MessageDirection.system || message.retracted) {
+      return;
+    }
+
+    final identity = _requireIdentity();
+    final session = await _ensureSession(contact);
+    final packet = await _crypto.encryptPayload(
+      session: session,
+      from: identity.userId,
+      to: contact.userId,
+      payload: PlainPayload.pin(
+        targetMessageId: message.id,
+        pinPinned: pinned,
+      ),
+    );
+    await _sendEncryptedPacket(contact, packet);
+    _applyPin(contact.userId, message.id, pinned);
+  }
+
   Future<void> sendFile(Contact contact) async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: false,
@@ -277,6 +355,20 @@ class AppState extends ChangeNotifier {
     if (bytes == null) {
       throw StateError('Nie mozna odczytac pliku na tej platformie.');
     }
+    await sendFileBytes(
+      contact,
+      fileName: file.name,
+      bytes: bytes,
+      mimeType: _guessMimeType(file.name),
+    );
+  }
+
+  Future<void> sendFileBytes(
+    Contact contact, {
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+  }) async {
     final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
     final effectiveLimit = relayAwareLimit < maxPlainFileBytes
         ? relayAwareLimit
@@ -289,8 +381,8 @@ class AppState extends ChangeNotifier {
     await _sendPlainPayload(
       contact,
       PlainPayload.file(
-        fileName: file.name,
-        mimeType: _guessMimeType(file.name),
+        fileName: fileName,
+        mimeType: mimeType ?? _guessMimeType(fileName),
         fileSize: bytes.length,
         fileBytesBase64: b64(bytes),
       ),
@@ -314,6 +406,8 @@ class AppState extends ChangeNotifier {
     _relayEnvelopeToMessage.clear();
     _signalEnvelopeToContact.clear();
     _p2pConnected.clear();
+    _relayPresence.clear();
+    _presenceTimer?.cancel();
     _relayConnected = false;
     await _messageArchive.delete();
     _setStatus('Wyczyszczono lokalne dane.');
@@ -412,6 +506,7 @@ class AppState extends ChangeNotifier {
         final contactIds = _contacts.map((contact) => contact.userId).toList();
         _relay?.queryPresence(contactIds);
         _relay?.queryProfiles(contactIds);
+        _startPresencePolling();
         break;
       case RelayDeliver():
         if (event.kind == 'signal') {
@@ -447,15 +542,30 @@ class AppState extends ChangeNotifier {
         }
         break;
       case RelayPresence():
+        _relayPresence
+          ..clear()
+          ..addAll(event.contacts);
+        notifyListeners();
         break;
       case RelayProfile():
         await _applyContactProfile(event.userId, event.profile);
         break;
       case RelayProblem():
         _relayConnected = false;
+        _relayPresence.clear();
+        _presenceTimer?.cancel();
         _setStatus(event.message);
         break;
     }
+  }
+
+  void _startPresencePolling() {
+    _presenceTimer?.cancel();
+    _presenceTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!_relayConnected) return;
+      _relay
+          ?.queryPresence(_contacts.map((contact) => contact.userId).toList());
+    });
   }
 
   Future<void> _handleSignal(RelayDeliver event) async {
@@ -549,6 +659,23 @@ class AppState extends ChangeNotifier {
         );
         return;
       }
+      if (decrypted.payload.type == PlainPayloadType.reaction) {
+        _applyReaction(
+          from,
+          decrypted.payload.targetMessageId!,
+          from,
+          decrypted.payload.reactionEmoji,
+        );
+        return;
+      }
+      if (decrypted.payload.type == PlainPayloadType.pin) {
+        _applyPin(
+          from,
+          decrypted.payload.targetMessageId!,
+          decrypted.payload.pinPinned == true,
+        );
+        return;
+      }
       _addMessage(
         ChatMessage(
           id: decrypted.messageId,
@@ -604,6 +731,8 @@ class AppState extends ChangeNotifier {
       list[index] = message.copyWith(
         payload: const PlainPayload.text(''),
         retracted: true,
+        pinned: false,
+        reactions: const {},
       );
       unawaited(_persistMessages());
       notifyListeners();
@@ -623,6 +752,54 @@ class AppState extends ChangeNotifier {
         transport: fallbackTransport,
       ),
     );
+    unawaited(_persistMessages());
+    notifyListeners();
+    return true;
+  }
+
+  bool _applyReaction(
+    String contactId,
+    String messageId,
+    String reactorId,
+    String? emoji,
+  ) {
+    final list = _messages[contactId];
+    if (list == null) return false;
+    final index = list.indexWhere((message) => message.id == messageId);
+    if (index < 0) return false;
+
+    final message = list[index];
+    if (message.direction == MessageDirection.system || message.retracted) {
+      return false;
+    }
+
+    final reactions = Map<String, String>.of(message.reactions);
+    final normalizedEmoji = emoji?.trim();
+    if (normalizedEmoji == null || normalizedEmoji.isEmpty) {
+      reactions.remove(reactorId);
+    } else {
+      reactions[reactorId] = normalizedEmoji;
+    }
+
+    list[index] = message.copyWith(reactions: reactions);
+    unawaited(_persistMessages());
+    notifyListeners();
+    return true;
+  }
+
+  bool _applyPin(String contactId, String messageId, bool pinned) {
+    final list = _messages[contactId];
+    if (list == null) return false;
+    final index = list.indexWhere((message) => message.id == messageId);
+    if (index < 0) return false;
+
+    final message = list[index];
+    if (message.direction == MessageDirection.system || message.retracted) {
+      return false;
+    }
+
+    if (message.pinned == pinned) return true;
+    list[index] = message.copyWith(pinned: pinned);
     unawaited(_persistMessages());
     notifyListeners();
     return true;
@@ -751,6 +928,17 @@ class AppState extends ChangeNotifier {
       'gif' => 'image/gif',
       'webp' => 'image/webp',
       'bmp' => 'image/bmp',
+      'mp3' => 'audio/mpeg',
+      'wav' => 'audio/wav',
+      'ogg' => 'audio/ogg',
+      'm4a' => 'audio/mp4',
+      'aac' => 'audio/aac',
+      'flac' => 'audio/flac',
+      'mp4' => 'video/mp4',
+      'mov' => 'video/quicktime',
+      'webm' => 'video/webm',
+      'mkv' => 'video/x-matroska',
+      'avi' => 'video/x-msvideo',
       'txt' => 'text/plain',
       'pdf' => 'application/pdf',
       'zip' => 'application/zip',
@@ -760,6 +948,7 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _presenceTimer?.cancel();
     unawaited(_relaySubscription?.cancel());
     unawaited(_relay?.dispose());
     unawaited(_p2p?.dispose());

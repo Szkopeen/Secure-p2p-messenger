@@ -116,6 +116,8 @@ class DesktopNotifier {
       PlainPayloadType.text => _trim(payload.text ?? ''),
       PlainPayloadType.file => 'Plik: ${payload.fileName ?? 'zalacznik'}',
       PlainPayloadType.retraction => 'Wiadomosc zostala usunieta.',
+      PlainPayloadType.reaction => 'Reakcja na wiadomosc.',
+      PlainPayloadType.pin => 'Przypieto wiadomosc.',
     };
   }
 
