@@ -6,6 +6,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../crypto/codec.dart';
 import '../models/contact.dart';
 import '../models/identity.dart';
+import '../models/session.dart';
+import '../models/user_profile.dart';
 
 class SecureStore {
   SecureStore({
@@ -18,6 +20,9 @@ class SecureStore {
   static const _identityPublicKey = 'identity.ed25519.public';
   static const _relaySettings = 'relay.settings';
   static const _contacts = 'contacts.v1';
+  static const _localArchiveKey = 'local.archive.key.v1';
+  static const _ownProfile = 'profile.public.v1';
+  static const _sessions = 'sessions.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -26,7 +31,8 @@ class SecureStore {
     await _storage.write(key: _identityUserId, value: identity.userId);
     await _storage.write(key: _identityDeviceId, value: identity.deviceId);
     await _storage.write(key: _identityPrivateKey, value: b64(privateKeyBytes));
-    await _storage.write(key: _identityPublicKey, value: b64(identity.publicKey.bytes));
+    await _storage.write(
+        key: _identityPublicKey, value: b64(identity.publicKey.bytes));
   }
 
   Future<IdentityKeyMaterial?> loadIdentity() async {
@@ -35,7 +41,10 @@ class SecureStore {
     final privateKey = await _storage.read(key: _identityPrivateKey);
     final publicKey = await _storage.read(key: _identityPublicKey);
 
-    if (userId == null || deviceId == null || privateKey == null || publicKey == null) {
+    if (userId == null ||
+        deviceId == null ||
+        privateKey == null ||
+        publicKey == null) {
       return null;
     }
 
@@ -55,7 +64,8 @@ class SecureStore {
   }
 
   Future<void> saveRelaySettings(RelaySettings settings) async {
-    await _storage.write(key: _relaySettings, value: jsonEncode(settings.toJson()));
+    await _storage.write(
+        key: _relaySettings, value: jsonEncode(settings.toJson()));
   }
 
   Future<RelaySettings?> loadRelaySettings() async {
@@ -80,7 +90,53 @@ class SecureStore {
         .toList(growable: false);
   }
 
+  Future<void> saveOwnProfile(UserProfile profile) async {
+    await _storage.write(key: _ownProfile, value: jsonEncode(profile.toJson()));
+  }
+
+  Future<UserProfile?> loadOwnProfile() async {
+    final raw = await _storage.read(key: _ownProfile);
+    if (raw == null || raw.isEmpty) return null;
+    return UserProfile.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  }
+
+  Future<void> saveSessions(Iterable<SessionState> sessions) async {
+    final items = <Map<String, dynamic>>[];
+    for (final session in sessions) {
+      items.add({
+        'contactId': session.contactId,
+        'sessionId': session.sessionId,
+        'secretKey': b64(await session.secretKey.extractBytes()),
+        'createdAt': session.createdAt.toUtc().toIso8601String(),
+      });
+    }
+    await _storage.write(key: _sessions, value: jsonEncode(items));
+  }
+
+  Future<List<SessionState>> loadSessions() async {
+    final raw = await _storage.read(key: _sessions);
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list.map((item) {
+      final json = (item as Map).cast<String, dynamic>();
+      return SessionState(
+        contactId: json['contactId'] as String,
+        sessionId: json['sessionId'] as String,
+        secretKey: SecretKey(unb64(json['secretKey'] as String)),
+        createdAt: DateTime.parse(json['createdAt'] as String),
+      );
+    }).toList(growable: false);
+  }
+
   Future<void> wipeLocalSecrets() async {
     await _storage.deleteAll();
+  }
+
+  Future<String?> loadLocalArchiveKey() {
+    return _storage.read(key: _localArchiveKey);
+  }
+
+  Future<void> saveLocalArchiveKey(String value) {
+    return _storage.write(key: _localArchiveKey, value: value);
   }
 }

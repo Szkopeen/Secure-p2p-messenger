@@ -84,3 +84,42 @@ export function validatePresenceQuery(message) {
   }
   return null;
 }
+
+export function validateProfileQuery(message) {
+  if (!isObject(message) || message.v !== 1 || message.type !== 'profile_query') {
+    return 'Niepoprawny pakiet profile_query.';
+  }
+  if (!Array.isArray(message.contacts) || message.contacts.length > 200) {
+    return 'Lista kontaktow jest niepoprawna.';
+  }
+  for (const contact of message.contacts) {
+    if (!isSafeId(contact)) return 'Lista kontaktow zawiera niepoprawny identyfikator.';
+  }
+  return null;
+}
+
+export function validateProfileUpdate(message, maxAvatarBytes) {
+  if (!isObject(message) || message.v !== 1 || message.type !== 'profile_update') {
+    return 'Niepoprawny pakiet profile_update.';
+  }
+  const profile = message.profile;
+  if (!isObject(profile) || profile.v !== 1) return 'Niepoprawny profil.';
+  if (profile.avatarBytes !== undefined && profile.avatarBytes !== null) {
+    if (typeof profile.avatarBytes !== 'string') return 'Niepoprawny avatar.';
+    if (Buffer.byteLength(profile.avatarBytes, 'base64') > maxAvatarBytes) {
+      return 'Avatar jest za duzy.';
+    }
+  }
+  if (profile.avatarMimeType !== undefined && profile.avatarMimeType !== null) {
+    if (typeof profile.avatarMimeType !== 'string') return 'Niepoprawny avatarMimeType.';
+    if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp'].includes(profile.avatarMimeType)) {
+      return 'Nieobslugiwany typ avatara.';
+    }
+  }
+  if (profile.updatedAt !== undefined && profile.updatedAt !== null) {
+    if (typeof profile.updatedAt !== 'string' || Number.isNaN(Date.parse(profile.updatedAt))) {
+      return 'Niepoprawny updatedAt profilu.';
+    }
+  }
+  return null;
+}

@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../crypto/codec.dart';
 import '../models/identity.dart';
+import '../models/user_profile.dart';
 
 abstract class RelayEvent {
   const RelayEvent();
@@ -47,12 +48,14 @@ class RelaySent extends RelayEvent {
     required this.to,
     required this.transport,
     required this.deliveredConnections,
+    this.queued = false,
   });
 
   final String id;
   final String to;
   final String transport;
   final int deliveredConnections;
+  final bool queued;
 }
 
 class RelayPresence extends RelayEvent {
@@ -68,6 +71,16 @@ class RelayProblem extends RelayEvent {
   final String? code;
 }
 
+class RelayProfile extends RelayEvent {
+  const RelayProfile({
+    required this.userId,
+    required this.profile,
+  });
+
+  final String userId;
+  final UserProfile profile;
+}
+
 class RelayClient {
   RelayClient({
     required this.settings,
@@ -77,7 +90,8 @@ class RelayClient {
   final RelaySettings settings;
   final IdentityKeyMaterial identity;
   final Uuid _uuid = const Uuid();
-  final StreamController<RelayEvent> _events = StreamController<RelayEvent>.broadcast();
+  final StreamController<RelayEvent> _events =
+      StreamController<RelayEvent>.broadcast();
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
@@ -88,14 +102,17 @@ class RelayClient {
   Future<void> connect() async {
     final uri = Uri.parse(settings.serverUrl);
     if (uri.scheme != 'ws' && uri.scheme != 'wss') {
-      throw ArgumentError('Adres relay musi zaczynac sie od ws:// albo wss://.');
+      throw ArgumentError(
+          'Adres relay musi zaczynac sie od ws:// albo wss://.');
     }
 
     _channel = WebSocketChannel.connect(uri);
     _subscription = _channel!.stream.listen(
       _handleRawMessage,
-      onError: (Object error) => _events.add(RelayProblem('Blad polaczenia: $error')),
-      onDone: () => _events.add(const RelayProblem('Polaczenie z relay zostalo zamkniete.')),
+      onError: (Object error) =>
+          _events.add(RelayProblem('Blad polaczenia: $error')),
+      onDone: () => _events
+          .add(const RelayProblem('Polaczenie z relay zostalo zamkniete.')),
     );
 
     _send({
@@ -165,6 +182,22 @@ class RelayClient {
     });
   }
 
+  void queryProfiles(List<String> contacts) {
+    _send({
+      'v': 1,
+      'type': 'profile_query',
+      'contacts': contacts,
+    });
+  }
+
+  void updateProfile(UserProfile profile) {
+    _send({
+      'v': 1,
+      'type': 'profile_update',
+      'profile': profile.toJson(),
+    });
+  }
+
   void _send(Map<String, dynamic> message) {
     final channel = _channel;
     if (channel == null) {
@@ -205,7 +238,9 @@ class RelayClient {
               id: requiredString(message, 'id'),
               to: requiredString(message, 'to'),
               transport: requiredString(message, 'transport'),
-              deliveredConnections: requiredInt(message, 'deliveredConnections'),
+              deliveredConnections:
+                  requiredInt(message, 'deliveredConnections'),
+              queued: message['queued'] == true,
             ),
           );
           break;
@@ -216,6 +251,29 @@ class RelayClient {
               contacts.map((key, value) => MapEntry(key, value == true)),
             ),
           );
+          break;
+        case 'profile':
+          _events.add(
+            RelayProfile(
+              userId: requiredString(message, 'userId'),
+              profile: UserProfile.fromJson(
+                asStringKeyMap(message['profile'], 'profile'),
+              ),
+            ),
+          );
+          break;
+        case 'profiles':
+          final profiles = asStringKeyMap(message['profiles'], 'profiles');
+          for (final entry in profiles.entries) {
+            _events.add(
+              RelayProfile(
+                userId: entry.key,
+                profile: UserProfile.fromJson(
+                  asStringKeyMap(entry.value, 'profile'),
+                ),
+              ),
+            );
+          }
           break;
         case 'pong':
           break;

@@ -10,11 +10,14 @@ dependencies:
   flutter:
     sdk: flutter
   archive: ^3.6.1
+  audioplayers: ^6.8.1
   crypto: ^3.0.6
   cryptography: ^2.7.0
   file_picker: ^8.3.1
   flutter_secure_storage: ^9.2.4
   flutter_webrtc: ^0.12.7
+  local_notifier: ^0.1.6
+  path_provider: ^2.1.5
   uuid: ^4.5.1
   web_socket_channel: ^3.0.1
 
@@ -25,3 +28,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/sounds/notification.mp3

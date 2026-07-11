@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'app_state.dart';
 import 'screens/home_screen.dart';
 import 'screens/setup_screen.dart';
+import 'services/desktop_notifier.dart';
 
 class SecureMessengerApp extends StatefulWidget {
   const SecureMessengerApp({super.key});
@@ -11,20 +12,29 @@ class SecureMessengerApp extends StatefulWidget {
   State<SecureMessengerApp> createState() => _SecureMessengerAppState();
 }
 
-class _SecureMessengerAppState extends State<SecureMessengerApp> {
+class _SecureMessengerAppState extends State<SecureMessengerApp> with WidgetsBindingObserver {
   late final AppState appState;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    DesktopNotifier.instance.setAppActive(true);
     appState = AppState();
     appState.initialize();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     appState.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final active = state == AppLifecycleState.resumed;
+    DesktopNotifier.instance.setAppActive(active);
   }
 
   @override

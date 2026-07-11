@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import process from 'node:process';
 import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './config.js';
@@ -8,12 +10,19 @@ import {
   safeJsonParse,
   validateHello,
   validatePresenceQuery,
+  validateProfileQuery,
+  validateProfileUpdate,
   validateRelay,
   validateSignal
 } from './protocol.js';
 import { SlidingWindowRateLimiter } from './rateLimiter.js';
 
 const users = new Map();
+const profiles = new Map();
+const offlineQueues = new Map();
+
+loadProfiles();
+loadOfflineQueues();
 
 function audit(message, fields = {}) {
   if (!config.securityLogs) return;
@@ -21,6 +30,145 @@ function audit(message, fields = {}) {
   delete safeFields.payload;
   delete safeFields.relayToken;
   console.info(JSON.stringify({ time: new Date().toISOString(), message, ...safeFields }));
+}
+
+function loadOfflineQueues() {
+  try {
+    if (!fs.existsSync(config.offlineQueueFile)) return;
+    const raw = fs.readFileSync(config.offlineQueueFile, 'utf8');
+    const decoded = JSON.parse(raw);
+    if (!decoded || decoded.v !== 1 || !decoded.queues) return;
+
+    const now = Date.now();
+    for (const [userId, items] of Object.entries(decoded.queues)) {
+      if (!Array.isArray(items)) continue;
+      const liveItems = items.filter((item) => item.expiresAt > now && item.envelope);
+      if (liveItems.length > 0) offlineQueues.set(userId, liveItems);
+    }
+  } catch (error) {
+    audit('Nie wczytano kolejki offline', { error: String(error) });
+  }
+}
+
+function loadProfiles() {
+  try {
+    if (!fs.existsSync(config.publicProfilesFile)) return;
+    const raw = fs.readFileSync(config.publicProfilesFile, 'utf8');
+    const decoded = JSON.parse(raw);
+    if (!decoded || decoded.v !== 1 || !decoded.profiles) return;
+
+    for (const [userId, profile] of Object.entries(decoded.profiles)) {
+      profiles.set(userId, sanitizeProfile(profile));
+    }
+  } catch (error) {
+    audit('Nie wczytano profili publicznych', { error: String(error) });
+  }
+}
+
+function persistProfiles() {
+  try {
+    const dir = path.dirname(config.publicProfilesFile);
+    fs.mkdirSync(dir, { recursive: true });
+    const savedProfiles = {};
+    for (const [userId, profile] of profiles.entries()) {
+      savedProfiles[userId] = profile;
+    }
+    fs.writeFileSync(
+      config.publicProfilesFile,
+      JSON.stringify({ v: 1, savedAt: new Date().toISOString(), profiles: savedProfiles }),
+      'utf8'
+    );
+  } catch (error) {
+    audit('Nie zapisano profili publicznych', { error: String(error) });
+  }
+}
+
+function persistOfflineQueues() {
+  try {
+    const dir = path.dirname(config.offlineQueueFile);
+    fs.mkdirSync(dir, { recursive: true });
+    const queues = {};
+    for (const [userId, items] of offlineQueues.entries()) {
+      queues[userId] = items;
+    }
+    fs.writeFileSync(
+      config.offlineQueueFile,
+      JSON.stringify({ v: 1, savedAt: new Date().toISOString(), queues }),
+      'utf8'
+    );
+  } catch (error) {
+    audit('Nie zapisano kolejki offline', { error: String(error) });
+  }
+}
+
+function pruneOfflineQueues() {
+  const now = Date.now();
+  let changed = false;
+  for (const [userId, items] of offlineQueues.entries()) {
+    const liveItems = items.filter((item) => item.expiresAt > now);
+    if (liveItems.length === 0) {
+      offlineQueues.delete(userId);
+      changed = true;
+    } else if (liveItems.length !== items.length) {
+      offlineQueues.set(userId, liveItems);
+      changed = true;
+    }
+  }
+  if (changed) persistOfflineQueues();
+}
+
+function enqueueOffline(to, envelope) {
+  pruneOfflineQueues();
+  const queue = offlineQueues.get(to) || [];
+  queue.push({
+    queuedAt: Date.now(),
+    expiresAt: Date.now() + config.offlineQueueTtlMs,
+    envelope
+  });
+  while (queue.length > config.offlineQueueMaxPerUser) {
+    queue.shift();
+  }
+  offlineQueues.set(to, queue);
+  persistOfflineQueues();
+  return true;
+}
+
+function flushOfflineQueue(userId) {
+  pruneOfflineQueues();
+  const queue = offlineQueues.get(userId);
+  if (!queue || queue.length === 0) return 0;
+
+  let delivered = 0;
+  for (const item of queue) {
+    delivered += forwardToUser(userId, {
+      ...item.envelope,
+      queued: true,
+      queuedAt: new Date(item.queuedAt).toISOString()
+    });
+  }
+  offlineQueues.delete(userId);
+  persistOfflineQueues();
+  return delivered;
+}
+
+function sanitizeProfile(profile) {
+  return {
+    v: 1,
+    avatarMimeType: profile.avatarMimeType || null,
+    avatarBytes: profile.avatarBytes || null,
+    updatedAt: profile.updatedAt || new Date().toISOString()
+  };
+}
+
+function sendProfileToUser(userId, targetUserId) {
+  const profile = profiles.get(targetUserId);
+  if (!profile) return;
+  forwardToUser(userId, {
+    v: 1,
+    type: 'profile',
+    userId: targetUserId,
+    profile
+  });
 }
 
 function timingSafeTokenEquals(received) {
@@ -108,6 +256,10 @@ function handleHello(ws, state, message) {
     serverTime: new Date().toISOString(),
     maxPayloadBytes: config.maxPayloadBytes
   });
+  const flushed = flushOfflineQueue(state.userId);
+  if (flushed > 0) {
+    audit('Dostarczono kolejke offline', { userId: state.userId, delivered: flushed });
+  }
 }
 
 function handleRelay(ws, state, message) {
@@ -129,13 +281,15 @@ function handleRelay(ws, state, message) {
   };
 
   const deliveredConnections = forwardToUser(message.to, envelope);
+  const queued = deliveredConnections === 0 ? enqueueOffline(message.to, envelope) : false;
   send(ws, {
     v: 1,
     type: 'sent',
     id: message.id,
     to: message.to,
     transport: 'relay',
-    deliveredConnections
+    deliveredConnections,
+    queued
   });
 }
 
@@ -185,6 +339,46 @@ function handlePresenceQuery(ws, message) {
     v: 1,
     type: 'presence',
     contacts: result,
+    serverTime: new Date().toISOString()
+  });
+}
+
+function handleProfileUpdate(ws, state, message) {
+  const error = validateProfileUpdate(message, config.profileAvatarMaxBytes);
+  if (error) {
+    send(ws, { v: 1, type: 'error', code: 'bad_profile', reason: error });
+    return;
+  }
+
+  const profile = sanitizeProfile(message.profile);
+  profiles.set(state.userId, profile);
+  persistProfiles();
+  audit('Zaktualizowano profil publiczny', { userId: state.userId });
+
+  for (const [userId] of users.entries()) {
+    if (userId !== state.userId) {
+      sendProfileToUser(userId, state.userId);
+    }
+  }
+}
+
+function handleProfileQuery(ws, message) {
+  const error = validateProfileQuery(message);
+  if (error) {
+    send(ws, { v: 1, type: 'error', code: 'bad_profile_query', reason: error });
+    return;
+  }
+
+  const result = {};
+  for (const contact of message.contacts) {
+    const profile = profiles.get(contact);
+    if (profile) result[contact] = profile;
+  }
+
+  send(ws, {
+    v: 1,
+    type: 'profiles',
+    profiles: result,
     serverTime: new Date().toISOString()
   });
 }
@@ -253,6 +447,12 @@ wss.on('connection', (ws, request) => {
       case 'presence_query':
         handlePresenceQuery(ws, message);
         break;
+      case 'profile_update':
+        handleProfileUpdate(ws, state, message);
+        break;
+      case 'profile_query':
+        handleProfileQuery(ws, message);
+        break;
       case 'ping':
         send(ws, { v: 1, type: 'pong', serverTime: new Date().toISOString() });
         break;
@@ -279,9 +479,16 @@ const heartbeat = setInterval(() => {
   }
 }, 30_000);
 
+const offlineQueueMaintenance = setInterval(() => {
+  pruneOfflineQueues();
+}, 60_000);
+
 function shutdown(signal) {
   audit('Zamykanie serwera', { signal });
   clearInterval(heartbeat);
+  clearInterval(offlineQueueMaintenance);
+  persistOfflineQueues();
+  persistProfiles();
   for (const client of wss.clients) {
     client.close(1001, 'Server shutdown');
   }

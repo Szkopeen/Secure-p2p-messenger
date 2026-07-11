@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart' as crypto_hash;
@@ -123,8 +122,10 @@ class CryptoService {
     await _verifyContactSignature(contact, body, signature);
 
     final responderEphemeral = await _keyAgreement.newKeyPair();
-    final responderEphemeralPublic = await responderEphemeral.extractPublicKey();
-    final initiatorEphemeralPublicKey = requiredString(body, 'ephemeralPublicKey');
+    final responderEphemeralPublic =
+        await responderEphemeral.extractPublicKey();
+    final initiatorEphemeralPublicKey =
+        requiredString(body, 'ephemeralPublicKey');
 
     final sharedSecret = await _keyAgreement.sharedSecretKey(
       keyPair: responderEphemeral,
@@ -195,12 +196,15 @@ class CryptoService {
       throw const FormatException('Odpowiedz handshake ma inny sessionId.');
     }
 
-    final initiatorEphemeralPublicKey = requiredString(body, 'initiatorEphemeralPublicKey');
+    final initiatorEphemeralPublicKey =
+        requiredString(body, 'initiatorEphemeralPublicKey');
     if (initiatorEphemeralPublicKey != pending.ephemeralPublicKey) {
-      throw const FormatException('Odpowiedz handshake nie pasuje do efemerycznego klucza.');
+      throw const FormatException(
+          'Odpowiedz handshake nie pasuje do efemerycznego klucza.');
     }
 
-    final responderEphemeralPublicKey = requiredString(body, 'responderEphemeralPublicKey');
+    final responderEphemeralPublicKey =
+        requiredString(body, 'responderEphemeralPublicKey');
     final sharedSecret = await _keyAgreement.sharedSecretKey(
       keyPair: pending.ephemeralKeyPair,
       remotePublicKey: SimplePublicKey(
@@ -279,9 +283,11 @@ class CryptoService {
       throw const FormatException('Pakiet nalezy do innej sesji.');
     }
     if (packet.aad['from'] != expectedFrom || packet.aad['to'] != expectedTo) {
-      throw const FormatException('AAD pakietu nie pasuje do nadawcy lub odbiorcy.');
+      throw const FormatException(
+          'AAD pakietu nie pasuje do nadawcy lub odbiorcy.');
     }
-    if (packet.aad['messageId'] != packet.messageId || packet.aad['sessionId'] != packet.sessionId) {
+    if (packet.aad['messageId'] != packet.messageId ||
+        packet.aad['sessionId'] != packet.sessionId) {
       throw const FormatException('AAD pakietu nie pasuje do koperty.');
     }
     if (packet.compression != 'zlib') {
@@ -319,14 +325,18 @@ class CryptoService {
     required String localUserId,
     required Contact contact,
   }) {
-    if (body['v'] != 1 || body['protocol'] != protocol || body['type'] != expectedType) {
+    if (body['v'] != 1 ||
+        body['protocol'] != protocol ||
+        body['type'] != expectedType) {
       throw const FormatException('Niepoprawny handshake.');
     }
     if (body['from'] != contact.userId || body['to'] != localUserId) {
-      throw const FormatException('Handshake nie pasuje do lokalnego kontaktu.');
+      throw const FormatException(
+          'Handshake nie pasuje do lokalnego kontaktu.');
     }
     if (body['identityPublicKey'] != contact.identityPublicKey) {
-      throw const FormatException('Klucz tozsamosci kontaktu nie zgadza sie z przypietym kluczem.');
+      throw const FormatException(
+          'Klucz tozsamosci kontaktu nie zgadza sie z przypietym kluczem.');
     }
     DateTime.parse(requiredString(body, 'createdAt'));
   }
