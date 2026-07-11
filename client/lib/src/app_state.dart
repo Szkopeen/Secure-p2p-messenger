@@ -30,6 +30,7 @@ class AppState extends ChangeNotifier {
   final Map<String, SessionState> _sessions = {};
   final Map<String, PendingSession> _pendingSessions = {};
   final Map<String, String> _relayEnvelopeToMessage = {};
+  final Map<String, String> _signalEnvelopeToContact = {};
   final Map<String, bool> _p2pConnected = {};
 
   IdentityKeyMaterial? _identity;
@@ -193,6 +194,7 @@ class AppState extends ChangeNotifier {
     _sessions.clear();
     _pendingSessions.clear();
     _relayEnvelopeToMessage.clear();
+    _signalEnvelopeToContact.clear();
     _p2pConnected.clear();
     _relayConnected = false;
     _setStatus('Wyczyszczono lokalne dane.');
@@ -246,11 +248,12 @@ class AppState extends ChangeNotifier {
     final relay = _requireRelay();
     final init = await _crypto.createHandshakeInit(identity: identity, contact: contact);
     _pendingSessions[contact.userId] = init.pendingSession;
-    relay.sendSignal(
+    final signalId = relay.sendSignal(
       to: contact.userId,
       signalType: 'crypto-handshake-init',
       payload: init.wirePayload,
     );
+    _signalEnvelopeToContact[signalId] = contact.userId;
     _addSystemMessage(contact.userId, 'Rozpoczeto nowa sesje E2EE.');
 
     return init.pendingSession.completer.future.timeout(
@@ -288,6 +291,14 @@ class AppState extends ChangeNotifier {
             error: event.deliveredConnections > 0 ? null : 'Kontakt offline.',
           );
         }
+        final signalContactId = _signalEnvelopeToContact.remove(event.id);
+        if (signalContactId != null && event.deliveredConnections == 0) {
+          final pending = _pendingSessions.remove(signalContactId);
+          pending?.completer.completeError(
+            StateError('Kontakt $signalContactId jest offline albo ma inny identyfikator.'),
+          );
+          _setStatus('Nie dostarczono handshake do $signalContactId. Sprawdz dokladny userId kontaktu.');
+        }
         break;
       case RelayPresence():
         break;
@@ -308,17 +319,26 @@ class AppState extends ChangeNotifier {
     switch (event.signalType) {
       case 'crypto-handshake-init':
         final identity = _requireIdentity();
+        final pending = _pendingSessions[contact.userId];
+        final localInitiatedSessionWins = identity.userId.compareTo(contact.userId) < 0;
+        if (pending != null && localInitiatedSessionWins) {
+          _setStatus('Odebrano rownolegly handshake od ${contact.userId}; kontynuujemy lokalna sesje.');
+          return;
+        }
         final accept = await _crypto.acceptHandshakeInit(
           identity: identity,
           contact: contact,
           wirePayload: event.payload,
         );
         _sessions[contact.userId] = accept.session;
-        _requireRelay().sendSignal(
+        final abandonedPending = _pendingSessions.remove(contact.userId);
+        abandonedPending?.completer.complete(accept.session);
+        final signalId = _requireRelay().sendSignal(
           to: contact.userId,
           signalType: 'crypto-handshake-accept',
           payload: accept.wirePayload,
         );
+        _signalEnvelopeToContact[signalId] = contact.userId;
         _addSystemMessage(contact.userId, 'Utworzono nowa sesje E2EE.');
         await _startP2pIfNeeded(contact);
         break;
