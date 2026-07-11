@@ -23,7 +23,7 @@ export const config = Object.freeze({
   maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', 16 * 1024 * 1024, 1024, 64 * 1024 * 1024),
   offlineQueueTtlMs: readInt('OFFLINE_QUEUE_TTL_MS', 7 * 24 * 60 * 60 * 1000, 60_000, 30 * 24 * 60 * 60 * 1000),
   offlineQueueMaxPerUser: readInt('OFFLINE_QUEUE_MAX_PER_USER', 200, 1, 2000),
-  profileAvatarMaxBytes: readInt('PROFILE_AVATAR_MAX_BYTES', 192 * 1024, 1024, 512 * 1024),
+  profileAvatarMaxBytes: readInt('PROFILE_AVATAR_MAX_BYTES', 1024 * 1024, 1024, 1024 * 1024),
   offlineQueueFile: process.env.OFFLINE_QUEUE_FILE || './data/offline-queue.json',
   publicProfilesFile: process.env.PUBLIC_PROFILES_FILE || './data/public-profiles.json',
   rateLimitMessages: readInt('RATE_LIMIT_MESSAGES', 80, 1, 500),

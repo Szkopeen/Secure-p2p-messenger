@@ -27,7 +27,7 @@ class AppState extends ChangeNotifier {
   }
 
   static const maxPlainFileBytes = 8 * 1024 * 1024;
-  static const maxProfileImageBytes = 192 * 1024;
+  static const maxProfileImageBytes = 1024 * 1024;
 
   final SecureStore _store;
   final CryptoService _crypto;
