@@ -1,0 +1,19 @@
+{
+  "name": "secure-p2p-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Prywatny serwer WebSocket do signalingu i przekazywania zaszyfrowanych pakietow E2EE.",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0"
+  }
+}
