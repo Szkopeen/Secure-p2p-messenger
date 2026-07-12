@@ -20,6 +20,7 @@ export const config = Object.freeze({
   host: process.env.HOST || '0.0.0.0',
   port: readInt('PORT', 8443, 1, 65535),
   relayToken: process.env.RELAY_TOKEN || '',
+  adminToken: process.env.ADMIN_TOKEN || '',
   maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', 16 * 1024 * 1024, 1024, 64 * 1024 * 1024),
   offlineQueueTtlMs: readInt('OFFLINE_QUEUE_TTL_MS', 7 * 24 * 60 * 60 * 1000, 60_000, 30 * 24 * 60 * 60 * 1000),
   offlineQueueMaxPerUser: readInt('OFFLINE_QUEUE_MAX_PER_USER', 200, 1, 2000),
@@ -39,4 +40,8 @@ export const config = Object.freeze({
 
 if (config.relayToken.length < 32) {
   throw new Error('RELAY_TOKEN musi miec minimum 32 znaki losowego sekretu.');
+}
+
+if (config.adminToken && config.adminToken.length < 32) {
+  throw new Error('ADMIN_TOKEN musi miec minimum 32 znaki losowego sekretu albo byc pusty.');
 }

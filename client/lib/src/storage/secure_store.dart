@@ -21,6 +21,7 @@ class SecureStore {
   static const _identityPrivateKey = 'identity.ed25519.private';
   static const _identityPublicKey = 'identity.ed25519.public';
   static const _relaySettings = 'relay.settings';
+  static const _adminSettings = 'admin.settings.v1';
   static const _contacts = 'contacts.v1';
   static const _groups = 'groups.v1';
   static const _localArchiveKey = 'local.archive.key.v1';
@@ -77,6 +78,17 @@ class SecureStore {
     final raw = await _storage.read(key: _relaySettings);
     if (raw == null) return null;
     return RelaySettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  }
+
+  Future<void> saveAdminSettings(AdminSettings settings) async {
+    await _storage.write(
+        key: _adminSettings, value: jsonEncode(settings.toJson()));
+  }
+
+  Future<AdminSettings?> loadAdminSettings() async {
+    final raw = await _storage.read(key: _adminSettings);
+    if (raw == null || raw.isEmpty) return null;
+    return AdminSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<void> saveContacts(List<Contact> contacts) async {

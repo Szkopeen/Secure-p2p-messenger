@@ -20,6 +20,8 @@ import {
 } from './protocol.js';
 import { SlidingWindowRateLimiter } from './rateLimiter.js';
 
+const SAFE_USER_ID = /^[a-zA-Z0-9_.:@-]{3,128}$/;
+
 const users = new Map();
 const knownUsers = new Map();
 const profiles = new Map();
@@ -191,6 +193,24 @@ function persistPublicDirectory() {
   }
 }
 
+function persistBannedUsers() {
+  try {
+    const dir = path.dirname(config.bannedUsersFile);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      config.bannedUsersFile,
+      JSON.stringify({
+        v: 1,
+        savedAt: new Date().toISOString(),
+        users: Array.from(bannedUsers).sort((left, right) => left.localeCompare(right))
+      }),
+      'utf8'
+    );
+  } catch (error) {
+    audit('Nie zapisano banlisty', { error: String(error) });
+  }
+}
+
 function persistOfflineQueues() {
   try {
     const dir = path.dirname(config.offlineQueueFile);
@@ -277,6 +297,160 @@ function isBannedUser(userId) {
   return bannedUsers.has(userId);
 }
 
+function envelopeForQueueItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (item.envelope && typeof item.envelope === 'object') return item.envelope;
+  return item;
+}
+
+function collectAdminUserIds() {
+  const ids = new Set();
+  for (const userId of knownUsers.keys()) ids.add(userId);
+  for (const userId of profiles.keys()) ids.add(userId);
+  for (const userId of publicDirectory.keys()) ids.add(userId);
+  for (const userId of offlineQueues.keys()) ids.add(userId);
+  for (const userId of bannedUsers.values()) ids.add(userId);
+  for (const items of offlineQueues.values()) {
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      const envelope = envelopeForQueueItem(item);
+      if (typeof envelope?.from === 'string') ids.add(envelope.from);
+      if (typeof envelope?.to === 'string') ids.add(envelope.to);
+    }
+  }
+  return Array.from(ids).sort((left, right) => left.localeCompare(right));
+}
+
+function adminUserSummary(userId) {
+  const known = knownUsers.get(userId) || null;
+  const profile = profiles.get(userId) || null;
+  const directory = publicDirectory.get(userId) || null;
+  const activeConnections = users.get(userId)?.size || 0;
+  const queuedIn = offlineQueues.get(userId)?.length || 0;
+  let queuedOut = 0;
+  for (const items of offlineQueues.values()) {
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      const envelope = envelopeForQueueItem(item);
+      if (envelope?.from === userId) queuedOut += 1;
+    }
+  }
+
+  return {
+    userId,
+    displayName: directory?.displayName || null,
+    known: Boolean(known),
+    directory: Boolean(directory),
+    profile: Boolean(profile),
+    banned: bannedUsers.has(userId),
+    online: activeConnections > 0,
+    activeConnections,
+    queuedIn,
+    queuedOut,
+    firstSeenAt: known?.firstSeenAt || null,
+    lastSeenAt: known?.lastSeenAt || null,
+    lastDeviceId: known?.lastDeviceId || null,
+    identityPublicKey: known?.identityPublicKey || directory?.identityPublicKey || null
+  };
+}
+
+function closeUserConnections(userId, reason) {
+  const active = users.get(userId);
+  if (!active) return 0;
+  let closed = 0;
+  for (const { ws } of active.values()) {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      try {
+        ws.close(1008, reason);
+      } catch {
+        ws.terminate();
+      }
+      closed += 1;
+    }
+  }
+  users.delete(userId);
+  return closed;
+}
+
+function validateAdminUserId(userId) {
+  return typeof userId === 'string' && SAFE_USER_ID.test(userId);
+}
+
+function deleteAdminUser(userId, { ban }) {
+  const changed = [];
+  if (knownUsers.delete(userId)) {
+    persistKnownUsers();
+    changed.push('knownUsers');
+  }
+  if (profiles.delete(userId)) {
+    persistProfiles();
+    changed.push('profiles');
+  }
+  if (publicDirectory.delete(userId)) {
+    persistPublicDirectory();
+    changed.push('directory');
+  }
+
+  let queueChanged = false;
+  if (offlineQueues.delete(userId)) queueChanged = true;
+  for (const [queueOwner, items] of offlineQueues.entries()) {
+    if (!Array.isArray(items)) continue;
+    const filtered = items.filter((item) => {
+      const envelope = envelopeForQueueItem(item);
+      return envelope?.from !== userId && envelope?.to !== userId;
+    });
+    if (filtered.length !== items.length) {
+      if (filtered.length === 0) offlineQueues.delete(queueOwner);
+      else offlineQueues.set(queueOwner, filtered);
+      queueChanged = true;
+    }
+  }
+  if (queueChanged) {
+    persistOfflineQueues();
+    changed.push('offlineQueues');
+  }
+
+  const closedConnections = closeUserConnections(userId, 'Konto zostalo usuniete z relay.');
+  if (ban && !bannedUsers.has(userId)) {
+    bannedUsers.add(userId);
+    persistBannedUsers();
+    changed.push('bannedUsers');
+  }
+
+  return {
+    userId,
+    changed,
+    banned: bannedUsers.has(userId),
+    closedConnections
+  };
+}
+
+function banAdminUser(userId) {
+  const alreadyBanned = bannedUsers.has(userId);
+  if (!alreadyBanned) {
+    bannedUsers.add(userId);
+    persistBannedUsers();
+  }
+  const closedConnections = closeUserConnections(userId, 'Konto zostalo zablokowane na tym relay.');
+  return {
+    userId,
+    changed: alreadyBanned ? [] : ['bannedUsers'],
+    banned: true,
+    closedConnections
+  };
+}
+
+function unbanAdminUser(userId) {
+  const changed = bannedUsers.delete(userId);
+  if (changed) persistBannedUsers();
+  return {
+    userId,
+    changed: changed ? ['bannedUsers'] : [],
+    banned: false,
+    closedConnections: 0
+  };
+}
+
 function sanitizeProfile(profile) {
   return {
     v: 1,
@@ -304,11 +478,27 @@ function sendProfileToUser(userId, targetUserId) {
   });
 }
 
-function timingSafeTokenEquals(received) {
-  const expected = Buffer.from(config.relayToken, 'utf8');
+function timingSafeSecretEquals(received, expectedSecret) {
+  const expected = Buffer.from(expectedSecret, 'utf8');
   const actual = Buffer.from(String(received || ''), 'utf8');
   if (actual.length !== expected.length) return false;
   return crypto.timingSafeEqual(actual, expected);
+}
+
+function timingSafeTokenEquals(received) {
+  return timingSafeSecretEquals(received, config.relayToken);
+}
+
+function adminTokenFromRequest(req) {
+  const header = req.headers.authorization;
+  if (typeof header !== 'string') return '';
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1] : '';
+}
+
+function isAuthorizedAdminRequest(req) {
+  return Boolean(config.adminToken) &&
+    timingSafeSecretEquals(adminTokenFromRequest(req), config.adminToken);
 }
 
 function send(ws, message) {
@@ -380,6 +570,118 @@ function serveUpdateFile(res, fileName) {
   fs.createReadStream(filePath)
     .on('error', () => res.destroy())
     .pipe(res);
+}
+
+function sendAdminError(res, status, error) {
+  sendJson(res, status, { ok: false, error });
+}
+
+function parseAdminBoolean(value, fallback) {
+  if (value === null || value === undefined || value === '') return fallback;
+  return ['1', 'true', 'yes', 'tak'].includes(String(value).toLowerCase());
+}
+
+function handleAdminRequest(req, res, url) {
+  if (!config.adminToken) {
+    sendAdminError(res, 503, 'Panel administratora nie jest wlaczony na relay. Ustaw ADMIN_TOKEN.');
+    return;
+  }
+
+  if (!isAuthorizedAdminRequest(req)) {
+    sendAdminError(res, 401, 'Brak autoryzacji administratora.');
+    return;
+  }
+
+  const parts = url.pathname.split('/').filter(Boolean);
+  const method = req.method || 'GET';
+
+  if (method === 'GET' && parts.length === 2 && parts[0] === 'admin' && parts[1] === 'health') {
+    sendJson(res, 200, {
+      ok: true,
+      serverTime: new Date().toISOString(),
+      onlineUsers: users.size,
+      knownUsers: knownUsers.size,
+      queuedUsers: offlineQueues.size,
+      bannedUsers: bannedUsers.size
+    });
+    return;
+  }
+
+  if (parts[0] !== 'admin' || parts[1] !== 'users') {
+    sendAdminError(res, 404, 'Nieznany endpoint administratora.');
+    return;
+  }
+
+  if (method === 'GET' && parts.length === 2) {
+    const summaries = collectAdminUserIds().map((userId) => adminUserSummary(userId));
+    sendJson(res, 200, {
+      ok: true,
+      serverTime: new Date().toISOString(),
+      counts: {
+        users: summaries.length,
+        onlineUsers: summaries.filter((user) => user.online).length,
+        bannedUsers: summaries.filter((user) => user.banned).length,
+        queuedUsers: summaries.filter((user) => user.queuedIn > 0).length
+      },
+      users: summaries
+    });
+    return;
+  }
+
+  let userId = '';
+  try {
+    userId = decodeURIComponent(parts[2] || '');
+  } catch {
+    sendAdminError(res, 400, 'Niepoprawny userId.');
+    return;
+  }
+
+  if (!validateAdminUserId(userId)) {
+    sendAdminError(res, 400, 'Niepoprawny userId.');
+    return;
+  }
+
+  if (method === 'GET' && parts.length === 3) {
+    sendJson(res, 200, {
+      ok: true,
+      user: adminUserSummary(userId)
+    });
+    return;
+  }
+
+  if (method === 'POST' && parts.length === 4 && parts[3] === 'ban') {
+    sendJson(res, 200, {
+      ok: true,
+      result: banAdminUser(userId),
+      user: adminUserSummary(userId)
+    });
+    return;
+  }
+
+  if (method === 'POST' && parts.length === 4 && parts[3] === 'unban') {
+    sendJson(res, 200, {
+      ok: true,
+      result: unbanAdminUser(userId),
+      user: adminUserSummary(userId)
+    });
+    return;
+  }
+
+  const isDeleteRoute =
+    (method === 'DELETE' && parts.length === 3) ||
+    (method === 'POST' && parts.length === 4 && parts[3] === 'delete');
+  if (isDeleteRoute) {
+    const ban = parseAdminBoolean(url.searchParams.get('ban'), true);
+    const result = deleteAdminUser(userId, { ban });
+    sendJson(res, 200, {
+      ok: true,
+      result,
+      user: adminUserSummary(userId)
+    });
+    return;
+  }
+
+  sendAdminError(res, 405, 'Nieobslugiwana operacja administratora.');
 }
 
 function closeWithError(ws, code, reason) {
@@ -697,6 +999,11 @@ const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   if (url.pathname === '/healthz') {
     sendJson(res, 200, { ok: true, time: new Date().toISOString() });
+    return;
+  }
+
+  if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+    handleAdminRequest(req, res, url);
     return;
   }
 

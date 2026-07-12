@@ -18,6 +18,30 @@ npm start
 
 Wygenerowany token wpisz do `.env` jako `RELAY_TOKEN`.
 
+## Panel administratora
+
+Zdalny panel Windows korzysta z API `/admin/...` na tym samym relay. W `.env`
+ustaw osobny token administratora:
+
+```bash
+ADMIN_TOKEN=losowy-ciag-minimum-32-znaki
+```
+
+Token wygenerujesz tak:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```
+
+Po zmianie `.env` zrestartuj usluge:
+
+```bash
+sudo systemctl restart secure-p2p-relay
+```
+
+Adres do aplikacji Windows to zwykle `https://chat.szkpn.pl`, a token to wartosc
+`ADMIN_TOKEN`. API nie zwraca tresci rozmow ani kluczy prywatnych.
+
 ## Administracja uzytkownikami
 
 Serwer nie przechowuje hasel ani tresci rozmow, ale przechowuje dane pomocnicze:

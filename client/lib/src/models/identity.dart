@@ -35,3 +35,25 @@ class RelaySettings {
     );
   }
 }
+
+class AdminSettings {
+  const AdminSettings({
+    required this.serverUrl,
+    required this.adminToken,
+  });
+
+  final String serverUrl;
+  final String adminToken;
+
+  Map<String, dynamic> toJson() => {
+        'serverUrl': serverUrl,
+        'adminToken': adminToken,
+      };
+
+  factory AdminSettings.fromJson(Map<String, dynamic> json) {
+    return AdminSettings(
+      serverUrl: json['serverUrl'] as String,
+      adminToken: json['adminToken'] as String,
+    );
+  }
+}

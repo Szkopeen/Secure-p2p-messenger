@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_state.dart';
+import 'admin_panel_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({required this.appState, super.key});
@@ -85,6 +86,25 @@ class SettingsScreen extends StatelessWidget {
                       tooltip: 'Polacz ponownie',
                       onPressed: () => appState.connectRelay(),
                       icon: const Icon(Icons.refresh),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsSection(
+                title: 'Administracja',
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.admin_panel_settings_outlined),
+                    title: const Text('Panel administratora'),
+                    subtitle: const Text(
+                        'Lista uzytkownikow, blokady i usuwanie danych relay'),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => AdminPanelScreen(
+                          relaySettings: appState.relaySettings,
+                        ),
+                      ),
                     ),
                   ),
                 ],
