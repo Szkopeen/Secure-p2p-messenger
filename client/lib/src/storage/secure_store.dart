@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../crypto/codec.dart';
 import '../models/contact.dart';
+import '../models/group.dart';
 import '../models/identity.dart';
 import '../models/session.dart';
 import '../models/user_profile.dart';
@@ -20,6 +21,7 @@ class SecureStore {
   static const _identityPublicKey = 'identity.ed25519.public';
   static const _relaySettings = 'relay.settings';
   static const _contacts = 'contacts.v1';
+  static const _groups = 'groups.v1';
   static const _localArchiveKey = 'local.archive.key.v1';
   static const _ownProfile = 'profile.public.v1';
   static const _sessions = 'sessions.v1';
@@ -87,6 +89,23 @@ class SecureStore {
     final list = jsonDecode(raw) as List<dynamic>;
     return list
         .map((item) => Contact.fromJson((item as Map).cast<String, dynamic>()))
+        .toList(growable: false);
+  }
+
+  Future<void> saveGroups(List<GroupConversation> groups) async {
+    await _storage.write(
+      key: _groups,
+      value: jsonEncode(groups.map((group) => group.toJson()).toList()),
+    );
+  }
+
+  Future<List<GroupConversation>> loadGroups() async {
+    final raw = await _storage.read(key: _groups);
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list
+        .map((item) =>
+            GroupConversation.fromJson((item as Map).cast<String, dynamic>()))
         .toList(growable: false);
   }
 

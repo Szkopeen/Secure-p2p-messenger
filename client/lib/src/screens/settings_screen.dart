@@ -100,6 +100,13 @@ class SettingsScreen extends StatelessWidget {
                         'Wiadomosci sa zapisane lokalnie w szyfrowanym archiwum.'),
                   ),
                   ListTile(
+                    leading: const Icon(Icons.devices_other_outlined),
+                    title: const Text('Eksportuj konto na drugie urzadzenie'),
+                    subtitle: const Text(
+                        'Tworzy zaszyfrowany plik z tozsamoscia, relay i kontaktami.'),
+                    onTap: () => _exportAccount(context),
+                  ),
+                  ListTile(
                     leading: const Icon(Icons.delete_forever_outlined),
                     title: const Text('Wyczysc dane lokalne'),
                     subtitle: const Text(
@@ -163,6 +170,111 @@ class SettingsScreen extends StatelessWidget {
     await appState.wipeLocalData();
     if (!context.mounted) return;
     Navigator.of(context).pop();
+  }
+
+  Future<void> _exportAccount(BuildContext context) async {
+    final passphrase = await _askPassphrase(
+      context,
+      title: 'Haslo do eksportu',
+      action: 'Eksportuj',
+      repeat: true,
+    );
+    if (passphrase == null) return;
+    try {
+      await appState.exportAccountPackage(passphrase);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Zapisano zaszyfrowany pakiet konta.')),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
+  }
+
+  Future<String?> _askPassphrase(
+    BuildContext context, {
+    required String title,
+    required String action,
+    bool repeat = false,
+  }) async {
+    final first = TextEditingController();
+    final second = TextEditingController();
+    String? error;
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text(title),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: first,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Haslo',
+                      ),
+                    ),
+                    if (repeat) ...[
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: second,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Powtorz haslo',
+                        ),
+                      ),
+                    ],
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Anuluj'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final value = first.text.trim();
+                    final validationError =
+                        AppState.accountTransferPassphraseError(value);
+                    if (validationError != null) {
+                      setState(() => error = validationError);
+                      return;
+                    }
+                    if (repeat && value != second.text.trim()) {
+                      setState(() => error = 'Hasla nie sa identyczne.');
+                      return;
+                    }
+                    Navigator.of(context).pop(value);
+                  },
+                  child: Text(action),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    first.dispose();
+    second.dispose();
+    return result;
   }
 }
 

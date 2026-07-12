@@ -11,6 +11,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../app_state.dart';
 import '../crypto/codec.dart';
 import '../models/contact.dart';
+import '../models/group.dart';
 import '../models/message.dart';
 import '../platform/file_exporter.dart';
 import '../platform/media_cache.dart';
@@ -18,12 +19,14 @@ import '../platform/media_cache.dart';
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
     required this.appState,
-    required this.contact,
+    this.contact,
+    this.group,
     super.key,
-  });
+  }) : assert(contact != null || group != null);
 
   final AppState appState;
-  final Contact contact;
+  final Contact? contact;
+  final GroupConversation? group;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -47,6 +50,10 @@ class _ChatScreenState extends State<ChatScreen> {
   int _searchResultIndex = 0;
 
   bool get _isSending => _pendingSends > 0;
+  bool get _isGroup => widget.group != null;
+  String get _conversationId => widget.contact?.userId ?? widget.group!.groupId;
+  String get _conversationTitle =>
+      widget.contact?.displayName ?? widget.group!.name;
 
   @override
   void dispose() {
@@ -61,10 +68,16 @@ class _ChatScreenState extends State<ChatScreen> {
     return AnimatedBuilder(
       animation: widget.appState,
       builder: (context, _) {
-        final messages = widget.appState.messagesFor(widget.contact.userId);
+        final messages = widget.appState.messagesFor(_conversationId);
         _visibleMessages = messages;
-        final p2p = widget.appState.isP2pConnected(widget.contact.userId);
-        final online = widget.appState.isContactOnline(widget.contact.userId);
+        final contact = widget.contact;
+        final group = widget.group;
+        final p2p = contact == null
+            ? false
+            : widget.appState.isP2pConnected(contact.userId);
+        final online = contact == null
+            ? false
+            : widget.appState.isContactOnline(contact.userId);
         final searchResults = _searchResults(messages);
         final pinnedMessages =
             messages.where((message) => message.pinned).toList();
@@ -77,7 +90,8 @@ class _ChatScreenState extends State<ChatScreen> {
             title: Row(
               children: [
                 _ContactAvatar(
-                  contact: widget.contact,
+                  contact: contact,
+                  group: group,
                   radius: 18,
                   online: online,
                 ),
@@ -87,12 +101,14 @@ class _ChatScreenState extends State<ChatScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        widget.contact.displayName,
+                        _conversationTitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        '${online ? 'Online' : 'Offline'} / ${p2p ? 'P2P' : 'Relay'}',
+                        contact == null
+                            ? _groupStatus(group!)
+                            : '${online ? 'Online' : 'Offline'} / ${p2p ? 'P2P' : 'Relay'}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -115,7 +131,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               IconButton(
                 tooltip: 'Wyslij plik',
-                onPressed: _isSending ? null : _sendFile,
+                onPressed: _isSending || _isGroup ? null : _sendFile,
                 icon: const Icon(Icons.attach_file),
               ),
               PopupMenuButton<String>(
@@ -129,7 +145,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     value: 'clear-local',
                     child: _MessageMenuItem(
                       icon: Icons.delete_sweep_outlined,
-                      label: 'Usun rozmowe lokalnie',
+                      label: 'Usun lokalnie',
                     ),
                   ),
                 ],
@@ -172,6 +188,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             appState: widget.appState,
                             contact: widget.contact,
                             message: message,
+                            senderName: _senderNameFor(message),
                             highlighted: message.id == _highlightedMessageId,
                           );
                         },
@@ -274,7 +291,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _inputFocus.requestFocus();
     _incrementPendingSends();
     try {
-      await widget.appState.sendText(widget.contact, text);
+      final group = widget.group;
+      final contact = widget.contact;
+      if (group != null) {
+        await widget.appState.sendGroupText(group, text);
+      } else {
+        await widget.appState.sendText(contact!, text);
+      }
     } catch (error) {
       _showError(error);
     } finally {
@@ -285,13 +308,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendDroppedFiles(DropDoneDetails detail) async {
     if (detail.files.isEmpty) return;
+    if (_isGroup) {
+      _showError('Pliki w grupach dodamy w kolejnym kroku.');
+      return;
+    }
     setState(() => _dragging = false);
     _incrementPendingSends();
     try {
       for (final file in detail.files) {
         final bytes = await file.readAsBytes();
         await widget.appState.sendFileBytes(
-          widget.contact,
+          widget.contact!,
           fileName: file.name,
           bytes: bytes,
           mimeType: file.mimeType,
@@ -327,7 +354,7 @@ class _ChatScreenState extends State<ChatScreen> {
       },
     );
     if (confirmed != true) return;
-    await widget.appState.deleteConversationLocally(widget.contact.userId);
+    await widget.appState.deleteConversationLocally(_conversationId);
     if (!mounted) return;
     setState(() {
       _highlightedMessageId = null;
@@ -373,6 +400,9 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.pin => 'przypiecie',
       PlainPayloadType.receipt => 'potwierdzenie',
       PlainPayloadType.edit => message.payload.editedText?.toLowerCase() ?? '',
+      PlainPayloadType.groupInvite => 'zaproszenie do grupy',
+      PlainPayloadType.groupInviteResponse => 'odpowiedz na zaproszenie',
+      PlainPayloadType.groupText => message.payload.text?.toLowerCase() ?? '',
     };
   }
 
@@ -436,6 +466,9 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.pin => 'Przypieto wiadomosc',
       PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
       PlainPayloadType.edit => 'Edytowano wiadomosc',
+      PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
+      PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
+      PlainPayloadType.groupText => message.payload.text ?? '',
     };
   }
 
@@ -457,8 +490,26 @@ class _ChatScreenState extends State<ChatScreen> {
     _lastReadMarkMessageId = newestUnreadId;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      unawaited(widget.appState.markConversationRead(widget.contact));
+      final contact = widget.contact;
+      final group = widget.group;
+      if (contact != null) {
+        unawaited(widget.appState.markConversationRead(contact));
+      } else if (group != null) {
+        unawaited(widget.appState.markGroupRead(group));
+      }
     });
+  }
+
+  String _groupStatus(GroupConversation group) {
+    if (group.pendingInvite) return 'Zaproszenie do grupy';
+    return 'Grupa / zaakceptowalo ${group.acceptedMemberIds.length} z ${group.memberIds.length}';
+  }
+
+  String? _senderNameFor(ChatMessage message) {
+    if (!_isGroup || message.direction != MessageDirection.inbound) return null;
+    final senderId = message.senderId;
+    if (senderId == null || senderId.isEmpty) return null;
+    return widget.appState.displayNameForUser(senderId);
   }
 
   void _highlightAndScrollToMessage(String messageId) {
@@ -501,9 +552,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendFile() async {
+    final contact = widget.contact;
+    if (contact == null) return;
     _incrementPendingSends();
     try {
-      await widget.appState.sendFile(widget.contact);
+      await widget.appState.sendFile(contact);
     } catch (error) {
       _showError(error);
     } finally {
@@ -597,16 +650,27 @@ class _ChatScreenState extends State<ChatScreen> {
 class _ContactAvatar extends StatelessWidget {
   const _ContactAvatar({
     required this.contact,
+    required this.group,
     required this.radius,
     required this.online,
   });
 
-  final Contact contact;
+  final Contact? contact;
+  final GroupConversation? group;
   final double radius;
   final bool online;
 
   @override
   Widget build(BuildContext context) {
+    final group = this.group;
+    if (group != null) {
+      return CircleAvatar(
+        radius: radius,
+        child: const Icon(Icons.groups_outlined),
+      );
+    }
+
+    final contact = this.contact!;
     final bytes = _avatarBytes();
     final fallback = contact.displayName.isEmpty
         ? '?'
@@ -641,7 +705,7 @@ class _ContactAvatar extends StatelessWidget {
   }
 
   Uint8List? _avatarBytes() {
-    final raw = contact.avatarBytesBase64;
+    final raw = contact?.avatarBytesBase64;
     if (raw == null || raw.isEmpty) return null;
     try {
       return unb64(raw);
@@ -721,12 +785,14 @@ class _MessageBubble extends StatelessWidget {
     required this.appState,
     required this.contact,
     required this.message,
+    required this.senderName,
     required this.highlighted,
   });
 
   final AppState appState;
-  final Contact contact;
+  final Contact? contact;
   final ChatMessage message;
+  final String? senderName;
   final bool highlighted;
 
   @override
@@ -769,6 +835,15 @@ class _MessageBubble extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (senderName != null) ...[
+                Text(
+                  senderName!,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                ),
+                const SizedBox(height: 4),
+              ],
               message.retracted
                   ? _RetractedMessageView(outbound: outbound)
                   : _PayloadView(payload: message.payload),
@@ -828,6 +903,7 @@ class _MessageBubble extends StatelessWidget {
   }
 
   bool _canEdit(ChatMessage message) {
+    if (contact == null) return false;
     return message.direction == MessageDirection.outbound &&
         !message.retracted &&
         message.status != MessageStatus.failed &&
@@ -835,6 +911,7 @@ class _MessageBubble extends StatelessWidget {
   }
 
   bool _canRetract(ChatMessage message) {
+    if (contact == null) return false;
     return message.direction == MessageDirection.outbound &&
         !message.retracted &&
         message.status != MessageStatus.failed &&
@@ -843,6 +920,7 @@ class _MessageBubble extends StatelessWidget {
   }
 
   bool _canReact(ChatMessage message) {
+    if (contact == null) return false;
     return message.direction != MessageDirection.system &&
         !message.retracted &&
         message.payload.type != PlainPayloadType.retraction &&
@@ -863,16 +941,16 @@ class _MessageBubble extends StatelessWidget {
           await _showEditDialog(context);
           break;
         case _MessageAction.retract:
-          await appState.retractMessage(contact, message);
+          await appState.retractMessage(contact!, message);
           break;
         case _MessageAction.pin:
-          await appState.setMessagePinned(contact, message, true);
+          await appState.setMessagePinned(contact!, message, true);
           break;
         case _MessageAction.unpin:
-          await appState.setMessagePinned(contact, message, false);
+          await appState.setMessagePinned(contact!, message, false);
           break;
         case _MessageAction.deleteLocal:
-          await appState.deleteMessageLocally(contact.userId, message.id);
+          await appState.deleteMessageLocally(message.contactId, message.id);
           break;
       }
     } catch (error) {
@@ -918,6 +996,8 @@ class _MessageBubble extends StatelessWidget {
     );
     controller.dispose();
     if (edited == null) return;
+    final contact = this.contact;
+    if (contact == null) return;
     await appState.editMessage(contact, message, edited);
   }
 
@@ -958,7 +1038,7 @@ class _MessageBubble extends StatelessWidget {
     );
     if (selected == null) return;
     await appState.reactToMessage(
-      contact,
+      contact!,
       message,
       selected.isEmpty ? null : selected,
     );
@@ -1134,6 +1214,10 @@ class _PayloadView extends StatelessWidget {
       PlainPayloadType.pin => const Text('Przypieto wiadomosc.'),
       PlainPayloadType.receipt => const Text('Potwierdzono wiadomosc.'),
       PlainPayloadType.edit => const Text('Edytowano wiadomosc.'),
+      PlainPayloadType.groupInvite => const Text('Zaproszenie do grupy.'),
+      PlainPayloadType.groupInviteResponse =>
+        const Text('Odpowiedz na zaproszenie do grupy.'),
+      PlainPayloadType.groupText => SelectableText(payload.text ?? ''),
       PlainPayloadType.file => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,

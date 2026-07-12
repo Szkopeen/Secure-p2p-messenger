@@ -1,18 +1,23 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
+import 'package:cryptography/cryptography.dart';
+import 'package:uuid/uuid.dart';
 
 import 'crypto/codec.dart';
 import 'crypto/crypto_service.dart';
 import 'models/contact.dart';
 import 'models/encrypted_packet.dart';
+import 'models/group.dart';
 import 'models/identity.dart';
 import 'models/message.dart';
 import 'models/session.dart';
 import 'models/user_profile.dart';
 import 'network/relay_client.dart';
 import 'p2p/webrtc_transport.dart';
+import 'platform/file_exporter.dart';
 import 'services/desktop_notifier.dart';
 import 'storage/message_archive.dart';
 import 'storage/secure_store.dart';
@@ -28,12 +33,17 @@ class AppState extends ChangeNotifier {
 
   static const maxPlainFileBytes = 8 * 1024 * 1024;
   static const maxProfileImageBytes = 1024 * 1024;
+  static const _accountExportIterations = 310000;
+  static const _accountExportAad = 'secure-p2p-account-transfer/v1';
 
   final SecureStore _store;
   final CryptoService _crypto;
   late final MessageArchive _messageArchive;
+  final Uuid _uuid = const Uuid();
+  final AesGcm _accountExportAead = AesGcm.with256bits();
   Future<void> _persistQueue = Future<void>.value();
   final List<Contact> _contacts = [];
+  final List<GroupConversation> _groups = [];
   final Map<String, List<ChatMessage>> _messages = {};
   final Map<String, SessionState> _sessions = {};
   final Map<String, PendingSession> _pendingSessions = {};
@@ -51,6 +61,7 @@ class AppState extends ChangeNotifier {
   WebRtcTransport? _p2p;
   bool _relayConnected = false;
   bool _initializing = true;
+  bool _retryingGroupInvites = false;
   String? _status;
   int _relayMaxPayloadBytes = 16 * 1024 * 1024;
 
@@ -64,6 +75,7 @@ class AppState extends ChangeNotifier {
   UserProfile? get ownProfile => _ownProfile;
   RelaySettings? get relaySettings => _relaySettings;
   List<Contact> get contacts => List.unmodifiable(_contacts);
+  List<GroupConversation> get groups => List.unmodifiable(_groups);
 
   List<ChatMessage> messagesFor(String contactId) {
     final items = _messages[contactId] ?? const <ChatMessage>[];
@@ -89,6 +101,26 @@ class AppState extends ChangeNotifier {
         _relayPresence[contactId] == true;
   }
 
+  static String? accountTransferPassphraseError(String passphrase) {
+    final value = passphrase.trim();
+    if (value.length < 8) return 'Minimum 8 znakow.';
+    if (!RegExp(r'[A-Z]').hasMatch(value)) {
+      return 'Dodaj przynajmniej jedna duza litere.';
+    }
+    if (!RegExp(r'[0-9]').hasMatch(value)) {
+      return 'Dodaj przynajmniej jedna liczbe.';
+    }
+    if (!RegExp(r'[^A-Za-z0-9]').hasMatch(value)) {
+      return 'Dodaj przynajmniej jeden znak specjalny.';
+    }
+    return null;
+  }
+
+  String displayNameForUser(String userId) {
+    return _contactById(userId)?.displayName ??
+        (userId == _identity?.userId ? 'Ty' : userId);
+  }
+
   Future<void> initialize() async {
     try {
       _identity = await _store.loadIdentity();
@@ -97,6 +129,9 @@ class AppState extends ChangeNotifier {
       _contacts
         ..clear()
         ..addAll(await _store.loadContacts());
+      _groups
+        ..clear()
+        ..addAll(await _store.loadGroups());
       await _loadArchivedMessages();
       await _loadSessions();
       _initializing = false;
@@ -129,6 +164,162 @@ class AppState extends ChangeNotifier {
       relayToken: relayToken.trim(),
     );
     await _store.saveRelaySettings(_relaySettings!);
+    await connectRelay();
+  }
+
+  Future<void> exportAccountPackage(String passphrase) async {
+    final identity = _requireIdentity();
+    final settings = _relaySettings;
+    if (settings == null) {
+      throw StateError('Brak ustawien relay do eksportu.');
+    }
+    final normalizedPassphrase = passphrase.trim();
+    _validateAccountTransferPassphrase(normalizedPassphrase);
+
+    final privateKeyBytes = await identity.keyPair.extractPrivateKeyBytes();
+    final clearJson = jsonEncode({
+      'v': 1,
+      'exportedAt': DateTime.now().toUtc().toIso8601String(),
+      'identity': {
+        'userId': identity.userId,
+        'privateKey': b64(privateKeyBytes),
+        'publicKey': b64(identity.publicKey.bytes),
+      },
+      'relaySettings': settings.toJson(),
+      'contacts': _contacts.map((contact) => contact.toJson()).toList(),
+      'groups': _groups.map((group) => group.toJson()).toList(),
+      'ownProfile': _ownProfile?.toJson(),
+    });
+
+    final salt = secureRandomBytes(16);
+    final nonce = secureRandomBytes(12);
+    final key = await _deriveAccountExportKey(normalizedPassphrase, salt);
+    final box = await _accountExportAead.encrypt(
+      utf8Bytes(clearJson),
+      secretKey: key,
+      nonce: nonce,
+      aad: utf8Bytes(_accountExportAad),
+    );
+    final envelope = jsonEncode({
+      'v': 1,
+      'type': 'secure-p2p-account-transfer',
+      'algorithm': 'AES-256-GCM',
+      'kdf': 'PBKDF2-HMAC-SHA256',
+      'iterations': _accountExportIterations,
+      'salt': b64(salt),
+      'nonce': b64(box.nonce),
+      'ciphertext': b64(box.cipherText),
+      'mac': b64(box.mac.bytes),
+    });
+
+    await saveReceivedFile(
+      fileName: 'secure-p2p-account-${identity.userId}.sp2p',
+      bytes: utf8Bytes(envelope),
+      mimeType: 'application/json',
+    );
+  }
+
+  Future<void> importAccountPackageFromFile(String passphrase) async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: false,
+      withData: true,
+      type: FileType.any,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final bytes = result.files.single.bytes;
+    if (bytes == null) {
+      throw StateError('Nie mozna odczytac pliku konta na tej platformie.');
+    }
+    await importAccountPackage(bytes: bytes, passphrase: passphrase);
+  }
+
+  Future<void> importAccountPackage({
+    required Uint8List bytes,
+    required String passphrase,
+  }) async {
+    final normalizedPassphrase = passphrase.trim();
+    _validateAccountTransferPassphrase(normalizedPassphrase);
+
+    final envelope = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+    if (envelope['type'] != 'secure-p2p-account-transfer') {
+      throw const FormatException('To nie jest pakiet konta Secure P2P.');
+    }
+    final salt = unb64(envelope['salt'] as String);
+    final key = await _deriveAccountExportKey(normalizedPassphrase, salt);
+    final box = SecretBox(
+      unb64(envelope['ciphertext'] as String),
+      nonce: unb64(envelope['nonce'] as String),
+      mac: Mac(unb64(envelope['mac'] as String)),
+    );
+    final clearBytes = await _accountExportAead.decrypt(
+      box,
+      secretKey: key,
+      aad: utf8Bytes(_accountExportAad),
+    );
+    final clear = jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
+    final identityJson = (clear['identity'] as Map).cast<String, dynamic>();
+    final publicKey = SimplePublicKey(
+      unb64(identityJson['publicKey'] as String),
+      type: KeyPairType.ed25519,
+    );
+    final importedIdentity = IdentityKeyMaterial(
+      userId: identityJson['userId'] as String,
+      deviceId: _uuid.v4(),
+      keyPair: SimpleKeyPairData(
+        unb64(identityJson['privateKey'] as String),
+        publicKey: publicKey,
+        type: KeyPairType.ed25519,
+      ),
+      publicKey: publicKey,
+    );
+    final importedRelaySettings = RelaySettings.fromJson(
+      (clear['relaySettings'] as Map).cast<String, dynamic>(),
+    );
+    final importedContacts = ((clear['contacts'] as List?) ?? const [])
+        .map((item) => Contact.fromJson((item as Map).cast<String, dynamic>()))
+        .toList(growable: false);
+    final importedGroups = ((clear['groups'] as List?) ?? const [])
+        .map((item) =>
+            GroupConversation.fromJson((item as Map).cast<String, dynamic>()))
+        .toList(growable: false);
+    final profileJson = clear['ownProfile'];
+    final importedProfile = profileJson == null
+        ? null
+        : UserProfile.fromJson((profileJson as Map).cast<String, dynamic>());
+
+    await _relaySubscription?.cancel();
+    await _relay?.dispose();
+    await _p2p?.dispose();
+    await _store.wipeLocalSecrets();
+    await _messageArchive.delete();
+
+    _identity = importedIdentity;
+    _relaySettings = importedRelaySettings;
+    _ownProfile = importedProfile;
+    _contacts
+      ..clear()
+      ..addAll(importedContacts);
+    _groups
+      ..clear()
+      ..addAll(importedGroups);
+    _messages.clear();
+    _sessions.clear();
+    _pendingSessions.clear();
+    _relayEnvelopeToMessage.clear();
+    _signalEnvelopeToContact.clear();
+    _p2pConnected.clear();
+    _relayPresence.clear();
+    _relayConnected = false;
+    _retryingGroupInvites = false;
+
+    await _store.saveIdentity(importedIdentity);
+    await _store.saveRelaySettings(importedRelaySettings);
+    await _store.saveContacts(_contacts);
+    await _store.saveGroups(_groups);
+    if (importedProfile != null) {
+      await _store.saveOwnProfile(importedProfile);
+    }
+    notifyListeners();
     await connectRelay();
   }
 
@@ -240,6 +431,174 @@ class AppState extends ChangeNotifier {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
     await _sendPlainPayload(contact, PlainPayload.text(trimmed));
+  }
+
+  Future<GroupConversation> createGroup({
+    required String name,
+    required List<Contact> members,
+  }) async {
+    final identity = _requireIdentity();
+    final groupName = name.trim().isEmpty ? 'Nowa grupa' : name.trim();
+    final selectedMembers = members
+        .where((contact) => contact.userId != identity.userId)
+        .fold<Map<String, Contact>>({}, (map, contact) {
+          map[contact.userId] = contact;
+          return map;
+        })
+        .values
+        .toList(growable: false);
+
+    if (selectedMembers.isEmpty) {
+      throw ArgumentError('Wybierz przynajmniej jednego kontaktu.');
+    }
+
+    final memberIds = <String>{
+      identity.userId,
+      for (final member in selectedMembers) member.userId,
+    }.toList(growable: false);
+    final group = GroupConversation(
+      groupId: _uuid.v4(),
+      name: groupName,
+      memberIds: memberIds,
+      acceptedMemberIds: [identity.userId],
+      createdAt: DateTime.now().toUtc(),
+    );
+
+    _groups.add(group);
+    await _store.saveGroups(_groups);
+    _addSystemMessage(
+      group.groupId,
+      'Utworzono grupe "$groupName". Zaproszenia beda wysylane automatycznie.',
+    );
+    notifyListeners();
+
+    var sentInvites = 0;
+    for (final member in selectedMembers) {
+      if (await _trySendGroupInvite(group.groupId, member.userId)) {
+        sentInvites += 1;
+      }
+    }
+    final waiting = selectedMembers.length - sentInvites;
+    if (waiting > 0) {
+      _addSystemMessage(
+        group.groupId,
+        'Zaproszenia dla $waiting osob czekaja na wyslanie.',
+      );
+    }
+
+    return group;
+  }
+
+  Future<void> respondToGroupInvite(
+    GroupConversation group,
+    bool accepted,
+  ) async {
+    final identity = _requireIdentity();
+    final inviterId = group.invitedBy;
+    if (inviterId == null) return;
+    final inviter = _contactById(inviterId);
+    if (inviter == null) {
+      throw StateError('Nie znaleziono kontaktu, ktory zaprosil do grupy.');
+    }
+
+    await _sendHiddenPayload(
+      inviter,
+      PlainPayload.groupInviteResponse(
+        groupId: group.groupId,
+        groupAccepted: accepted,
+      ),
+    );
+
+    final index = _groups.indexWhere((item) => item.groupId == group.groupId);
+    if (index < 0) return;
+    if (!accepted) {
+      _groups.removeAt(index);
+      _messages.remove(group.groupId);
+      await _store.saveGroups(_groups);
+      await _persistMessages();
+      notifyListeners();
+      return;
+    }
+
+    final acceptedIds = <String>{
+      ..._groups[index].acceptedMemberIds,
+      identity.userId,
+    }.toList(growable: false);
+    _groups[index] = _groups[index].copyWith(
+      acceptedMemberIds: acceptedIds,
+      pendingInvite: false,
+    );
+    await _store.saveGroups(_groups);
+    _addSystemMessage(group.groupId, 'Dolaczyles do grupy.');
+    notifyListeners();
+  }
+
+  Future<void> sendGroupText(GroupConversation group, String text) async {
+    final identity = _requireIdentity();
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
+      throw StateError('Najpierw zaakceptuj zaproszenie do grupy.');
+    }
+
+    final messageId = _uuid.v4();
+    _addMessage(
+      ChatMessage(
+        id: messageId,
+        contactId: group.groupId,
+        direction: MessageDirection.outbound,
+        payload: PlainPayload.text(trimmed),
+        createdAt: DateTime.now().toUtc(),
+        status: MessageStatus.pending,
+        senderId: identity.userId,
+      ),
+    );
+
+    var sent = 0;
+    final recipientIds = group.memberIds
+        .where((userId) => userId != identity.userId)
+        .toList(growable: false);
+    for (final userId in recipientIds) {
+      final contact = _contactById(userId);
+      if (contact == null) continue;
+      await _sendHiddenPayload(
+        contact,
+        PlainPayload.groupText(
+          groupId: group.groupId,
+          groupMessageId: messageId,
+          text: trimmed,
+        ),
+      );
+      sent += 1;
+    }
+
+    _updateMessage(
+      group.groupId,
+      messageId,
+      sent > 0 || recipientIds.isEmpty
+          ? MessageStatus.sent
+          : MessageStatus.failed,
+      transport: 'group',
+      error: sent > 0 || recipientIds.isEmpty
+          ? null
+          : 'Brak zaakceptowanych odbiorcow.',
+    );
+  }
+
+  Future<void> markGroupRead(GroupConversation group) async {
+    final list = _messages[group.groupId];
+    if (list == null) return;
+
+    var changed = false;
+    for (var index = 0; index < list.length; index += 1) {
+      final message = list[index];
+      if (!_isUnreadIncomingMessage(message)) continue;
+      list[index] = message.copyWith(status: MessageStatus.read);
+      changed = true;
+    }
+    if (!changed) return;
+    await _persistMessages();
+    notifyListeners();
   }
 
   Future<void> markConversationRead(Contact contact) async {
@@ -481,6 +840,7 @@ class AppState extends ChangeNotifier {
     _relay = null;
     _p2p = null;
     _contacts.clear();
+    _groups.clear();
     _messages.clear();
     _sessions.clear();
     _pendingSessions.clear();
@@ -490,6 +850,7 @@ class AppState extends ChangeNotifier {
     _relayPresence.clear();
     _presenceTimer?.cancel();
     _relayConnected = false;
+    _retryingGroupInvites = false;
     await _messageArchive.delete();
     _setStatus('Wyczyszczono lokalne dane.');
   }
@@ -559,6 +920,95 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  Future<void> _sendHiddenPayload(
+    Contact contact,
+    PlainPayload payload,
+  ) async {
+    final identity = _requireIdentity();
+    final session = await _ensureSession(contact);
+    final packet = await _crypto.encryptPayload(
+      session: session,
+      from: identity.userId,
+      to: contact.userId,
+      payload: payload,
+    );
+    await _sendEncryptedPacket(contact, packet);
+  }
+
+  Future<void> _retryPendingGroupInvites() async {
+    final identity = _identity;
+    if (identity == null || !_relayConnected) return;
+    if (_retryingGroupInvites) return;
+    _retryingGroupInvites = true;
+
+    try {
+      for (final group in List<GroupConversation>.of(_groups)) {
+        if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
+          continue;
+        }
+        final pendingMemberIds = group.memberIds.where((userId) {
+          return userId != identity.userId &&
+              !group.acceptedMemberIds.contains(userId) &&
+              !group.invitedMemberIds.contains(userId);
+        }).toList(growable: false);
+
+        for (final memberId in pendingMemberIds) {
+          await _trySendGroupInvite(group.groupId, memberId);
+        }
+      }
+    } finally {
+      _retryingGroupInvites = false;
+    }
+  }
+
+  Future<bool> _trySendGroupInvite(String groupId, String memberId) async {
+    final group = _groupById(groupId);
+    final contact = _contactById(memberId);
+    final identity = _identity;
+    if (group == null || contact == null || identity == null) return false;
+    if (group.invitedMemberIds.contains(memberId) ||
+        group.acceptedMemberIds.contains(memberId) ||
+        memberId == identity.userId) {
+      return true;
+    }
+
+    final hasSession = _sessions.containsKey(memberId);
+    if (!hasSession && !isContactOnline(memberId)) {
+      return false;
+    }
+
+    try {
+      await _sendHiddenPayload(
+        contact,
+        PlainPayload.groupInvite(
+          groupId: group.groupId,
+          groupName: group.name,
+          groupMemberIds: group.memberIds,
+        ),
+      );
+      _markGroupInviteSent(groupId, memberId);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _markGroupInviteSent(String groupId, String memberId) {
+    final index = _groups.indexWhere((group) => group.groupId == groupId);
+    if (index < 0) return;
+    final group = _groups[index];
+    if (group.invitedMemberIds.contains(memberId)) return;
+
+    _groups[index] = group.copyWith(
+      invitedMemberIds: <String>{
+        ...group.invitedMemberIds,
+        memberId,
+      }.toList(growable: false),
+    );
+    unawaited(_store.saveGroups(_groups));
+    notifyListeners();
+  }
+
   Future<void> _sendControlPayload(
     Contact contact,
     PlainPayload payload,
@@ -624,6 +1074,7 @@ class AppState extends ChangeNotifier {
         _relay?.queryPresence(contactIds);
         _relay?.queryProfiles(contactIds);
         _startPresencePolling();
+        unawaited(_retryPendingGroupInvites());
         break;
       case RelayDeliver():
         if (event.kind == 'signal') {
@@ -663,6 +1114,7 @@ class AppState extends ChangeNotifier {
           ..clear()
           ..addAll(event.contacts);
         notifyListeners();
+        unawaited(_retryPendingGroupInvites());
         break;
       case RelayProfile():
         await _applyContactProfile(event.userId, event.profile);
@@ -811,6 +1263,19 @@ class AppState extends ChangeNotifier {
         );
         return;
       }
+      if (decrypted.payload.type == PlainPayloadType.groupInvite) {
+        await _handleGroupInvite(from, decrypted.payload);
+        return;
+      }
+      if (decrypted.payload.type == PlainPayloadType.groupInviteResponse) {
+        await _handleGroupInviteResponse(from, decrypted.payload);
+        return;
+      }
+      if (decrypted.payload.type == PlainPayloadType.groupText) {
+        _handleGroupText(
+            from, decrypted.payload, decrypted.createdAt, transport);
+        return;
+      }
       final added = _addMessage(
         ChatMessage(
           id: decrypted.messageId,
@@ -834,6 +1299,121 @@ class AppState extends ChangeNotifier {
       }
     } catch (error) {
       _setStatus('Odrzucono pakiet: $error');
+    }
+  }
+
+  Future<void> _handleGroupInvite(String from, PlainPayload payload) async {
+    final identity = _requireIdentity();
+    final groupId = payload.groupId;
+    if (groupId == null || groupId.isEmpty) return;
+    final memberIds = <String>{
+      ...?payload.groupMemberIds,
+      from,
+      identity.userId,
+    }.toList(growable: false);
+    if (!memberIds.contains(identity.userId)) return;
+
+    final existingIndex =
+        _groups.indexWhere((group) => group.groupId == groupId);
+    if (existingIndex >= 0) return;
+
+    final group = GroupConversation(
+      groupId: groupId,
+      name: payload.groupName ?? 'Grupa',
+      memberIds: memberIds,
+      acceptedMemberIds: [from],
+      createdAt: DateTime.now().toUtc(),
+      invitedBy: from,
+      pendingInvite: true,
+    );
+    _groups.add(group);
+    await _store.saveGroups(_groups);
+    _addSystemMessage(
+      groupId,
+      'Zaproszenie do grupy "${group.name}" od ${displayNameForUser(from)}.',
+    );
+    notifyListeners();
+  }
+
+  Future<void> _handleGroupInviteResponse(
+    String from,
+    PlainPayload payload,
+  ) async {
+    final groupId = payload.groupId;
+    if (groupId == null || groupId.isEmpty) return;
+    final index = _groups.indexWhere((group) => group.groupId == groupId);
+    if (index < 0) return;
+
+    final group = _groups[index];
+    if (!group.memberIds.contains(from)) return;
+
+    if (payload.groupAccepted == true) {
+      final acceptedIds = <String>{
+        ...group.acceptedMemberIds,
+        from,
+      }.toList(growable: false);
+      _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
+      _addSystemMessage(
+          groupId, '${displayNameForUser(from)} dolaczyl do grupy.');
+    } else {
+      final acceptedIds = group.acceptedMemberIds
+          .where((userId) => userId != from)
+          .toList(growable: false);
+      _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
+      _addSystemMessage(
+        groupId,
+        '${displayNameForUser(from)} odrzucil zaproszenie do grupy.',
+      );
+    }
+    await _store.saveGroups(_groups);
+    notifyListeners();
+  }
+
+  void _handleGroupText(
+    String from,
+    PlainPayload payload,
+    DateTime createdAt,
+    String transport,
+  ) {
+    final groupId = payload.groupId;
+    final messageId = payload.groupMessageId;
+    if (groupId == null ||
+        groupId.isEmpty ||
+        messageId == null ||
+        messageId.isEmpty) {
+      return;
+    }
+    final group = _groupById(groupId);
+    final identity = _identity;
+    if (group == null ||
+        identity == null ||
+        group.pendingInvite ||
+        !group.isAcceptedBy(identity.userId) ||
+        !group.memberIds.contains(from)) {
+      return;
+    }
+
+    final added = _addMessage(
+      ChatMessage(
+        id: messageId,
+        contactId: groupId,
+        direction: MessageDirection.inbound,
+        payload: PlainPayload.text(payload.text ?? ''),
+        createdAt: createdAt,
+        status: MessageStatus.delivered,
+        senderId: from,
+        transport: transport,
+      ),
+    );
+    if (!added) return;
+    final contact = _contactById(from);
+    if (contact != null) {
+      unawaited(
+        DesktopNotifier.instance.notifyIncoming(
+          senderName: '${group.name} / ${contact.displayName}',
+          payload: PlainPayload.text(payload.text ?? ''),
+        ),
+      );
     }
   }
 
@@ -1067,6 +1647,28 @@ class AppState extends ChangeNotifier {
     };
   }
 
+  Future<SecretKey> _deriveAccountExportKey(
+    String passphrase,
+    List<int> salt,
+  ) {
+    final kdf = Pbkdf2(
+      macAlgorithm: Hmac.sha256(),
+      iterations: _accountExportIterations,
+      bits: 256,
+    );
+    return kdf.deriveKey(
+      secretKey: SecretKey(utf8Bytes(passphrase)),
+      nonce: salt,
+    );
+  }
+
+  void _validateAccountTransferPassphrase(String passphrase) {
+    final error = accountTransferPassphraseError(passphrase);
+    if (error != null) {
+      throw ArgumentError(error);
+    }
+  }
+
   Future<void> _loadArchivedMessages() async {
     final archived = await _messageArchive.load();
     _messages.clear();
@@ -1128,6 +1730,13 @@ class AppState extends ChangeNotifier {
   Contact? _contactById(String userId) {
     for (final contact in _contacts) {
       if (contact.userId == userId) return contact;
+    }
+    return null;
+  }
+
+  GroupConversation? _groupById(String groupId) {
+    for (final group in _groups) {
+      if (group.groupId == groupId) return group;
     }
     return null;
   }

@@ -48,7 +48,9 @@ class _SetupScreenState extends State<SetupScreen> {
                       prefixIcon: Icon(Icons.person_outline),
                     ),
                     validator: (value) {
-                      if ((value ?? '').trim().length < 3) return 'Minimum 3 znaki';
+                      if ((value ?? '').trim().length < 3) {
+                        return 'Minimum 3 znaki';
+                      }
                       return null;
                     },
                   ),
@@ -61,7 +63,8 @@ class _SetupScreenState extends State<SetupScreen> {
                     ),
                     validator: (value) {
                       final text = (value ?? '').trim();
-                      if (!text.startsWith('ws://') && !text.startsWith('wss://')) {
+                      if (!text.startsWith('ws://') &&
+                          !text.startsWith('wss://')) {
                         return 'Uzyj ws:// albo wss://';
                       }
                       return null;
@@ -76,13 +79,17 @@ class _SetupScreenState extends State<SetupScreen> {
                     ),
                     obscureText: true,
                     validator: (value) {
-                      if ((value ?? '').trim().length < 32) return 'Minimum 32 znaki';
+                      if ((value ?? '').trim().length < 32) {
+                        return 'Minimum 32 znaki';
+                      }
                       return null;
                     },
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 12),
-                    Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    Text(_error!,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error)),
                   ],
                   const SizedBox(height: 20),
                   FilledButton.icon(
@@ -94,6 +101,12 @@ class _SetupScreenState extends State<SetupScreen> {
                           )
                         : const Icon(Icons.lock_outline),
                     label: const Text('Utworz tozsamosc'),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: _saving ? null : _importAccount,
+                    icon: const Icon(Icons.devices_other_outlined),
+                    label: const Text('Importuj konto z pliku'),
                   ),
                 ],
               ),
@@ -121,5 +134,83 @@ class _SetupScreenState extends State<SetupScreen> {
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _importAccount() async {
+    final passphrase = await _askImportPassphrase();
+    if (passphrase == null) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.appState.importAccountPackageFromFile(passphrase);
+    } catch (error) {
+      setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<String?> _askImportPassphrase() async {
+    final controller = TextEditingController();
+    String? error;
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: const Text('Import konta'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: controller,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Haslo do pakietu konta',
+                      ),
+                    ),
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Anuluj'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final value = controller.text.trim();
+                    final validationError =
+                        AppState.accountTransferPassphraseError(value);
+                    if (validationError != null) {
+                      setState(() => error = validationError);
+                      return;
+                    }
+                    Navigator.of(context).pop(value);
+                  },
+                  child: const Text('Importuj'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    controller.dispose();
+    return result;
   }
 }

@@ -120,6 +120,9 @@ class DesktopNotifier {
       PlainPayloadType.pin => 'Przypieto wiadomosc.',
       PlainPayloadType.receipt => 'Potwierdzenie wiadomosci.',
       PlainPayloadType.edit => 'Edytowano wiadomosc.',
+      PlainPayloadType.groupInvite => 'Zaproszenie do grupy.',
+      PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie.',
+      PlainPayloadType.groupText => _trim(payload.text ?? ''),
     };
   }
 

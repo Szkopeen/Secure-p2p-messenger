@@ -2,7 +2,18 @@ enum MessageDirection { inbound, outbound, system }
 
 enum MessageStatus { pending, sent, delivered, read, failed }
 
-enum PlainPayloadType { text, file, retraction, reaction, pin, receipt, edit }
+enum PlainPayloadType {
+  text,
+  file,
+  retraction,
+  reaction,
+  pin,
+  receipt,
+  edit,
+  groupInvite,
+  groupInviteResponse,
+  groupText,
+}
 
 enum ReceiptKind { delivered, read }
 
@@ -17,7 +28,12 @@ class PlainPayload {
         reactionEmoji = null,
         pinPinned = null,
         receiptKind = null,
-        editedText = null;
+        editedText = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
 
   const PlainPayload.file({
     required this.fileName,
@@ -30,7 +46,12 @@ class PlainPayload {
         reactionEmoji = null,
         pinPinned = null,
         receiptKind = null,
-        editedText = null;
+        editedText = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
 
   const PlainPayload.retraction({
     required this.targetMessageId,
@@ -43,7 +64,12 @@ class PlainPayload {
         reactionEmoji = null,
         pinPinned = null,
         receiptKind = null,
-        editedText = null;
+        editedText = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
 
   const PlainPayload.reaction({
     required this.targetMessageId,
@@ -56,7 +82,12 @@ class PlainPayload {
         fileSize = null,
         pinPinned = null,
         receiptKind = null,
-        editedText = null;
+        editedText = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
 
   const PlainPayload.pin({
     required this.targetMessageId,
@@ -69,7 +100,12 @@ class PlainPayload {
         fileSize = null,
         reactionEmoji = null,
         receiptKind = null,
-        editedText = null;
+        editedText = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
 
   const PlainPayload.receipt({
     required this.targetMessageId,
@@ -82,7 +118,12 @@ class PlainPayload {
         fileSize = null,
         reactionEmoji = null,
         pinPinned = null,
-        editedText = null;
+        editedText = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
 
   const PlainPayload.edit({
     required this.targetMessageId,
@@ -95,7 +136,66 @@ class PlainPayload {
         fileSize = null,
         reactionEmoji = null,
         pinPinned = null,
-        receiptKind = null;
+        receiptKind = null,
+        groupId = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
+
+  const PlainPayload.groupInvite({
+    required this.groupId,
+    required this.groupName,
+    required this.groupMemberIds,
+  })  : type = PlainPayloadType.groupInvite,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        targetMessageId = null,
+        reactionEmoji = null,
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null,
+        groupAccepted = null,
+        groupMessageId = null;
+
+  const PlainPayload.groupInviteResponse({
+    required this.groupId,
+    required this.groupAccepted,
+  })  : type = PlainPayloadType.groupInviteResponse,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        targetMessageId = null,
+        reactionEmoji = null,
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupMessageId = null;
+
+  const PlainPayload.groupText({
+    required this.groupId,
+    required this.groupMessageId,
+    required this.text,
+  })  : type = PlainPayloadType.groupText,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        targetMessageId = null,
+        reactionEmoji = null,
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null;
 
   final PlainPayloadType type;
   final String? text;
@@ -108,6 +208,11 @@ class PlainPayload {
   final bool? pinPinned;
   final ReceiptKind? receiptKind;
   final String? editedText;
+  final String? groupId;
+  final String? groupName;
+  final List<String>? groupMemberIds;
+  final bool? groupAccepted;
+  final String? groupMessageId;
 
   Map<String, dynamic> toJson() => switch (type) {
         PlainPayloadType.text => {
@@ -151,6 +256,26 @@ class PlainPayload {
             'type': 'edit',
             'targetMessageId': targetMessageId,
             'text': editedText,
+          },
+        PlainPayloadType.groupInvite => {
+            'v': 1,
+            'type': 'groupInvite',
+            'groupId': groupId,
+            'groupName': groupName,
+            'memberIds': groupMemberIds,
+          },
+        PlainPayloadType.groupInviteResponse => {
+            'v': 1,
+            'type': 'groupInviteResponse',
+            'groupId': groupId,
+            'accepted': groupAccepted,
+          },
+        PlainPayloadType.groupText => {
+            'v': 1,
+            'type': 'groupText',
+            'groupId': groupId,
+            'groupMessageId': groupMessageId,
+            'text': text,
           },
       };
 
@@ -213,6 +338,41 @@ class PlainPayload {
           targetMessageId: targetMessageId,
           editedText: json['text'] as String? ?? '',
         );
+      case 'groupInvite':
+        final groupId = json['groupId'] as String?;
+        if (groupId == null || groupId.isEmpty) {
+          throw const FormatException('Brak identyfikatora grupy.');
+        }
+        return PlainPayload.groupInvite(
+          groupId: groupId,
+          groupName: json['groupName'] as String? ?? 'Grupa',
+          groupMemberIds: ((json['memberIds'] as List?) ?? const [])
+              .map((item) => item.toString())
+              .toList(growable: false),
+        );
+      case 'groupInviteResponse':
+        final groupId = json['groupId'] as String?;
+        if (groupId == null || groupId.isEmpty) {
+          throw const FormatException('Brak identyfikatora grupy.');
+        }
+        return PlainPayload.groupInviteResponse(
+          groupId: groupId,
+          groupAccepted: json['accepted'] == true,
+        );
+      case 'groupText':
+        final groupId = json['groupId'] as String?;
+        final groupMessageId = json['groupMessageId'] as String?;
+        if (groupId == null ||
+            groupId.isEmpty ||
+            groupMessageId == null ||
+            groupMessageId.isEmpty) {
+          throw const FormatException('Niepoprawna wiadomosc grupowa.');
+        }
+        return PlainPayload.groupText(
+          groupId: groupId,
+          groupMessageId: groupMessageId,
+          text: json['text'] as String? ?? '',
+        );
       default:
         throw const FormatException('Nieznany typ payloadu.');
     }
@@ -231,6 +391,7 @@ class ChatMessage {
     this.pinned = false,
     this.reactions = const {},
     this.editedAt,
+    this.senderId,
     this.transport,
     this.error,
   });
@@ -245,6 +406,7 @@ class ChatMessage {
   final bool pinned;
   final Map<String, String> reactions;
   final DateTime? editedAt;
+  final String? senderId;
   final String? transport;
   final String? error;
 
@@ -260,6 +422,7 @@ class ChatMessage {
         'pinned': pinned,
         'reactions': reactions,
         'editedAt': editedAt?.toUtc().toIso8601String(),
+        'senderId': senderId,
         'transport': transport,
         'error': error,
       };
@@ -280,6 +443,7 @@ class ChatMessage {
       editedAt: json['editedAt'] == null
           ? null
           : DateTime.parse(json['editedAt'] as String),
+      senderId: json['senderId'] as String?,
       transport: json['transport'] as String?,
       error: json['error'] as String?,
     );
@@ -293,6 +457,7 @@ class ChatMessage {
     Map<String, String>? reactions,
     DateTime? editedAt,
     bool clearEditedAt = false,
+    String? senderId,
     String? transport,
     String? error,
   }) {
@@ -307,6 +472,7 @@ class ChatMessage {
       pinned: pinned ?? this.pinned,
       reactions: reactions ?? this.reactions,
       editedAt: clearEditedAt ? null : editedAt ?? this.editedAt,
+      senderId: senderId ?? this.senderId,
       transport: transport ?? this.transport,
       error: error ?? this.error,
     );

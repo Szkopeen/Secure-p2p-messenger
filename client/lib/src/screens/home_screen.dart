@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../app_state.dart';
 import '../crypto/codec.dart';
 import '../models/contact.dart';
+import '../models/group.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
 import 'settings_screen.dart';
@@ -32,6 +33,11 @@ class HomeScreen extends StatelessWidget {
               ],
             ),
             actions: [
+              IconButton(
+                tooltip: 'Utworz grupe',
+                onPressed: () => _showCreateGroupDialog(context),
+                icon: const Icon(Icons.group_add_outlined),
+              ),
               IconButton(
                 tooltip: 'Polacz ponownie',
                 onPressed: () => appState.connectRelay(),
@@ -74,54 +80,37 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               Expanded(
-                child: appState.contacts.isEmpty
+                child: appState.contacts.isEmpty && appState.groups.isEmpty
                     ? const Center(child: Text('Brak kontaktow'))
-                    : ListView.separated(
-                        itemCount: appState.contacts.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (context, index) {
-                          final contact = appState.contacts[index];
-                          final p2p = appState.isP2pConnected(contact.userId);
-                          final online =
-                              appState.isContactOnline(contact.userId);
-                          final messages = appState.messagesFor(contact.userId);
-                          final last = messages.isEmpty ? null : messages.last;
-                          final unread =
-                              appState.unreadCountFor(contact.userId);
-                          final initial = contact.displayName.isEmpty
-                              ? '?'
-                              : contact.displayName
-                                  .substring(0, 1)
-                                  .toUpperCase();
-                          return ListTile(
-                            leading: _UnreadBadge(
-                              count: unread,
-                              child: _AvatarView(
-                                bytesBase64: contact.avatarBytesBase64,
-                                fallback: initial,
-                                online: online,
-                              ),
-                            ),
-                            title: Text(contact.displayName),
-                            subtitle: Text(
-                              _contactSubtitle(contact, last, p2p),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            trailing: Icon(
-                              p2p ? Icons.hub_outlined : Icons.cloud_queue,
-                              color: p2p ? Colors.green.shade400 : null,
-                            ),
-                            onTap: () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => ChatScreen(
-                                      appState: appState, contact: contact),
+                    : ListView(
+                        children: [
+                          if (appState.contacts.isNotEmpty) ...[
+                            const _SectionHeader(title: 'Kontakty'),
+                            for (final contact in appState.contacts)
+                              _ContactTile(
+                                appState: appState,
+                                contact: contact,
+                                subtitle: _contactSubtitle(
+                                  contact,
+                                  appState.messagesFor(contact.userId).isEmpty
+                                      ? null
+                                      : appState
+                                          .messagesFor(contact.userId)
+                                          .last,
+                                  appState.isP2pConnected(contact.userId),
                                 ),
-                              );
-                            },
-                          );
-                        },
+                              ),
+                          ],
+                          if (appState.groups.isNotEmpty) ...[
+                            const _SectionHeader(title: 'Grupy'),
+                            for (final group in appState.groups)
+                              _GroupTile(
+                                appState: appState,
+                                group: group,
+                                subtitle: _groupSubtitle(group),
+                              ),
+                          ],
+                        ],
                       ),
               ),
             ],
@@ -214,6 +203,109 @@ class HomeScreen extends StatelessWidget {
     publicKey.dispose();
   }
 
+  Future<void> _showCreateGroupDialog(BuildContext context) async {
+    final name = TextEditingController();
+    final selected = <String>{};
+    String? error;
+
+    final selectableContacts = appState.contacts;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: const Text('Utworz grupe'),
+              content: SizedBox(
+                width: 520,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: name,
+                      decoration:
+                          const InputDecoration(labelText: 'Nazwa grupy'),
+                    ),
+                    const SizedBox(height: 12),
+                    if (selectableContacts.isEmpty)
+                      const Text('Brak kontaktow do zaproszenia.')
+                    else
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 320),
+                        child: ListView(
+                          shrinkWrap: true,
+                          children: [
+                            for (final contact in selectableContacts)
+                              CheckboxListTile(
+                                value: selected.contains(contact.userId),
+                                onChanged: (value) {
+                                  setState(() {
+                                    if (value == true) {
+                                      selected.add(contact.userId);
+                                    } else {
+                                      selected.remove(contact.userId);
+                                    }
+                                  });
+                                },
+                                title: Text(contact.displayName),
+                                subtitle: Text(
+                                  appState.isContactOnline(contact.userId)
+                                      ? '${contact.userId} / online'
+                                      : '${contact.userId} / offline, zaproszenie poczeka',
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Anuluj'),
+                ),
+                FilledButton(
+                  onPressed: selectableContacts.isEmpty
+                      ? null
+                      : () async {
+                          try {
+                            final members = selectableContacts
+                                .where((contact) =>
+                                    selected.contains(contact.userId))
+                                .toList(growable: false);
+                            await appState.createGroup(
+                              name: name.text,
+                              members: members,
+                            );
+                            if (dialogContext.mounted) {
+                              Navigator.of(dialogContext).pop();
+                            }
+                          } catch (exception) {
+                            setState(() => error = exception.toString());
+                          }
+                        },
+                  child: const Text('Utworz'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    name.dispose();
+  }
+
   String _contactSubtitle(Contact contact, ChatMessage? last, bool p2p) {
     if (last == null) return '${contact.userId} / ${p2p ? 'P2P' : 'Relay'}';
     if (last.retracted) return 'Wiadomosc usunieta';
@@ -226,7 +318,152 @@ class HomeScreen extends StatelessWidget {
       PlainPayloadType.pin => 'Przypieto wiadomosc',
       PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
       PlainPayloadType.edit => 'Edytowano wiadomosc',
+      PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
+      PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
+      PlainPayloadType.groupText => last.payload.text ?? '',
     };
+  }
+
+  String _groupSubtitle(GroupConversation group) {
+    final messages = appState.messagesFor(group.groupId);
+    if (group.pendingInvite) {
+      return 'Zaproszenie od ${appState.displayNameForUser(group.invitedBy ?? '')}';
+    }
+    if (messages.isNotEmpty) {
+      final last = messages.last;
+      if (last.direction == MessageDirection.system) {
+        return last.payload.text ?? '';
+      }
+      final prefix = last.direction == MessageDirection.inbound
+          ? '${appState.displayNameForUser(last.senderId ?? '')}: '
+          : '';
+      return '$prefix${last.payload.text ?? ''}';
+    }
+    return 'Zaakceptowalo ${group.acceptedMemberIds.length} z ${group.memberIds.length}';
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.labelLarge,
+      ),
+    );
+  }
+}
+
+class _ContactTile extends StatelessWidget {
+  const _ContactTile({
+    required this.appState,
+    required this.contact,
+    required this.subtitle,
+  });
+
+  final AppState appState;
+  final Contact contact;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final p2p = appState.isP2pConnected(contact.userId);
+    final online = appState.isContactOnline(contact.userId);
+    final unread = appState.unreadCountFor(contact.userId);
+    final initial = contact.displayName.isEmpty
+        ? '?'
+        : contact.displayName.substring(0, 1).toUpperCase();
+    return ListTile(
+      leading: _UnreadBadge(
+        count: unread,
+        child: _AvatarView(
+          bytesBase64: contact.avatarBytesBase64,
+          fallback: initial,
+          online: online,
+        ),
+      ),
+      title: Text(contact.displayName),
+      subtitle: Text(
+        subtitle,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: Icon(
+        p2p ? Icons.hub_outlined : Icons.cloud_queue,
+        color: p2p ? Colors.green.shade400 : null,
+      ),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ChatScreen(appState: appState, contact: contact),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _GroupTile extends StatelessWidget {
+  const _GroupTile({
+    required this.appState,
+    required this.group,
+    required this.subtitle,
+  });
+
+  final AppState appState;
+  final GroupConversation group;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final unread = appState.unreadCountFor(group.groupId);
+    return ListTile(
+      leading: Badge.count(
+        count: unread,
+        isLabelVisible: unread > 0,
+        child: const CircleAvatar(
+          child: Icon(Icons.groups_outlined),
+        ),
+      ),
+      title: Text(group.name),
+      subtitle: Text(
+        subtitle,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: group.pendingInvite
+          ? Wrap(
+              spacing: 4,
+              children: [
+                IconButton(
+                  tooltip: 'Odrzuc',
+                  onPressed: () => appState.respondToGroupInvite(group, false),
+                  icon: const Icon(Icons.close),
+                ),
+                IconButton.filled(
+                  tooltip: 'Akceptuj',
+                  onPressed: () => appState.respondToGroupInvite(group, true),
+                  icon: const Icon(Icons.check),
+                ),
+              ],
+            )
+          : const Icon(Icons.chevron_right),
+      onTap: group.pendingInvite
+          ? null
+          : () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => ChatScreen(appState: appState, group: group),
+                ),
+              );
+            },
+    );
   }
 }
 
