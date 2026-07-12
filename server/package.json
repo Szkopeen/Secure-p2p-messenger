@@ -11,6 +11,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "check": "node --check src/server.js",
+    "admin:users": "node scripts/admin-users.js",
     "publish-update": "node scripts/publish-update.js"
   },
   "dependencies": {

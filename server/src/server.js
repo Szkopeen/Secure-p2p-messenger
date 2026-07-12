@@ -24,10 +24,12 @@ const users = new Map();
 const profiles = new Map();
 const offlineQueues = new Map();
 const publicDirectory = new Map();
+const bannedUsers = new Set();
 
 loadProfiles();
 loadOfflineQueues();
 loadPublicDirectory();
+loadBannedUsers();
 
 function audit(message, fields = {}) {
   if (!config.securityLogs) return;
@@ -89,6 +91,22 @@ function loadPublicDirectory() {
     }
   } catch (error) {
     audit('Nie wczytano publicznej listy uzytkownikow', { error: String(error) });
+  }
+}
+
+function loadBannedUsers() {
+  try {
+    bannedUsers.clear();
+    if (!fs.existsSync(config.bannedUsersFile)) return;
+    const raw = fs.readFileSync(config.bannedUsersFile, 'utf8');
+    const decoded = JSON.parse(raw);
+    if (!decoded || decoded.v !== 1 || !Array.isArray(decoded.users)) return;
+
+    for (const userId of decoded.users) {
+      if (typeof userId === 'string') bannedUsers.add(userId);
+    }
+  } catch (error) {
+    audit('Nie wczytano listy zablokowanych uzytkownikow', { error: String(error) });
   }
 }
 
@@ -194,6 +212,10 @@ function flushOfflineQueue(userId) {
   offlineQueues.delete(userId);
   persistOfflineQueues();
   return delivered;
+}
+
+function isBannedUser(userId) {
+  return bannedUsers.has(userId);
 }
 
 function sanitizeProfile(profile) {
@@ -359,6 +381,12 @@ function handleHello(ws, state, message) {
     return;
   }
 
+  if (isBannedUser(message.userId)) {
+    audit('Odrzucono zablokowanego uzytkownika', { userId: message.userId });
+    closeWithError(ws, 1008, 'Konto jest zablokowane na tym relay.');
+    return;
+  }
+
   state.authenticated = true;
   state.userId = message.userId;
   state.deviceId = message.deviceId;
@@ -384,6 +412,11 @@ function handleRelay(ws, state, message) {
   const error = validateRelay(message);
   if (error) {
     send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_relay', reason: error });
+    return;
+  }
+
+  if (isBannedUser(message.to)) {
+    send(ws, { v: 1, type: 'error', id: message.id, code: 'recipient_banned', reason: 'Adresat jest zablokowany.' });
     return;
   }
 
@@ -415,6 +448,11 @@ function handleSignal(ws, state, message) {
   const error = validateSignal(message);
   if (error) {
     send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_signal', reason: error });
+    return;
+  }
+
+  if (isBannedUser(message.to)) {
+    send(ws, { v: 1, type: 'error', id: message.id, code: 'recipient_banned', reason: 'Adresat jest zablokowany.' });
     return;
   }
 
@@ -469,7 +507,7 @@ function handlePresenceQuery(ws, message) {
 
 function directoryEntriesFor(requestingUserId) {
   return Array.from(publicDirectory.values())
-    .filter((entry) => entry.userId !== requestingUserId)
+    .filter((entry) => entry.userId !== requestingUserId && !isBannedUser(entry.userId))
     .sort((left, right) => left.displayName.localeCompare(right.displayName))
     .map((entry) => ({
       ...entry,
@@ -519,6 +557,11 @@ function handleContactRequest(ws, state, message) {
   const error = validateContactRequest(message);
   if (error) {
     send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_contact_request', reason: error });
+    return;
+  }
+
+  if (isBannedUser(message.to)) {
+    send(ws, { v: 1, type: 'error', id: message.id, code: 'recipient_banned', reason: 'Adresat jest zablokowany.' });
     return;
   }
 
@@ -710,6 +753,7 @@ const heartbeat = setInterval(() => {
 }, 30_000);
 
 const offlineQueueMaintenance = setInterval(() => {
+  loadBannedUsers();
   pruneOfflineQueues();
 }, 60_000);
 
