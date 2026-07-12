@@ -112,7 +112,8 @@ class HomeScreen extends StatelessWidget {
                               ),
                           ],
                           if (contactInvites.isNotEmpty) ...[
-                            const _SectionHeader(title: 'Zaproszenia do kontaktow'),
+                            const _SectionHeader(
+                                title: 'Zaproszenia do kontaktow'),
                             for (final invite in contactInvites)
                               _ContactInviteTile(
                                 appState: appState,
@@ -381,7 +382,21 @@ class HomeScreen extends StatelessWidget {
       final prefix = last.direction == MessageDirection.inbound
           ? '${appState.displayNameForUser(last.senderId ?? '')}: '
           : '';
-      return '$prefix${last.payload.text ?? ''}';
+      final preview = switch (last.payload.type) {
+        PlainPayloadType.text => last.payload.text ?? '',
+        PlainPayloadType.file =>
+          'Plik: ${last.payload.fileName ?? 'zalacznik'}',
+        PlainPayloadType.retraction => 'Wiadomosc usunieta',
+        PlainPayloadType.reaction => 'Reakcja na wiadomosc',
+        PlainPayloadType.pin => 'Przypieto wiadomosc',
+        PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
+        PlainPayloadType.edit => 'Edytowano wiadomosc',
+        PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
+        PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
+        PlainPayloadType.groupText => last.payload.text ?? '',
+        PlainPayloadType.groupLeave => 'Uzytkownik wyszedl z grupy',
+      };
+      return '$prefix$preview';
     }
     return 'Zaakceptowalo ${group.acceptedMemberIds.length} z ${group.memberIds.length}';
   }
@@ -420,8 +435,9 @@ class _DirectoryScreen extends StatelessWidget {
             actions: [
               IconButton(
                 tooltip: 'Odswiez',
-                onPressed:
-                    appState.loadingDirectory ? null : appState.refreshDirectory,
+                onPressed: appState.loadingDirectory
+                    ? null
+                    : appState.refreshDirectory,
                 icon: appState.loadingDirectory
                     ? const SizedBox.square(
                         dimension: 20,
@@ -496,7 +512,8 @@ class _DirectoryEntryTile extends StatelessWidget {
         ],
       ),
       title: Text(entry.displayName),
-      subtitle: Text('${entry.userId} / ${entry.online ? 'online' : 'offline'}'),
+      subtitle:
+          Text('${entry.userId} / ${entry.online ? 'online' : 'offline'}'),
       trailing: FilledButton.icon(
         onPressed: () => _sendInvite(context),
         icon: const Icon(Icons.person_add_alt_1),
@@ -555,9 +572,36 @@ class _ContactTile extends StatelessWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
-      trailing: Icon(
-        p2p ? Icons.hub_outlined : Icons.cloud_queue,
-        color: p2p ? Colors.green.shade400 : null,
+      trailing: Wrap(
+        spacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Icon(
+            p2p ? Icons.hub_outlined : Icons.cloud_queue,
+            color: p2p ? Colors.green.shade400 : null,
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Opcje kontaktu',
+            onSelected: (value) {
+              if (value == 'remove') {
+                _confirmRemoveContact(context);
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'remove',
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.person_remove_outlined, size: 18),
+                    SizedBox(width: 10),
+                    Text('Usun kontakt'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
       onTap: () {
         Navigator.of(context).push(
@@ -567,6 +611,32 @@ class _ContactTile extends StatelessWidget {
         );
       },
     );
+  }
+
+  Future<void> _confirmRemoveContact(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Usun kontakt'),
+          content: Text(
+            'Usunac kontakt ${contact.displayName}? Prywatna historia z tym kontaktem zostanie usunieta lokalnie.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Anuluj'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Usun'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    await appState.removeContact(contact);
   }
 }
 

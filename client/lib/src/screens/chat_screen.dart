@@ -47,6 +47,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _dragging = false;
   String? _highlightedMessageId;
   String? _lastReadMarkMessageId;
+  ChatMessage? _replyingTo;
   int _searchResultIndex = 0;
 
   bool get _isSending => _pendingSends > 0;
@@ -131,13 +132,15 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               IconButton(
                 tooltip: 'Wyslij plik',
-                onPressed: _isSending || _isGroup ? null : _sendFile,
+                onPressed: _isSending ? null : _sendFile,
                 icon: const Icon(Icons.attach_file),
               ),
               PopupMenuButton<String>(
                 onSelected: (value) {
                   if (value == 'clear-local') {
                     unawaited(_confirmClearConversation());
+                  } else if (value == 'invite-members') {
+                    unawaited(_showInviteToGroupDialog());
                   } else if (value == 'leave-group') {
                     unawaited(_confirmLeaveGroup());
                   } else if (value == 'delete-group-local') {
@@ -154,6 +157,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                   if (_isGroup) ...[
                     const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'invite-members',
+                      child: _MessageMenuItem(
+                        icon: Icons.group_add_outlined,
+                        label: 'Dodaj osoby do grupy',
+                      ),
+                    ),
                     const PopupMenuItem(
                       value: 'leave-group',
                       child: _MessageMenuItem(
@@ -208,9 +218,12 @@ class _ChatScreenState extends State<ChatScreen> {
                           return _MessageBubble(
                             appState: widget.appState,
                             contact: widget.contact,
+                            group: widget.group,
                             message: message,
                             senderName: _senderNameFor(message),
                             highlighted: message.id == _highlightedMessageId,
+                            onReply: _startReply,
+                            onJumpToMessage: _highlightAndScrollToMessage,
                           );
                         },
                       ),
@@ -219,40 +232,54 @@ class _ChatScreenState extends State<ChatScreen> {
                       top: false,
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                        child: Row(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Expanded(
-                              child: CallbackShortcuts(
-                                bindings: {
-                                  const SingleActivator(
-                                    LogicalKeyboardKey.enter,
-                                  ): () => unawaited(_sendText()),
-                                },
-                                child: TextField(
-                                  controller: _text,
-                                  focusNode: _inputFocus,
-                                  minLines: 1,
-                                  maxLines: 6,
-                                  keyboardType: TextInputType.multiline,
-                                  textInputAction: TextInputAction.newline,
-                                  decoration: const InputDecoration(
-                                    hintText: 'Wiadomosc',
-                                    prefixIcon: Icon(Icons.lock_outline),
+                            if (_replyingTo != null) ...[
+                              _ReplyComposerPreview(
+                                message: _replyingTo!,
+                                preview: _messagePreview(_replyingTo!),
+                                onCancel: () =>
+                                    setState(() => _replyingTo = null),
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: CallbackShortcuts(
+                                    bindings: {
+                                      const SingleActivator(
+                                        LogicalKeyboardKey.enter,
+                                      ): () => unawaited(_sendText()),
+                                    },
+                                    child: TextField(
+                                      controller: _text,
+                                      focusNode: _inputFocus,
+                                      minLines: 1,
+                                      maxLines: 6,
+                                      keyboardType: TextInputType.multiline,
+                                      textInputAction: TextInputAction.newline,
+                                      decoration: const InputDecoration(
+                                        hintText: 'Wiadomosc',
+                                        prefixIcon: Icon(Icons.lock_outline),
+                                      ),
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            IconButton.filled(
-                              tooltip: 'Wyslij',
-                              onPressed: _sendText,
-                              icon: _isSending
-                                  ? const SizedBox.square(
-                                      dimension: 18,
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2),
-                                    )
-                                  : const Icon(Icons.send),
+                                const SizedBox(width: 8),
+                                IconButton.filled(
+                                  tooltip: 'Wyslij',
+                                  onPressed: _sendText,
+                                  icon: _isSending
+                                      ? const SizedBox.square(
+                                          dimension: 18,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2),
+                                        )
+                                      : const Icon(Icons.send),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -309,15 +336,27 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     _text.clear();
+    final reply = _replyingTo;
+    setState(() => _replyingTo = null);
     _inputFocus.requestFocus();
     _incrementPendingSends();
     try {
       final group = widget.group;
       final contact = widget.contact;
       if (group != null) {
-        await widget.appState.sendGroupText(group, text);
+        await widget.appState.sendGroupText(
+          group,
+          text,
+          replyToMessageId: reply?.id,
+          replyPreview: reply == null ? null : _messagePreview(reply),
+        );
       } else {
-        await widget.appState.sendText(contact!, text);
+        await widget.appState.sendText(
+          contact!,
+          text,
+          replyToMessageId: reply?.id,
+          replyPreview: reply == null ? null : _messagePreview(reply),
+        );
       }
     } catch (error) {
       _showError(error);
@@ -329,21 +368,34 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendDroppedFiles(DropDoneDetails detail) async {
     if (detail.files.isEmpty) return;
-    if (_isGroup) {
-      _showError('Pliki w grupach dodamy w kolejnym kroku.');
-      return;
-    }
     setState(() => _dragging = false);
     _incrementPendingSends();
     try {
+      final group = widget.group;
+      final contact = widget.contact;
+      final reply = _replyingTo;
+      setState(() => _replyingTo = null);
       for (final file in detail.files) {
         final bytes = await file.readAsBytes();
-        await widget.appState.sendFileBytes(
-          widget.contact!,
-          fileName: file.name,
-          bytes: bytes,
-          mimeType: file.mimeType,
-        );
+        if (group != null) {
+          await widget.appState.sendGroupFileBytes(
+            group,
+            fileName: file.name,
+            bytes: bytes,
+            mimeType: file.mimeType,
+            replyToMessageId: reply?.id,
+            replyPreview: reply == null ? null : _messagePreview(reply),
+          );
+        } else {
+          await widget.appState.sendFileBytes(
+            contact!,
+            fileName: file.name,
+            bytes: bytes,
+            mimeType: file.mimeType,
+            replyToMessageId: reply?.id,
+            replyPreview: reply == null ? null : _messagePreview(reply),
+          );
+        }
       }
     } catch (error) {
       _showError(error);
@@ -441,6 +493,100 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) Navigator.of(context).pop();
   }
 
+  Future<void> _showInviteToGroupDialog() async {
+    final group = widget.group;
+    if (group == null) return;
+
+    final selectableContacts = widget.appState.contacts
+        .where((contact) => !group.memberIds.contains(contact.userId))
+        .toList(growable: false);
+    final selected = <String>{};
+    String? error;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Dodaj osoby do grupy'),
+              content: SizedBox(
+                width: 520,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (selectableContacts.isEmpty)
+                      const Text('Brak kontaktow spoza tej grupy.')
+                    else
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 320),
+                        child: ListView(
+                          shrinkWrap: true,
+                          children: [
+                            for (final contact in selectableContacts)
+                              CheckboxListTile(
+                                value: selected.contains(contact.userId),
+                                onChanged: (value) {
+                                  setDialogState(() {
+                                    if (value == true) {
+                                      selected.add(contact.userId);
+                                    } else {
+                                      selected.remove(contact.userId);
+                                    }
+                                  });
+                                },
+                                title: Text(contact.displayName),
+                                subtitle: Text(contact.userId),
+                              ),
+                          ],
+                        ),
+                      ),
+                    if (error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Anuluj'),
+                ),
+                FilledButton(
+                  onPressed: selectableContacts.isEmpty
+                      ? null
+                      : () async {
+                          try {
+                            await widget.appState.inviteContactsToGroup(
+                              group: group,
+                              contacts: selectableContacts
+                                  .where((contact) =>
+                                      selected.contains(contact.userId))
+                                  .toList(growable: false),
+                            );
+                            if (dialogContext.mounted) {
+                              Navigator.of(dialogContext).pop();
+                            }
+                          } catch (exception) {
+                            setDialogState(() => error = exception.toString());
+                          }
+                        },
+                  child: const Text('Zapros'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   void _toggleSearch() {
     setState(() {
       _searchOpen = !_searchOpen;
@@ -471,7 +617,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String _messageSearchText(ChatMessage message) {
     if (message.retracted) return 'wiadomosc usunieta';
-    return switch (message.payload.type) {
+    final text = switch (message.payload.type) {
       PlainPayloadType.text => message.payload.text?.toLowerCase() ?? '',
       PlainPayloadType.file => (message.payload.fileName ?? '').toLowerCase(),
       PlainPayloadType.retraction => 'wiadomosc usunieta',
@@ -484,6 +630,8 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.groupText => message.payload.text?.toLowerCase() ?? '',
       PlainPayloadType.groupLeave => 'wyjscie z grupy',
     };
+    final reply = message.payload.replyPreview?.toLowerCase();
+    return reply == null || reply.isEmpty ? text : '$text $reply';
   }
 
   void _jumpSearchResult(List<ChatMessage> messages, int direction) {
@@ -599,6 +747,14 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToMessageId(messageId);
   }
 
+  void _startReply(ChatMessage message) {
+    if (message.direction == MessageDirection.system || message.retracted) {
+      return;
+    }
+    setState(() => _replyingTo = message);
+    _inputFocus.requestFocus();
+  }
+
   void _scrollToMessageId(String messageId) {
     final index = _visibleMessages.indexWhere((message) {
       return message.id == messageId;
@@ -633,11 +789,25 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendFile() async {
-    final contact = widget.contact;
-    if (contact == null) return;
     _incrementPendingSends();
     try {
-      await widget.appState.sendFile(contact);
+      final group = widget.group;
+      final contact = widget.contact;
+      final reply = _replyingTo;
+      setState(() => _replyingTo = null);
+      if (group != null) {
+        await widget.appState.sendGroupFile(
+          group,
+          replyToMessageId: reply?.id,
+          replyPreview: reply == null ? null : _messagePreview(reply),
+        );
+      } else {
+        await widget.appState.sendFile(
+          contact!,
+          replyToMessageId: reply?.id,
+          replyPreview: reply == null ? null : _messagePreview(reply),
+        );
+      }
     } catch (error) {
       _showError(error);
     } finally {
@@ -672,7 +842,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _scrollToBottom({bool jump = false}) {
     if (_visibleMessages.isEmpty) return;
     final lastIndex = _visibleMessages.length - 1;
-    final epoch = _scrollEpoch;
+    final epoch = ++_scrollEpoch;
     void attempt(int remaining) {
       if (!mounted || epoch != _scrollEpoch) return;
       if (!_itemScrollController.isAttached) {
@@ -724,6 +894,111 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(error.toString())),
+    );
+  }
+}
+
+class _ReplyComposerPreview extends StatelessWidget {
+  const _ReplyComposerPreview({
+    required this.message,
+    required this.preview,
+    required this.onCancel,
+  });
+
+  final ChatMessage message;
+  final String preview;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = message.direction == MessageDirection.outbound
+        ? 'Odpowiadasz na swoja wiadomosc'
+        : 'Odpowiadasz';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border(
+          left: BorderSide(
+            color: Theme.of(context).colorScheme.primary,
+            width: 4,
+          ),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(label, style: Theme.of(context).textTheme.labelMedium),
+                  Text(
+                    preview,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'Anuluj odpowiedz',
+              onPressed: onCancel,
+              icon: const Icon(Icons.close),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ReplySnippet extends StatelessWidget {
+  const _ReplySnippet({
+    required this.preview,
+    required this.onTap,
+  });
+
+  final String preview;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+            left: BorderSide(
+              color: Theme.of(context).colorScheme.primary,
+              width: 4,
+            ),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.reply, size: 16),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  preview,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -859,22 +1134,28 @@ class _SearchBar extends StatelessWidget {
   }
 }
 
-enum _MessageAction { react, edit, retract, pin, unpin, deleteLocal }
+enum _MessageAction { reply, react, edit, retract, pin, unpin, deleteLocal }
 
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.appState,
     required this.contact,
+    required this.group,
     required this.message,
     required this.senderName,
     required this.highlighted,
+    required this.onReply,
+    required this.onJumpToMessage,
   });
 
   final AppState appState;
   final Contact? contact;
+  final GroupConversation? group;
   final ChatMessage message;
   final String? senderName;
   final bool highlighted;
+  final ValueChanged<ChatMessage> onReply;
+  final ValueChanged<String> onJumpToMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -927,7 +1208,10 @@ class _MessageBubble extends StatelessWidget {
               ],
               message.retracted
                   ? _RetractedMessageView(outbound: outbound)
-                  : _PayloadView(payload: message.payload),
+                  : _PayloadView(
+                      payload: message.payload,
+                      onReplyTap: onJumpToMessage,
+                    ),
               if (message.reactions.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 _ReactionSummary(reactions: message.reactions),
@@ -949,6 +1233,7 @@ class _MessageBubble extends StatelessWidget {
                   ),
                   const SizedBox(width: 4),
                   _MessageActionsButton(
+                    canReply: _canReply(message),
                     canReact: _canReact(message),
                     canEdit: _canEdit(message),
                     canRetract: _canRetract(message),
@@ -984,7 +1269,6 @@ class _MessageBubble extends StatelessWidget {
   }
 
   bool _canEdit(ChatMessage message) {
-    if (contact == null) return false;
     return message.direction == MessageDirection.outbound &&
         !message.retracted &&
         message.status != MessageStatus.failed &&
@@ -992,7 +1276,6 @@ class _MessageBubble extends StatelessWidget {
   }
 
   bool _canRetract(ChatMessage message) {
-    if (contact == null) return false;
     return message.direction == MessageDirection.outbound &&
         !message.retracted &&
         message.status != MessageStatus.failed &&
@@ -1001,7 +1284,6 @@ class _MessageBubble extends StatelessWidget {
   }
 
   bool _canReact(ChatMessage message) {
-    if (contact == null) return false;
     return message.direction != MessageDirection.system &&
         !message.retracted &&
         message.payload.type != PlainPayloadType.retraction &&
@@ -1011,10 +1293,17 @@ class _MessageBubble extends StatelessWidget {
         message.payload.type != PlainPayloadType.edit;
   }
 
+  bool _canReply(ChatMessage message) {
+    return message.direction != MessageDirection.system && !message.retracted;
+  }
+
   Future<void> _handleAction(
       BuildContext context, _MessageAction action) async {
     try {
       switch (action) {
+        case _MessageAction.reply:
+          onReply(message);
+          break;
         case _MessageAction.react:
           await _showReactionPicker(context);
           break;
@@ -1022,13 +1311,28 @@ class _MessageBubble extends StatelessWidget {
           await _showEditDialog(context);
           break;
         case _MessageAction.retract:
-          await appState.retractMessage(contact!, message);
+          final group = this.group;
+          if (group != null) {
+            await appState.retractGroupMessage(group, message);
+          } else {
+            await appState.retractMessage(contact!, message);
+          }
           break;
         case _MessageAction.pin:
-          await appState.setMessagePinned(contact!, message, true);
+          final group = this.group;
+          if (group != null) {
+            await appState.setGroupMessagePinned(group, message, true);
+          } else {
+            await appState.setMessagePinned(contact!, message, true);
+          }
           break;
         case _MessageAction.unpin:
-          await appState.setMessagePinned(contact!, message, false);
+          final group = this.group;
+          if (group != null) {
+            await appState.setGroupMessagePinned(group, message, false);
+          } else {
+            await appState.setMessagePinned(contact!, message, false);
+          }
           break;
         case _MessageAction.deleteLocal:
           await appState.deleteMessageLocally(message.contactId, message.id);
@@ -1077,6 +1381,11 @@ class _MessageBubble extends StatelessWidget {
     );
     controller.dispose();
     if (edited == null) return;
+    final group = this.group;
+    if (group != null) {
+      await appState.editGroupMessage(group, message, edited);
+      return;
+    }
     final contact = this.contact;
     if (contact == null) return;
     await appState.editMessage(contact, message, edited);
@@ -1118,16 +1427,26 @@ class _MessageBubble extends StatelessWidget {
       },
     );
     if (selected == null) return;
-    await appState.reactToMessage(
-      contact!,
-      message,
-      selected.isEmpty ? null : selected,
-    );
+    final group = this.group;
+    if (group != null) {
+      await appState.reactToGroupMessage(
+        group,
+        message,
+        selected.isEmpty ? null : selected,
+      );
+    } else {
+      await appState.reactToMessage(
+        contact!,
+        message,
+        selected.isEmpty ? null : selected,
+      );
+    }
   }
 }
 
 class _MessageActionsButton extends StatelessWidget {
   const _MessageActionsButton({
+    required this.canReply,
     required this.canReact,
     required this.canEdit,
     required this.canRetract,
@@ -1135,6 +1454,7 @@ class _MessageActionsButton extends StatelessWidget {
     required this.onSelected,
   });
 
+  final bool canReply;
   final bool canReact;
   final bool canEdit;
   final bool canRetract;
@@ -1149,6 +1469,14 @@ class _MessageActionsButton extends StatelessWidget {
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(minWidth: 180),
       itemBuilder: (context) => [
+        if (canReply)
+          const PopupMenuItem(
+            value: _MessageAction.reply,
+            child: _MessageMenuItem(
+              icon: Icons.reply_outlined,
+              label: 'Odpowiedz',
+            ),
+          ),
         if (canReact)
           const PopupMenuItem(
             value: _MessageAction.react,
@@ -1282,13 +1610,17 @@ class _RetractedMessageView extends StatelessWidget {
 }
 
 class _PayloadView extends StatelessWidget {
-  const _PayloadView({required this.payload});
+  const _PayloadView({
+    required this.payload,
+    required this.onReplyTap,
+  });
 
   final PlainPayload payload;
+  final ValueChanged<String> onReplyTap;
 
   @override
   Widget build(BuildContext context) {
-    return switch (payload.type) {
+    final body = switch (payload.type) {
       PlainPayloadType.text => SelectableText(payload.text ?? ''),
       PlainPayloadType.retraction => const Text('Wiadomosc zostala usunieta.'),
       PlainPayloadType.reaction => const Text('Reakcja na wiadomosc.'),
@@ -1358,6 +1690,28 @@ class _PayloadView extends StatelessWidget {
           ],
         ),
     };
+
+    final replyToMessageId = payload.replyToMessageId;
+    final replyPreview = payload.replyPreview;
+    if (replyToMessageId == null ||
+        replyToMessageId.isEmpty ||
+        replyPreview == null ||
+        replyPreview.isEmpty) {
+      return body;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _ReplySnippet(
+          preview: replyPreview,
+          onTap: () => onReplyTap(replyToMessageId),
+        ),
+        const SizedBox(height: 8),
+        body,
+      ],
+    );
   }
 
   bool _isImagePayload(PlainPayload payload) {

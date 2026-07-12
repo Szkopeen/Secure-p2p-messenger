@@ -42,12 +42,15 @@ class AppState extends ChangeNotifier {
   static const maxProfileImageBytes = 1024 * 1024;
   static const _accountExportIterations = 310000;
   static const _accountExportAad = 'secure-p2p-account-transfer/v1';
+  static const _deviceSyncProtocol = 'secure-p2p-device-sync/v1';
+  static const _deviceSyncAad = 'secure-p2p-device-sync-message/v1';
 
   final SecureStore _store;
   final CryptoService _crypto;
   late final MessageArchive _messageArchive;
   final Uuid _uuid = const Uuid();
   final AesGcm _accountExportAead = AesGcm.with256bits();
+  final AesGcm _deviceSyncAead = AesGcm.with256bits();
   Future<void> _persistQueue = Future<void>.value();
   final List<Contact> _contacts = [];
   final List<ContactInvite> _contactInvites = [];
@@ -60,6 +63,7 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _signalEnvelopeToContact = {};
   final Map<String, bool> _p2pConnected = {};
   final Map<String, bool> _relayPresence = {};
+  final Map<String, ChatMessage> _pendingDeviceSyncMessages = {};
   final Set<String> _pendingInviteHandshakeContacts = {};
 
   IdentityKeyMaterial? _identity;
@@ -72,8 +76,11 @@ class AppState extends ChangeNotifier {
   bool _relayConnected = false;
   bool _initializing = true;
   bool _retryingGroupInvites = false;
+  bool _applyingDeviceSync = false;
+  bool _sentDeviceSyncSnapshotThisRun = false;
   bool _directoryEnabled = false;
   bool _loadingDirectory = false;
+  Timer? _deviceSyncTimer;
   String? _status;
   String? _directoryStatus;
   String _currentVersionLabel = '';
@@ -218,6 +225,7 @@ class AppState extends ChangeNotifier {
     _validateAccountTransferPassphrase(normalizedPassphrase);
 
     final privateKeyBytes = await identity.keyPair.extractPrivateKeyBytes();
+    final localArchiveKey = await _localArchiveKeyBase64();
     final clearJson = jsonEncode({
       'v': 1,
       'exportedAt': DateTime.now().toUtc().toIso8601String(),
@@ -231,6 +239,9 @@ class AppState extends ChangeNotifier {
       'groups': _groups.map((group) => group.toJson()).toList(),
       'directoryEnabled': _directoryEnabled,
       'ownProfile': _ownProfile?.toJson(),
+      'localArchiveKey': localArchiveKey,
+      'messages':
+          _allMessagesSnapshot().map((message) => message.toJson()).toList(),
     });
 
     final salt = secureRandomBytes(16);
@@ -329,6 +340,11 @@ class AppState extends ChangeNotifier {
     final importedProfile = profileJson == null
         ? null
         : UserProfile.fromJson((profileJson as Map).cast<String, dynamic>());
+    final importedLocalArchiveKey = clear['localArchiveKey'] as String?;
+    final importedMessages = ((clear['messages'] as List?) ?? const [])
+        .map((item) =>
+            ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
+        .toList(growable: false);
 
     await _relaySubscription?.cancel();
     await _relay?.dispose();
@@ -355,11 +371,17 @@ class AppState extends ChangeNotifier {
     _signalEnvelopeToContact.clear();
     _p2pConnected.clear();
     _relayPresence.clear();
+    _pendingDeviceSyncMessages.clear();
+    _deviceSyncTimer?.cancel();
     _pendingInviteHandshakeContacts.clear();
     _relayConnected = false;
     _retryingGroupInvites = false;
+    _sentDeviceSyncSnapshotThisRun = false;
 
     await _store.saveIdentity(importedIdentity);
+    if (_isValidArchiveKey(importedLocalArchiveKey)) {
+      await _store.saveLocalArchiveKey(importedLocalArchiveKey!);
+    }
     await _store.saveRelaySettings(importedRelaySettings);
     await _store.saveContacts(_contacts);
     await _store.saveGroups(_groups);
@@ -368,6 +390,8 @@ class AppState extends ChangeNotifier {
     if (importedProfile != null) {
       await _store.saveOwnProfile(importedProfile);
     }
+    _mergeSyncedMessages(importedMessages);
+    await _persistMessages();
     notifyListeners();
     await connectRelay();
     unawaited(checkForUpdate(silent: true));
@@ -516,6 +540,7 @@ class AppState extends ChangeNotifier {
     _p2pConnected.clear();
     _relayPresence.clear();
     _presenceTimer?.cancel();
+    _sentDeviceSyncSnapshotThisRun = false;
     _relay = RelayClient(settings: settings, identity: identity);
     _p2p = WebRtcTransport(
       localUserId: identity.userId,
@@ -641,6 +666,28 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> removeContact(Contact contact) async {
+    final removed = _contacts.any((item) => item.userId == contact.userId);
+    _contacts.removeWhere((item) => item.userId == contact.userId);
+    _contactInvites.removeWhere((item) => item.userId == contact.userId);
+    _directoryEntries.removeWhere((item) => item.userId == contact.userId);
+    _sessions.remove(contact.userId);
+    _pendingSessions.remove(contact.userId);
+    _relayEnvelopeToMessage.removeWhere((_, to) => to == contact.userId);
+    _signalEnvelopeToContact.removeWhere((_, to) => to == contact.userId);
+    _p2pConnected.remove(contact.userId);
+    _relayPresence.remove(contact.userId);
+    _pendingInviteHandshakeContacts.remove(contact.userId);
+    _messages.remove(contact.userId);
+
+    if (!removed) return;
+    await _store.saveContacts(_contacts);
+    await _store.saveContactInvites(_contactInvites);
+    await _saveSessions();
+    await _persistMessages();
+    notifyListeners();
+  }
+
   Future<void> setProfileImage() async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: false,
@@ -682,10 +729,22 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> sendText(Contact contact, String text) async {
+  Future<void> sendText(
+    Contact contact,
+    String text, {
+    String? replyToMessageId,
+    String? replyPreview,
+  }) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
-    await _sendPlainPayload(contact, PlainPayload.text(trimmed));
+    await _sendPlainPayload(
+      contact,
+      PlainPayload.text(
+        trimmed,
+        replyToMessageId: replyToMessageId,
+        replyPreview: replyPreview,
+      ),
+    );
   }
 
   Future<GroupConversation> createGroup({
@@ -744,6 +803,51 @@ class AppState extends ChangeNotifier {
     return group;
   }
 
+  Future<void> inviteContactsToGroup({
+    required GroupConversation group,
+    required List<Contact> contacts,
+  }) async {
+    final identity = _requireIdentity();
+    if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
+      throw StateError('Nie mozesz zapraszac do niezaakceptowanej grupy.');
+    }
+
+    final selected = contacts
+        .where((contact) =>
+            contact.userId != identity.userId &&
+            !group.memberIds.contains(contact.userId))
+        .fold<Map<String, Contact>>({}, (map, contact) {
+          map[contact.userId] = contact;
+          return map;
+        })
+        .values
+        .toList(growable: false);
+
+    if (selected.isEmpty) {
+      throw ArgumentError('Wybierz przynajmniej jeden nowy kontakt.');
+    }
+
+    final index = _groups.indexWhere((item) => item.groupId == group.groupId);
+    if (index < 0) return;
+
+    final updatedMemberIds = <String>{
+      ..._groups[index].memberIds,
+      for (final contact in selected) contact.userId,
+    }.toList(growable: false);
+    _groups[index] = _groups[index].copyWith(memberIds: updatedMemberIds);
+    await _store.saveGroups(_groups);
+    _addSystemMessage(
+      group.groupId,
+      'Dodano ${selected.length} osob do zaproszen grupy.',
+    );
+
+    for (final contact in selected) {
+      await _trySendGroupInvite(group.groupId, contact.userId);
+    }
+    await _broadcastGroupRoster(_groups[index]);
+    notifyListeners();
+  }
+
   Future<void> respondToGroupInvite(
     GroupConversation group,
     bool accepted,
@@ -788,11 +892,107 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> sendGroupText(GroupConversation group, String text) async {
-    final identity = _requireIdentity();
+  Future<void> sendGroupText(
+    GroupConversation group,
+    String text, {
+    String? replyToMessageId,
+    String? replyPreview,
+  }) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
-    if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
+    await _sendGroupVisiblePayload(
+      group,
+      visiblePayload: PlainPayload.text(
+        trimmed,
+        replyToMessageId: replyToMessageId,
+        replyPreview: replyPreview,
+      ),
+      wirePayload: (messageId) => PlainPayload.groupText(
+        groupId: group.groupId,
+        groupMessageId: messageId,
+        text: trimmed,
+        replyToMessageId: replyToMessageId,
+        replyPreview: replyPreview,
+      ),
+    );
+  }
+
+  Future<void> sendGroupFile(
+    GroupConversation group, {
+    String? replyToMessageId,
+    String? replyPreview,
+  }) async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: false,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+
+    final file = result.files.single;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      throw StateError('Nie mozna odczytac pliku na tej platformie.');
+    }
+    await sendGroupFileBytes(
+      group,
+      fileName: file.name,
+      bytes: bytes,
+      mimeType: _guessMimeType(file.name),
+      replyToMessageId: replyToMessageId,
+      replyPreview: replyPreview,
+    );
+  }
+
+  Future<void> sendGroupFileBytes(
+    GroupConversation group, {
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+    String? replyToMessageId,
+    String? replyPreview,
+  }) async {
+    final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
+    final effectiveLimit = relayAwareLimit < maxPlainFileBytes
+        ? relayAwareLimit
+        : maxPlainFileBytes;
+    if (bytes.length > effectiveLimit) {
+      throw StateError(
+          'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.');
+    }
+
+    final payload = PlainPayload.file(
+      fileName: fileName,
+      mimeType: mimeType ?? _guessMimeType(fileName),
+      fileSize: bytes.length,
+      fileBytesBase64: b64(bytes),
+      replyToMessageId: replyToMessageId,
+      replyPreview: replyPreview,
+    );
+    await _sendGroupVisiblePayload(
+      group,
+      visiblePayload: payload,
+      wirePayload: (messageId) => PlainPayload.file(
+        fileName: fileName,
+        mimeType: mimeType ?? _guessMimeType(fileName),
+        fileSize: bytes.length,
+        fileBytesBase64: b64(bytes),
+        groupId: group.groupId,
+        groupMessageId: messageId,
+        replyToMessageId: replyToMessageId,
+        replyPreview: replyPreview,
+      ),
+    );
+  }
+
+  Future<void> _sendGroupVisiblePayload(
+    GroupConversation group, {
+    required PlainPayload visiblePayload,
+    required PlainPayload Function(String messageId) wirePayload,
+  }) async {
+    final identity = _requireIdentity();
+    final currentGroup = _groupById(group.groupId) ?? group;
+    if (currentGroup.pendingInvite ||
+        !currentGroup.isAcceptedBy(identity.userId)) {
       throw StateError('Najpierw zaakceptuj zaproszenie do grupy.');
     }
 
@@ -800,9 +1000,9 @@ class AppState extends ChangeNotifier {
     _addMessage(
       ChatMessage(
         id: messageId,
-        contactId: group.groupId,
+        contactId: currentGroup.groupId,
         direction: MessageDirection.outbound,
-        payload: PlainPayload.text(trimmed),
+        payload: visiblePayload,
         createdAt: DateTime.now().toUtc(),
         status: MessageStatus.pending,
         senderId: identity.userId,
@@ -810,25 +1010,18 @@ class AppState extends ChangeNotifier {
     );
 
     var sent = 0;
-    final recipientIds = group.memberIds
+    final recipientIds = currentGroup.acceptedMemberIds
         .where((userId) => userId != identity.userId)
         .toList(growable: false);
     for (final userId in recipientIds) {
       final contact = _contactById(userId);
       if (contact == null) continue;
-      await _sendHiddenPayload(
-        contact,
-        PlainPayload.groupText(
-          groupId: group.groupId,
-          groupMessageId: messageId,
-          text: trimmed,
-        ),
-      );
+      await _sendHiddenPayload(contact, wirePayload(messageId));
       sent += 1;
     }
 
     _updateMessage(
-      group.groupId,
+      currentGroup.groupId,
       messageId,
       sent > 0 || recipientIds.isEmpty
           ? MessageStatus.sent
@@ -845,14 +1038,17 @@ class AppState extends ChangeNotifier {
     if (list == null) return;
 
     var changed = false;
+    final changedMessages = <ChatMessage>[];
     for (var index = 0; index < list.length; index += 1) {
       final message = list[index];
       if (!_isUnreadIncomingMessage(message)) continue;
       list[index] = message.copyWith(status: MessageStatus.read);
+      changedMessages.add(list[index]);
       changed = true;
     }
     if (!changed) return;
     await _persistMessages();
+    _scheduleDeviceSyncForMany(changedMessages);
     notifyListeners();
   }
 
@@ -894,18 +1090,21 @@ class AppState extends ChangeNotifier {
     if (list == null) return;
 
     final readMessageIds = <String>[];
+    final changedMessages = <ChatMessage>[];
     var changed = false;
     for (var index = 0; index < list.length; index += 1) {
       final message = list[index];
       if (!_isUnreadIncomingMessage(message)) continue;
 
       list[index] = message.copyWith(status: MessageStatus.read);
+      changedMessages.add(list[index]);
       readMessageIds.add(message.id);
       changed = true;
     }
 
     if (!changed) return;
     await _persistMessages();
+    _scheduleDeviceSyncForMany(changedMessages);
     notifyListeners();
 
     for (final messageId in readMessageIds) {
@@ -1071,7 +1270,151 @@ class AppState extends ChangeNotifier {
     _applyPin(contact.userId, message.id, pinned);
   }
 
-  Future<void> sendFile(Contact contact) async {
+  Future<void> editGroupMessage(
+    GroupConversation group,
+    ChatMessage message,
+    String text,
+  ) async {
+    final identity = _requireIdentity();
+    if (message.contactId != group.groupId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
+    }
+    if (message.direction != MessageDirection.outbound ||
+        message.senderId != identity.userId) {
+      throw StateError('Mozesz edytowac tylko wlasne wiadomosci.');
+    }
+    if (message.retracted || message.payload.type != PlainPayloadType.text) {
+      throw StateError('Tej wiadomosci nie mozna edytowac.');
+    }
+    if (message.status == MessageStatus.failed) {
+      throw StateError(
+          'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.');
+    }
+
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError('Edytowana wiadomosc nie moze byc pusta.');
+    }
+    if (trimmed == (message.payload.text ?? '').trim()) return;
+
+    await _sendGroupControlPayload(
+      group,
+      PlainPayload.edit(
+        targetMessageId: message.id,
+        editedText: trimmed,
+        groupId: group.groupId,
+      ),
+    );
+    _applyGroupEdit(group.groupId, message.id, trimmed, identity.userId);
+  }
+
+  Future<void> retractGroupMessage(
+    GroupConversation group,
+    ChatMessage message,
+  ) async {
+    final identity = _requireIdentity();
+    if (message.contactId != group.groupId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
+    }
+    if (message.direction != MessageDirection.outbound ||
+        message.senderId != identity.userId) {
+      throw StateError('Mozesz cofnac tylko wlasna wyslana wiadomosc.');
+    }
+    if (message.retracted) return;
+    if (message.status == MessageStatus.failed) {
+      throw StateError(
+          'Ta wiadomosc nie zostala dostarczona. Usun ja lokalnie.');
+    }
+
+    await _sendGroupControlPayload(
+      group,
+      PlainPayload.retraction(
+        targetMessageId: message.id,
+        groupId: group.groupId,
+      ),
+    );
+    _markGroupMessageRetracted(group.groupId, message.id, identity.userId);
+  }
+
+  Future<void> reactToGroupMessage(
+    GroupConversation group,
+    ChatMessage message,
+    String? emoji,
+  ) async {
+    final identity = _requireIdentity();
+    if (message.contactId != group.groupId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
+    }
+    if (message.direction == MessageDirection.system || message.retracted) {
+      throw StateError('Nie mozna zareagowac na te wiadomosc.');
+    }
+
+    final normalizedEmoji = emoji?.trim();
+    await _sendGroupControlPayload(
+      group,
+      PlainPayload.reaction(
+        targetMessageId: message.id,
+        reactionEmoji: normalizedEmoji == null || normalizedEmoji.isEmpty
+            ? null
+            : normalizedEmoji,
+        groupId: group.groupId,
+      ),
+    );
+    _applyReaction(
+      group.groupId,
+      message.id,
+      identity.userId,
+      normalizedEmoji,
+    );
+  }
+
+  Future<void> setGroupMessagePinned(
+    GroupConversation group,
+    ChatMessage message,
+    bool pinned,
+  ) async {
+    if (message.contactId != group.groupId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
+    }
+    if (message.direction == MessageDirection.system || message.retracted) {
+      return;
+    }
+
+    await _sendGroupControlPayload(
+      group,
+      PlainPayload.pin(
+        targetMessageId: message.id,
+        pinPinned: pinned,
+        groupId: group.groupId,
+      ),
+    );
+    _applyPin(group.groupId, message.id, pinned);
+  }
+
+  Future<void> _sendGroupControlPayload(
+    GroupConversation group,
+    PlainPayload payload,
+  ) async {
+    final identity = _requireIdentity();
+    final currentGroup = _groupById(group.groupId) ?? group;
+    if (currentGroup.pendingInvite ||
+        !currentGroup.isAcceptedBy(identity.userId)) {
+      throw StateError('Najpierw zaakceptuj zaproszenie do grupy.');
+    }
+
+    for (final userId in currentGroup.acceptedMemberIds) {
+      if (userId == identity.userId) continue;
+      final contact = _contactById(userId);
+      if (contact == null) continue;
+      await _sendHiddenPayload(contact, payload);
+    }
+  }
+
+  Future<void> sendFile(
+    Contact contact, {
+    String? replyToMessageId,
+    String? replyPreview,
+  }) async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: false,
       withData: true,
@@ -1088,6 +1431,8 @@ class AppState extends ChangeNotifier {
       fileName: file.name,
       bytes: bytes,
       mimeType: _guessMimeType(file.name),
+      replyToMessageId: replyToMessageId,
+      replyPreview: replyPreview,
     );
   }
 
@@ -1096,6 +1441,8 @@ class AppState extends ChangeNotifier {
     required String fileName,
     required Uint8List bytes,
     String? mimeType,
+    String? replyToMessageId,
+    String? replyPreview,
   }) async {
     final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
     final effectiveLimit = relayAwareLimit < maxPlainFileBytes
@@ -1113,6 +1460,8 @@ class AppState extends ChangeNotifier {
         mimeType: mimeType ?? _guessMimeType(fileName),
         fileSize: bytes.length,
         fileBytesBase64: b64(bytes),
+        replyToMessageId: replyToMessageId,
+        replyPreview: replyPreview,
       ),
     );
   }
@@ -1138,10 +1487,13 @@ class AppState extends ChangeNotifier {
     _signalEnvelopeToContact.clear();
     _p2pConnected.clear();
     _relayPresence.clear();
+    _pendingDeviceSyncMessages.clear();
+    _deviceSyncTimer?.cancel();
     _pendingInviteHandshakeContacts.clear();
     _presenceTimer?.cancel();
     _relayConnected = false;
     _retryingGroupInvites = false;
+    _sentDeviceSyncSnapshotThisRun = false;
     _directoryEnabled = false;
     _loadingDirectory = false;
     _directoryStatus = null;
@@ -1285,12 +1637,110 @@ class AppState extends ChangeNotifier {
           groupId: group.groupId,
           groupName: group.name,
           groupMemberIds: group.memberIds,
+          groupAcceptedMemberIds: group.acceptedMemberIds,
+          groupMemberInfos: _groupMemberInfos(group),
         ),
       );
       _markGroupInviteSent(groupId, memberId);
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  Future<void> _broadcastAcceptedGroupRosters() async {
+    final identity = _identity;
+    if (identity == null || !_relayConnected) return;
+    for (final group in List<GroupConversation>.of(_groups)) {
+      if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
+        continue;
+      }
+      await _broadcastGroupRoster(group);
+    }
+  }
+
+  Future<void> _broadcastGroupRoster(
+    GroupConversation group, {
+    String? exceptUserId,
+  }) async {
+    final identity = _identity;
+    if (identity == null) return;
+    final payload = PlainPayload.groupInvite(
+      groupId: group.groupId,
+      groupName: group.name,
+      groupMemberIds: group.memberIds,
+      groupAcceptedMemberIds: group.acceptedMemberIds,
+      groupMemberInfos: _groupMemberInfos(group),
+    );
+
+    for (final userId in group.acceptedMemberIds) {
+      if (userId == identity.userId || userId == exceptUserId) continue;
+      final contact = _contactById(userId);
+      if (contact == null) continue;
+      try {
+        await _sendHiddenPayload(contact, payload);
+      } catch (_) {
+        // Aktualna lista grupy zostanie ponowiona przy kolejnym polaczeniu.
+      }
+    }
+  }
+
+  List<GroupMemberInfo> _groupMemberInfos(GroupConversation group) {
+    final identity = _identity;
+    final result = <String, GroupMemberInfo>{};
+    if (identity != null && group.memberIds.contains(identity.userId)) {
+      result[identity.userId] = GroupMemberInfo(
+        userId: identity.userId,
+        displayName: identity.userId,
+        identityPublicKey: b64(identity.publicKey.bytes),
+      );
+    }
+
+    for (final userId in group.memberIds) {
+      final contact = _contactById(userId);
+      if (contact == null) continue;
+      result[userId] = GroupMemberInfo(
+        userId: contact.userId,
+        displayName: contact.displayName,
+        identityPublicKey: contact.identityPublicKey,
+      );
+    }
+    return result.values.toList(growable: false);
+  }
+
+  Future<void> _mergeGroupMemberInfos(
+    Iterable<GroupMemberInfo> memberInfos,
+  ) async {
+    final identity = _identity;
+    var changed = false;
+
+    for (final info in memberInfos) {
+      if (info.userId.isEmpty || info.identityPublicKey.isEmpty) continue;
+      if (identity != null && info.userId == identity.userId) continue;
+      final existing = _contactById(info.userId);
+      if (existing != null) {
+        // Nie nadpisujemy istniejacego klucza publicznego, zeby nie robic
+        // cichej podmiany tozsamosci przez zaproszenie grupowe.
+        continue;
+      }
+
+      _contacts.add(
+        Contact(
+          userId: info.userId,
+          displayName:
+              info.displayName.trim().isEmpty ? info.userId : info.displayName,
+          identityPublicKey: info.identityPublicKey,
+        ),
+      );
+      changed = true;
+    }
+
+    if (!changed) return;
+    _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+    await _store.saveContacts(_contacts);
+    if (_relayConnected) {
+      _relay
+          ?.queryProfiles(_contacts.map((contact) => contact.userId).toList());
     }
   }
 
@@ -1396,13 +1846,24 @@ class AppState extends ChangeNotifier {
         _relay?.queryDirectory();
         _startPresencePolling();
         unawaited(_retryPendingGroupInvites());
+        unawaited(_broadcastAcceptedGroupRosters());
+        unawaited(_flushDeviceSyncMessages());
+        if (!_sentDeviceSyncSnapshotThisRun) {
+          _sentDeviceSyncSnapshotThisRun = true;
+          unawaited(_broadcastDeviceSyncSnapshot());
+        }
         break;
       case RelayDeliver():
         if (event.kind == 'signal') {
           await _handleSignal(event);
         } else if (event.kind == 'relay') {
-          await _handleEncryptedPacket(event.from, event.payload,
-              transport: 'relay');
+          if (event.from == _identity?.userId &&
+              _isDeviceSyncPayload(event.payload)) {
+            await _handleDeviceSyncPayload(event.payload);
+          } else {
+            await _handleEncryptedPacket(event.from, event.payload,
+                transport: 'relay');
+          }
         }
         break;
       case RelaySent():
@@ -1595,6 +2056,17 @@ class AppState extends ChangeNotifier {
         packet: packet,
       );
       if (decrypted.payload.type == PlainPayloadType.retraction) {
+        final groupId = decrypted.payload.groupId;
+        if (groupId != null && groupId.isNotEmpty) {
+          _markGroupMessageRetracted(
+            groupId,
+            decrypted.payload.targetMessageId!,
+            from,
+            fallbackCreatedAt: decrypted.createdAt,
+            fallbackTransport: transport,
+          );
+          return;
+        }
         _markMessageRetracted(
           from,
           decrypted.payload.targetMessageId!,
@@ -1605,6 +2077,16 @@ class AppState extends ChangeNotifier {
         return;
       }
       if (decrypted.payload.type == PlainPayloadType.reaction) {
+        final groupId = decrypted.payload.groupId;
+        if (groupId != null && groupId.isNotEmpty) {
+          _applyReaction(
+            groupId,
+            decrypted.payload.targetMessageId!,
+            from,
+            decrypted.payload.reactionEmoji,
+          );
+          return;
+        }
         _applyReaction(
           from,
           decrypted.payload.targetMessageId!,
@@ -1614,6 +2096,15 @@ class AppState extends ChangeNotifier {
         return;
       }
       if (decrypted.payload.type == PlainPayloadType.pin) {
+        final groupId = decrypted.payload.groupId;
+        if (groupId != null && groupId.isNotEmpty) {
+          _applyPin(
+            groupId,
+            decrypted.payload.targetMessageId!,
+            decrypted.payload.pinPinned == true,
+          );
+          return;
+        }
         _applyPin(
           from,
           decrypted.payload.targetMessageId!,
@@ -1630,6 +2121,17 @@ class AppState extends ChangeNotifier {
         return;
       }
       if (decrypted.payload.type == PlainPayloadType.edit) {
+        final groupId = decrypted.payload.groupId;
+        if (groupId != null && groupId.isNotEmpty) {
+          _applyGroupEdit(
+            groupId,
+            decrypted.payload.targetMessageId!,
+            decrypted.payload.editedText ?? '',
+            from,
+            editedAt: decrypted.createdAt,
+          );
+          return;
+        }
         _applyEdit(
           from,
           decrypted.payload.targetMessageId!,
@@ -1653,6 +2155,12 @@ class AppState extends ChangeNotifier {
       }
       if (decrypted.payload.type == PlainPayloadType.groupText) {
         _handleGroupText(
+            from, decrypted.payload, decrypted.createdAt, transport);
+        return;
+      }
+      if (decrypted.payload.type == PlainPayloadType.file &&
+          decrypted.payload.groupId != null) {
+        _handleGroupFile(
             from, decrypted.payload, decrypted.createdAt, transport);
         return;
       }
@@ -1686,29 +2194,48 @@ class AppState extends ChangeNotifier {
     final identity = _requireIdentity();
     final groupId = payload.groupId;
     if (groupId == null || groupId.isEmpty) return;
+    await _mergeGroupMemberInfos(payload.groupMemberInfos ?? const []);
     final memberIds = <String>{
       ...?payload.groupMemberIds,
       from,
       identity.userId,
     }.toList(growable: false);
+    final acceptedMemberIds = <String>{
+      from,
+      ...?payload.groupAcceptedMemberIds,
+    }.where((userId) => memberIds.contains(userId)).toList(growable: false);
     if (!memberIds.contains(identity.userId)) return;
 
     final existingIndex =
         _groups.indexWhere((group) => group.groupId == groupId);
     if (existingIndex >= 0) {
       final existing = _groups[existingIndex];
-      if (existing.isAcceptedBy(identity.userId)) return;
+      final nextMemberIds = <String>{
+        ...existing.memberIds,
+        ...memberIds,
+      }.toList(growable: false);
+      final nextAcceptedIds = <String>{
+        ...existing.acceptedMemberIds,
+        ...acceptedMemberIds,
+      }
+          .where((userId) => nextMemberIds.contains(userId))
+          .toList(growable: false);
+      final wasAccepted = existing.isAcceptedBy(identity.userId);
+      final membershipChanged =
+          !setEquals(existing.memberIds.toSet(), nextMemberIds.toSet()) ||
+              !setEquals(
+                  existing.acceptedMemberIds.toSet(), nextAcceptedIds.toSet());
       _groups[existingIndex] = existing.copyWith(
         name: payload.groupName ?? existing.name,
-        memberIds: memberIds,
-        acceptedMemberIds: <String>{
-          ...existing.acceptedMemberIds,
-          from,
-        }.toList(growable: false),
-        invitedBy: from,
-        pendingInvite: true,
+        memberIds: nextMemberIds,
+        acceptedMemberIds: nextAcceptedIds,
+        invitedBy: existing.invitedBy ?? from,
+        pendingInvite: wasAccepted ? false : true,
       );
       await _store.saveGroups(_groups);
+      if (wasAccepted && membershipChanged) {
+        _addSystemMessage(groupId, 'Zaktualizowano sklad grupy.');
+      }
       notifyListeners();
       return;
     }
@@ -1717,7 +2244,7 @@ class AppState extends ChangeNotifier {
       groupId: groupId,
       name: payload.groupName ?? 'Grupa',
       memberIds: memberIds,
-      acceptedMemberIds: [from],
+      acceptedMemberIds: acceptedMemberIds.isEmpty ? [from] : acceptedMemberIds,
       createdAt: DateTime.now().toUtc(),
       invitedBy: from,
       pendingInvite: true,
@@ -1735,6 +2262,8 @@ class AppState extends ChangeNotifier {
           groupId: group.groupId,
           groupName: group.name,
           groupMemberIds: group.memberIds,
+          groupAcceptedMemberIds: group.acceptedMemberIds,
+          groupMemberInfos: payload.groupMemberInfos ?? const [],
         ),
       ),
     );
@@ -1761,6 +2290,8 @@ class AppState extends ChangeNotifier {
       _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
       _addSystemMessage(
           groupId, '${displayNameForUser(from)} dolaczyl do grupy.');
+      await _store.saveGroups(_groups);
+      await _broadcastGroupRoster(_groups[index]);
     } else {
       final acceptedIds = group.acceptedMemberIds
           .where((userId) => userId != from)
@@ -1812,7 +2343,7 @@ class AppState extends ChangeNotifier {
         identity == null ||
         group.pendingInvite ||
         !group.isAcceptedBy(identity.userId) ||
-        !group.memberIds.contains(from)) {
+        !group.acceptedMemberIds.contains(from)) {
       return;
     }
 
@@ -1821,7 +2352,11 @@ class AppState extends ChangeNotifier {
         id: messageId,
         contactId: groupId,
         direction: MessageDirection.inbound,
-        payload: PlainPayload.text(payload.text ?? ''),
+        payload: PlainPayload.text(
+          payload.text ?? '',
+          replyToMessageId: payload.replyToMessageId,
+          replyPreview: payload.replyPreview,
+        ),
         createdAt: createdAt,
         status: MessageStatus.delivered,
         senderId: from,
@@ -1840,6 +2375,63 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void _handleGroupFile(
+    String from,
+    PlainPayload payload,
+    DateTime createdAt,
+    String transport,
+  ) {
+    final groupId = payload.groupId;
+    final messageId = payload.groupMessageId;
+    if (groupId == null ||
+        groupId.isEmpty ||
+        messageId == null ||
+        messageId.isEmpty) {
+      return;
+    }
+    final group = _groupById(groupId);
+    final identity = _identity;
+    if (group == null ||
+        identity == null ||
+        group.pendingInvite ||
+        !group.isAcceptedBy(identity.userId) ||
+        !group.acceptedMemberIds.contains(from)) {
+      return;
+    }
+
+    final added = _addMessage(
+      ChatMessage(
+        id: messageId,
+        contactId: groupId,
+        direction: MessageDirection.inbound,
+        payload: PlainPayload.file(
+          fileName: payload.fileName ?? 'plik',
+          mimeType: payload.mimeType,
+          fileSize: payload.fileSize ?? 0,
+          fileBytesBase64: payload.fileBytesBase64 ?? '',
+          replyToMessageId: payload.replyToMessageId,
+          replyPreview: payload.replyPreview,
+        ),
+        createdAt: createdAt,
+        status: MessageStatus.delivered,
+        senderId: from,
+        transport: transport,
+      ),
+    );
+    if (!added) return;
+    unawaited(
+      DesktopNotifier.instance.notifyIncoming(
+        senderName: '${group.name} / ${displayNameForUser(from)}',
+        payload: PlainPayload.file(
+          fileName: payload.fileName ?? 'plik',
+          mimeType: payload.mimeType,
+          fileSize: payload.fileSize ?? 0,
+          fileBytesBase64: payload.fileBytesBase64 ?? '',
+        ),
+      ),
+    );
+  }
+
   Future<void> _startP2pIfNeeded(Contact contact) async {
     final identity = _identity;
     if (identity == null || _p2p == null) return;
@@ -1852,9 +2444,19 @@ class AppState extends ChangeNotifier {
         _messages.putIfAbsent(message.contactId, () => <ChatMessage>[]);
     if (list.any((item) => item.id == message.id)) return false;
     list.add(message);
+    _sortMessages(list);
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(message);
     notifyListeners();
     return true;
+  }
+
+  void _sortMessages(List<ChatMessage> messages) {
+    messages.sort((left, right) {
+      final byTime = left.createdAt.compareTo(right.createdAt);
+      if (byTime != 0) return byTime;
+      return left.id.compareTo(right.id);
+    });
   }
 
   bool _markMessageRetracted(
@@ -1879,24 +2481,72 @@ class AppState extends ChangeNotifier {
         clearEditedAt: true,
       );
       unawaited(_persistMessages());
+      _scheduleDeviceSyncFor(list[index]);
       notifyListeners();
       return true;
     }
 
     if (allowedDirection != MessageDirection.inbound) return false;
-    list.add(
-      ChatMessage(
-        id: messageId,
-        contactId: contactId,
-        direction: MessageDirection.inbound,
-        payload: const PlainPayload.text(''),
-        createdAt: fallbackCreatedAt ?? DateTime.now().toUtc(),
-        status: MessageStatus.delivered,
-        retracted: true,
-        transport: fallbackTransport,
-      ),
+    final placeholder = ChatMessage(
+      id: messageId,
+      contactId: contactId,
+      direction: MessageDirection.inbound,
+      payload: const PlainPayload.text(''),
+      createdAt: fallbackCreatedAt ?? DateTime.now().toUtc(),
+      status: MessageStatus.delivered,
+      retracted: true,
+      transport: fallbackTransport,
     );
+    list.add(placeholder);
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(placeholder);
+    notifyListeners();
+    return true;
+  }
+
+  bool _markGroupMessageRetracted(
+    String groupId,
+    String messageId,
+    String senderId, {
+    DateTime? fallbackCreatedAt,
+    String? fallbackTransport,
+  }) {
+    final list = _messages.putIfAbsent(groupId, () => <ChatMessage>[]);
+    final index = list.indexWhere((message) => message.id == messageId);
+    if (index >= 0) {
+      final message = list[index];
+      if (message.senderId != senderId || message.retracted) {
+        return message.retracted;
+      }
+
+      list[index] = message.copyWith(
+        payload: const PlainPayload.text(''),
+        retracted: true,
+        pinned: false,
+        reactions: const {},
+        clearEditedAt: true,
+      );
+      unawaited(_persistMessages());
+      _scheduleDeviceSyncFor(list[index]);
+      notifyListeners();
+      return true;
+    }
+
+    final placeholder = ChatMessage(
+      id: messageId,
+      contactId: groupId,
+      direction: MessageDirection.inbound,
+      payload: const PlainPayload.text(''),
+      createdAt: fallbackCreatedAt ?? DateTime.now().toUtc(),
+      status: MessageStatus.delivered,
+      retracted: true,
+      senderId: senderId,
+      transport: fallbackTransport,
+    );
+    list.add(placeholder);
+    _sortMessages(list);
+    unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(placeholder);
     notifyListeners();
     return true;
   }
@@ -1924,10 +2574,51 @@ class AppState extends ChangeNotifier {
     if (normalizedText.isEmpty) return false;
 
     list[index] = message.copyWith(
-      payload: PlainPayload.text(normalizedText),
+      payload: PlainPayload.text(
+        normalizedText,
+        replyToMessageId: message.payload.replyToMessageId,
+        replyPreview: message.payload.replyPreview,
+      ),
       editedAt: editedAt ?? DateTime.now().toUtc(),
     );
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(list[index]);
+    notifyListeners();
+    return true;
+  }
+
+  bool _applyGroupEdit(
+    String groupId,
+    String messageId,
+    String text,
+    String editorId, {
+    DateTime? editedAt,
+  }) {
+    final list = _messages[groupId];
+    if (list == null) return false;
+    final index = list.indexWhere((message) => message.id == messageId);
+    if (index < 0) return false;
+
+    final message = list[index];
+    if (message.senderId != editorId ||
+        message.retracted ||
+        message.payload.type != PlainPayloadType.text) {
+      return false;
+    }
+
+    final normalizedText = text.trim();
+    if (normalizedText.isEmpty) return false;
+
+    list[index] = message.copyWith(
+      payload: PlainPayload.text(
+        normalizedText,
+        replyToMessageId: message.payload.replyToMessageId,
+        replyPreview: message.payload.replyPreview,
+      ),
+      editedAt: editedAt ?? DateTime.now().toUtc(),
+    );
+    unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -1954,6 +2645,7 @@ class AppState extends ChangeNotifier {
 
     list[index] = message.copyWith(status: promotedStatus);
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -1984,6 +2676,7 @@ class AppState extends ChangeNotifier {
 
     list[index] = message.copyWith(reactions: reactions);
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -2002,6 +2695,7 @@ class AppState extends ChangeNotifier {
     if (message.pinned == pinned) return true;
     list[index] = message.copyWith(pinned: pinned);
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -2036,6 +2730,7 @@ class AppState extends ChangeNotifier {
       error: error,
     );
     unawaited(_persistMessages());
+    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
   }
 
@@ -2068,6 +2763,399 @@ class AppState extends ChangeNotifier {
       MessageStatus.read => 3,
       MessageStatus.failed => -1,
     };
+  }
+
+  List<ChatMessage> _allMessagesSnapshot() {
+    final snapshot =
+        _messages.values.expand((messages) => messages).toList(growable: false);
+    snapshot.sort((left, right) {
+      final byContact = left.contactId.compareTo(right.contactId);
+      if (byContact != 0) return byContact;
+      final byTime = left.createdAt.compareTo(right.createdAt);
+      if (byTime != 0) return byTime;
+      return left.id.compareTo(right.id);
+    });
+    return snapshot;
+  }
+
+  void _scheduleDeviceSyncFor(ChatMessage message) {
+    if (_applyingDeviceSync || _identity == null) return;
+    _pendingDeviceSyncMessages['${message.contactId}/${message.id}'] = message;
+    _deviceSyncTimer?.cancel();
+    _deviceSyncTimer = Timer(const Duration(milliseconds: 700), () {
+      unawaited(_flushDeviceSyncMessages());
+    });
+  }
+
+  void _scheduleDeviceSyncForMany(Iterable<ChatMessage> messages) {
+    for (final message in messages) {
+      if (_applyingDeviceSync || _identity == null) return;
+      _pendingDeviceSyncMessages['${message.contactId}/${message.id}'] =
+          message;
+    }
+    if (_pendingDeviceSyncMessages.isEmpty) return;
+    _deviceSyncTimer?.cancel();
+    _deviceSyncTimer = Timer(const Duration(milliseconds: 700), () {
+      unawaited(_flushDeviceSyncMessages());
+    });
+  }
+
+  Future<void> _flushDeviceSyncMessages() async {
+    if (_pendingDeviceSyncMessages.isEmpty) return;
+    if (!_relayConnected || _relay == null || _identity == null) return;
+
+    final messages = _pendingDeviceSyncMessages.values.toList(growable: false);
+    _pendingDeviceSyncMessages.clear();
+    await _sendDeviceSyncMessages(messages, syncType: 'messages');
+  }
+
+  Future<void> _broadcastDeviceSyncSnapshot() async {
+    if (!_relayConnected || _relay == null || _identity == null) return;
+    await _sendDeviceSyncMessages(_allMessagesSnapshot(), syncType: 'snapshot');
+  }
+
+  Future<void> _sendDeviceSyncMessages(
+    List<ChatMessage> messages, {
+    required String syncType,
+  }) async {
+    final identity = _identity;
+    final relay = _relay;
+    if (identity == null || relay == null || !_relayConnected) return;
+
+    final maxPayloadBytes = (_relayMaxPayloadBytes * 0.9).floor();
+    var index = 0;
+    var sentEmptySnapshot = false;
+
+    while (index < messages.length ||
+        (messages.isEmpty && syncType == 'snapshot' && !sentEmptySnapshot)) {
+      var end = messages.isEmpty
+          ? 0
+          : index + 25 > messages.length
+              ? messages.length
+              : index + 25;
+      Map<String, dynamic>? payload;
+      var payloadSize = 0;
+
+      while (true) {
+        final batch = messages.isEmpty
+            ? const <ChatMessage>[]
+            : messages.sublist(index, end);
+        payload = await _buildDeviceSyncPayload(
+          identity: identity,
+          syncType: syncType,
+          messages: batch,
+        );
+        payloadSize = utf8.encode(jsonEncode(payload)).length;
+        if (payloadSize <= maxPayloadBytes ||
+            messages.isEmpty ||
+            end <= index + 1) {
+          break;
+        }
+        final nextSize = ((end - index) / 2).floor();
+        end = index + (nextSize < 1 ? 1 : nextSize);
+      }
+
+      if (payloadSize > maxPayloadBytes) {
+        _setStatus(
+            'Pominieto synchronizacje jednej duzej wiadomosci miedzy urzadzeniami.');
+        if (messages.isEmpty) {
+          sentEmptySnapshot = true;
+        } else {
+          index += 1;
+        }
+        continue;
+      }
+
+      try {
+        relay.sendRelay(to: identity.userId, payload: payload);
+      } catch (_) {
+        if (messages.isNotEmpty) {
+          for (var i = index; i < end; i += 1) {
+            _pendingDeviceSyncMessages[
+                '${messages[i].contactId}/${messages[i].id}'] = messages[i];
+          }
+        }
+        return;
+      }
+
+      if (messages.isEmpty) {
+        sentEmptySnapshot = true;
+      } else {
+        index = end;
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _buildDeviceSyncPayload({
+    required IdentityKeyMaterial identity,
+    required String syncType,
+    required List<ChatMessage> messages,
+  }) async {
+    final clearJson = jsonEncode({
+      'v': 1,
+      'type': syncType,
+      'senderDeviceId': identity.deviceId,
+      'createdAt': DateTime.now().toUtc().toIso8601String(),
+      'contacts': _contacts.map((contact) => contact.toJson()).toList(),
+      'groups': _groups.map((group) => group.toJson()).toList(),
+      'directoryEnabled': _directoryEnabled,
+      'ownProfile': _ownProfile?.toJson(),
+      'messages': messages.map((message) => message.toJson()).toList(),
+    });
+    final nonce = secureRandomBytes(12);
+    final box = await _deviceSyncAead.encrypt(
+      utf8Bytes(clearJson),
+      secretKey: await _localArchiveSecretKey(),
+      nonce: nonce,
+      aad: utf8Bytes(_deviceSyncAad),
+    );
+
+    return {
+      'v': 1,
+      'protocol': _deviceSyncProtocol,
+      'senderDeviceId': identity.deviceId,
+      'nonce': b64(box.nonce),
+      'ciphertext': b64(box.cipherText),
+      'mac': b64(box.mac.bytes),
+    };
+  }
+
+  bool _isDeviceSyncPayload(Map<String, dynamic> payload) {
+    return payload['protocol'] == _deviceSyncProtocol;
+  }
+
+  Future<void> _handleDeviceSyncPayload(Map<String, dynamic> payload) async {
+    final identity = _identity;
+    if (identity == null) return;
+    if (payload['senderDeviceId'] == identity.deviceId) return;
+
+    try {
+      final box = SecretBox(
+        unb64(payload['ciphertext'] as String),
+        nonce: unb64(payload['nonce'] as String),
+        mac: Mac(unb64(payload['mac'] as String)),
+      );
+      final clearBytes = await _deviceSyncAead.decrypt(
+        box,
+        secretKey: await _localArchiveSecretKey(),
+        aad: utf8Bytes(_deviceSyncAad),
+      );
+      final clear = jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
+      if (clear['senderDeviceId'] == identity.deviceId) return;
+
+      _applyingDeviceSync = true;
+      var changed = false;
+      changed = _mergeSyncedContacts(clear['contacts'] as List?) || changed;
+      changed = _mergeSyncedGroups(clear['groups'] as List?) || changed;
+      changed = await _mergeSyncedProfile(clear['ownProfile']) || changed;
+      final directoryEnabled = clear['directoryEnabled'];
+      if (directoryEnabled is bool && directoryEnabled != _directoryEnabled) {
+        _directoryEnabled = directoryEnabled;
+        await _store.saveDirectoryEnabled(_directoryEnabled);
+        changed = true;
+      }
+      final syncedMessages = ((clear['messages'] as List?) ?? const [])
+          .map((item) =>
+              ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
+          .toList(growable: false);
+      changed = _mergeSyncedMessages(syncedMessages) || changed;
+
+      if (!changed) return;
+      await _store.saveContacts(_contacts);
+      await _store.saveGroups(_groups);
+      await _persistMessages();
+      notifyListeners();
+    } catch (_) {
+      _setStatus(
+          'Nie udalo sie odszyfrowac synchronizacji z innego urzadzenia.');
+    } finally {
+      _applyingDeviceSync = false;
+    }
+  }
+
+  bool _mergeSyncedContacts(List<dynamic>? rawContacts) {
+    if (rawContacts == null) return false;
+    final identity = _identity;
+    var changed = false;
+    for (final item in rawContacts) {
+      final contact = Contact.fromJson((item as Map).cast<String, dynamic>());
+      if (identity != null && contact.userId == identity.userId) continue;
+      final index =
+          _contacts.indexWhere((existing) => existing.userId == contact.userId);
+      if (index < 0) {
+        _contacts.add(contact);
+        changed = true;
+        continue;
+      }
+
+      final existing = _contacts[index];
+      if (existing.identityPublicKey != contact.identityPublicKey) continue;
+      final incomingProfileDate = contact.profileUpdatedAt;
+      final currentProfileDate = existing.profileUpdatedAt;
+      final useIncomingProfile = incomingProfileDate != null &&
+          (currentProfileDate == null ||
+              incomingProfileDate.isAfter(currentProfileDate));
+      final merged = Contact(
+        userId: existing.userId,
+        displayName: contact.displayName.isNotEmpty
+            ? contact.displayName
+            : existing.displayName,
+        identityPublicKey: existing.identityPublicKey,
+        avatarMimeType: useIncomingProfile
+            ? contact.avatarMimeType
+            : existing.avatarMimeType,
+        avatarBytesBase64: useIncomingProfile
+            ? contact.avatarBytesBase64
+            : existing.avatarBytesBase64,
+        profileUpdatedAt: useIncomingProfile
+            ? contact.profileUpdatedAt
+            : existing.profileUpdatedAt,
+      );
+      if (jsonEncode(merged.toJson()) != jsonEncode(existing.toJson())) {
+        _contacts[index] = merged;
+        changed = true;
+      }
+    }
+    if (changed) {
+      _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+    }
+    return changed;
+  }
+
+  bool _mergeSyncedGroups(List<dynamic>? rawGroups) {
+    if (rawGroups == null) return false;
+    var changed = false;
+    for (final item in rawGroups) {
+      final incoming =
+          GroupConversation.fromJson((item as Map).cast<String, dynamic>());
+      final index =
+          _groups.indexWhere((group) => group.groupId == incoming.groupId);
+      if (index < 0) {
+        _groups.add(incoming);
+        changed = true;
+        continue;
+      }
+
+      final existing = _groups[index];
+      final merged = existing.copyWith(
+        name: incoming.name,
+        memberIds: <String>{
+          ...existing.memberIds,
+          ...incoming.memberIds,
+        }.toList(growable: false),
+        acceptedMemberIds: <String>{
+          ...existing.acceptedMemberIds,
+          ...incoming.acceptedMemberIds,
+        }.toList(growable: false),
+        invitedMemberIds: <String>{
+          ...existing.invitedMemberIds,
+          ...incoming.invitedMemberIds,
+        }.toList(growable: false),
+        invitedBy: existing.invitedBy ?? incoming.invitedBy,
+        pendingInvite: existing.pendingInvite && incoming.pendingInvite,
+      );
+      if (jsonEncode(merged.toJson()) != jsonEncode(existing.toJson())) {
+        _groups[index] = merged;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  Future<bool> _mergeSyncedProfile(Object? rawProfile) async {
+    if (rawProfile == null) return false;
+    final incoming =
+        UserProfile.fromJson((rawProfile as Map).cast<String, dynamic>());
+    final incomingDate = incoming.updatedAt;
+    final currentDate = _ownProfile?.updatedAt;
+    if (incomingDate != null &&
+        currentDate != null &&
+        !incomingDate.isAfter(currentDate)) {
+      return false;
+    }
+    _ownProfile = incoming;
+    await _store.saveOwnProfile(incoming);
+    if (_relayConnected) _relay?.updateProfile(incoming);
+    return true;
+  }
+
+  bool _mergeSyncedMessages(List<ChatMessage> incomingMessages) {
+    var changed = false;
+    for (final incoming in incomingMessages) {
+      final list =
+          _messages.putIfAbsent(incoming.contactId, () => <ChatMessage>[]);
+      final index = list.indexWhere((message) => message.id == incoming.id);
+      if (index < 0) {
+        list.add(incoming);
+        _sortMessages(list);
+        changed = true;
+        continue;
+      }
+
+      final merged = _mergeMessageVersions(list[index], incoming);
+      if (jsonEncode(merged.toJson()) != jsonEncode(list[index].toJson())) {
+        list[index] = merged;
+        _sortMessages(list);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  ChatMessage _mergeMessageVersions(
+    ChatMessage existing,
+    ChatMessage incoming,
+  ) {
+    final existingEditedAt = existing.editedAt;
+    final incomingEditedAt = incoming.editedAt;
+    final useIncomingBody = incoming.retracted ||
+        (incomingEditedAt != null &&
+            (existingEditedAt == null ||
+                incomingEditedAt.isAfter(existingEditedAt)));
+    final base = useIncomingBody ? incoming : existing;
+    final reactions = <String, String>{
+      ...existing.reactions,
+      ...incoming.reactions,
+    };
+
+    return base.copyWith(
+      status: _promoteStatus(existing.status, incoming.status),
+      retracted: existing.retracted || incoming.retracted,
+      pinned: incoming.pinned,
+      reactions: reactions,
+      editedAt: _newestDate(existing.editedAt, incoming.editedAt),
+      transport: incoming.transport ?? existing.transport,
+      error: incoming.error ?? existing.error,
+    );
+  }
+
+  DateTime? _newestDate(DateTime? left, DateTime? right) {
+    if (left == null) return right;
+    if (right == null) return left;
+    return right.isAfter(left) ? right : left;
+  }
+
+  Future<String> _localArchiveKeyBase64() async {
+    final existing = await _store.loadLocalArchiveKey();
+    if (_isValidArchiveKey(existing)) return existing!;
+
+    final keyBytes = secureRandomBytes(32);
+    final encoded = b64(keyBytes);
+    await _store.saveLocalArchiveKey(encoded);
+    return encoded;
+  }
+
+  Future<SecretKey> _localArchiveSecretKey() async {
+    return SecretKey(unb64(await _localArchiveKeyBase64()));
+  }
+
+  bool _isValidArchiveKey(String? value) {
+    if (value == null || value.isEmpty) return false;
+    try {
+      return unb64(value).length == 32;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _loadPackageInfo() async {
@@ -2222,6 +3310,9 @@ class AppState extends ChangeNotifier {
         list.add(message);
       }
     }
+    for (final list in _messages.values) {
+      _sortMessages(list);
+    }
   }
 
   Future<void> _loadSessions() async {
@@ -2262,8 +3353,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _persistMessages() {
-    final snapshot =
-        _messages.values.expand((messages) => messages).toList(growable: false);
+    final snapshot = _allMessagesSnapshot();
     _persistQueue = _persistQueue
         .then((_) => _messageArchive.save(snapshot))
         .catchError((_) {});

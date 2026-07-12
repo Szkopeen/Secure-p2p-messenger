@@ -53,7 +53,9 @@ function loadOfflineQueues() {
     const now = Date.now();
     for (const [userId, items] of Object.entries(decoded.queues)) {
       if (!Array.isArray(items)) continue;
-      const liveItems = items.filter((item) => item.expiresAt > now && item.envelope);
+      const liveItems = items
+        .map((item) => normalizeQueueItem(item))
+        .filter((item) => item && item.expiresAt > now);
       if (liveItems.length > 0) offlineQueues.set(userId, liveItems);
     }
   } catch (error) {
@@ -72,13 +74,15 @@ function loadKnownUsers() {
     for (const [userId, entry] of Object.entries(decoded.users)) {
       if (!entry || typeof entry.identityPublicKey !== 'string') continue;
       const nowIso = new Date().toISOString();
+      const devices = normalizeKnownDevices(entry, nowIso);
       knownUsers.set(userId, {
         v: 1,
         userId,
         identityPublicKey: entry.identityPublicKey,
         firstSeenAt: entry.firstSeenAt || entry.lastSeenAt || nowIso,
         lastSeenAt: entry.lastSeenAt || nowIso,
-        lastDeviceId: typeof entry.lastDeviceId === 'string' ? entry.lastDeviceId : null
+        lastDeviceId: typeof entry.lastDeviceId === 'string' ? entry.lastDeviceId : null,
+        devices
       });
     }
   } catch (error) {
@@ -232,22 +236,78 @@ function persistOfflineQueues() {
 function rememberKnownUser(state) {
   const nowIso = new Date().toISOString();
   const existing = knownUsers.get(state.userId);
+  const devices = normalizeKnownDevices(existing, nowIso);
+  const previousDevice = devices[state.deviceId] || {};
+  devices[state.deviceId] = {
+    firstSeenAt: previousDevice.firstSeenAt || nowIso,
+    lastSeenAt: nowIso
+  };
   knownUsers.set(state.userId, {
     v: 1,
     userId: state.userId,
     identityPublicKey: state.identityPublicKey,
     firstSeenAt: existing?.firstSeenAt || nowIso,
     lastSeenAt: nowIso,
-    lastDeviceId: state.deviceId
+    lastDeviceId: state.deviceId,
+    devices
   });
   persistKnownUsers();
+}
+
+function normalizeKnownDevices(entry, fallbackIso) {
+  const devices = {};
+  if (entry?.devices && typeof entry.devices === 'object') {
+    for (const [deviceId, value] of Object.entries(entry.devices)) {
+      if (typeof deviceId !== 'string' || deviceId.length === 0) continue;
+      const firstSeenAt = typeof value?.firstSeenAt === 'string'
+        ? value.firstSeenAt
+        : fallbackIso;
+      const lastSeenAt = typeof value?.lastSeenAt === 'string'
+        ? value.lastSeenAt
+        : firstSeenAt;
+      devices[deviceId] = { firstSeenAt, lastSeenAt };
+    }
+  }
+
+  if (typeof entry?.lastDeviceId === 'string' && entry.lastDeviceId.length > 0) {
+    devices[entry.lastDeviceId] ||= {
+      firstSeenAt: entry.firstSeenAt || entry.lastSeenAt || fallbackIso,
+      lastSeenAt: entry.lastSeenAt || fallbackIso
+    };
+  }
+  return devices;
+}
+
+function knownDeviceIds(userId) {
+  return Object.keys(knownUsers.get(userId)?.devices || {});
+}
+
+function normalizeQueueItem(item) {
+  const envelope = envelopeForQueueItem(item);
+  if (!envelope) return null;
+  const now = Date.now();
+  const queuedAt = Number.isFinite(item?.queuedAt) ? item.queuedAt : now;
+  const expiresAt = Number.isFinite(item?.expiresAt)
+    ? item.expiresAt
+    : queuedAt + config.offlineQueueTtlMs;
+  const deliveredDeviceIds = Array.isArray(item?.deliveredDeviceIds)
+    ? Array.from(new Set(item.deliveredDeviceIds.filter((id) => typeof id === 'string' && id.length > 0)))
+    : [];
+
+  return {
+    queuedAt,
+    expiresAt,
+    deliveredDeviceIds,
+    envelope
+  };
 }
 
 function pruneOfflineQueues() {
   const now = Date.now();
   let changed = false;
   for (const [userId, items] of offlineQueues.entries()) {
-    const liveItems = items.filter((item) => item.expiresAt > now);
+    const liveItems = items.filter((item) =>
+      item.expiresAt > now && !isQueueItemComplete(userId, item));
     if (liveItems.length === 0) {
       offlineQueues.delete(userId);
       changed = true;
@@ -259,12 +319,29 @@ function pruneOfflineQueues() {
   if (changed) persistOfflineQueues();
 }
 
-function enqueueOffline(to, envelope) {
+function isQueueItemComplete(userId, item) {
+  const devices = knownDeviceIds(userId);
+  if (devices.length === 0) return false;
+  const delivered = new Set(item.deliveredDeviceIds || []);
+  return devices.every((deviceId) => delivered.has(deviceId));
+}
+
+function shouldQueueForMissingDevices(userId, deliveredDeviceIds) {
+  const devices = knownDeviceIds(userId);
+  if (devices.length === 0) return deliveredDeviceIds.length === 0;
+  const delivered = new Set(deliveredDeviceIds);
+  return devices.some((deviceId) => !delivered.has(deviceId));
+}
+
+function enqueueOffline(to, envelope, deliveredDeviceIds = []) {
+  const delivered = Array.from(new Set(deliveredDeviceIds));
+  if (!shouldQueueForMissingDevices(to, delivered)) return false;
   pruneOfflineQueues();
   const queue = offlineQueues.get(to) || [];
   queue.push({
     queuedAt: Date.now(),
     expiresAt: Date.now() + config.offlineQueueTtlMs,
+    deliveredDeviceIds: delivered,
     envelope
   });
   while (queue.length > config.offlineQueueMaxPerUser) {
@@ -275,20 +352,37 @@ function enqueueOffline(to, envelope) {
   return true;
 }
 
-function flushOfflineQueue(userId) {
+function flushOfflineQueue(state, ws) {
   pruneOfflineQueues();
+  const userId = state.userId;
   const queue = offlineQueues.get(userId);
   if (!queue || queue.length === 0) return 0;
 
   let delivered = 0;
+  const remaining = [];
   for (const item of queue) {
-    delivered += forwardToUser(userId, {
-      ...item.envelope,
-      queued: true,
-      queuedAt: new Date(item.queuedAt).toISOString()
-    });
+    const deliveredDevices = new Set(item.deliveredDeviceIds || []);
+    if (!deliveredDevices.has(state.deviceId) && ws.readyState === WebSocket.OPEN) {
+      send(ws, {
+        ...item.envelope,
+        queued: true,
+        queuedAt: new Date(item.queuedAt).toISOString()
+      });
+      deliveredDevices.add(state.deviceId);
+      item.deliveredDeviceIds = Array.from(deliveredDevices);
+      delivered += 1;
+    }
+
+    if (!isQueueItemComplete(userId, item)) {
+      remaining.push(item);
+    }
   }
-  offlineQueues.delete(userId);
+
+  if (remaining.length === 0) {
+    offlineQueues.delete(userId);
+  } else {
+    offlineQueues.set(userId, remaining);
+  }
   persistOfflineQueues();
   return delivered;
 }
@@ -326,6 +420,7 @@ function adminUserSummary(userId) {
   const profile = profiles.get(userId) || null;
   const directory = publicDirectory.get(userId) || null;
   const activeConnections = users.get(userId)?.size || 0;
+  const devices = knownDeviceIds(userId);
   const queuedIn = offlineQueues.get(userId)?.length || 0;
   let queuedOut = 0;
   for (const items of offlineQueues.values()) {
@@ -347,6 +442,8 @@ function adminUserSummary(userId) {
     activeConnections,
     queuedIn,
     queuedOut,
+    deviceCount: devices.length,
+    devices,
     firstSeenAt: known?.firstSeenAt || null,
     lastSeenAt: known?.lastSeenAt || null,
     lastDeviceId: known?.lastDeviceId || null,
@@ -713,20 +810,28 @@ function unregisterClient(state) {
   if (existing.size === 0) users.delete(state.userId);
 }
 
-function forwardToUser(to, envelope) {
+function forwardToUser(to, envelope, options = {}) {
   const recipients = users.get(to);
   if (!recipients || recipients.size === 0) {
-    return 0;
+    return { deliveredConnections: 0, deliveredDeviceIds: [] };
   }
 
-  let delivered = 0;
-  for (const { ws } of recipients.values()) {
+  let deliveredConnections = 0;
+  const deliveredDeviceIds = new Set();
+  for (const { ws, state } of recipients.values()) {
+    if (options.excludeConnectionId && state.connectionId === options.excludeConnectionId) {
+      continue;
+    }
     if (ws.readyState === WebSocket.OPEN) {
       send(ws, envelope);
-      delivered += 1;
+      deliveredConnections += 1;
+      if (state.deviceId) deliveredDeviceIds.add(state.deviceId);
     }
   }
-  return delivered;
+  return {
+    deliveredConnections,
+    deliveredDeviceIds: Array.from(deliveredDeviceIds)
+  };
 }
 
 function handleHello(ws, state, message) {
@@ -764,7 +869,7 @@ function handleHello(ws, state, message) {
     serverTime: new Date().toISOString(),
     maxPayloadBytes: config.maxPayloadBytes
   });
-  const flushed = flushOfflineQueue(state.userId);
+  const flushed = flushOfflineQueue(state, ws);
   if (flushed > 0) {
     audit('Dostarczono kolejke offline', { userId: state.userId, delivered: flushed });
   }
@@ -793,15 +898,21 @@ function handleRelay(ws, state, message) {
     payload: message.payload
   };
 
-  const deliveredConnections = forwardToUser(message.to, envelope);
-  const queued = deliveredConnections === 0 ? enqueueOffline(message.to, envelope) : false;
+  const ownDeviceRelay = message.to === state.userId;
+  const delivery = forwardToUser(message.to, envelope, {
+    excludeConnectionId: ownDeviceRelay ? state.connectionId : null
+  });
+  const deliveredDeviceIds = ownDeviceRelay
+    ? Array.from(new Set([state.deviceId, ...delivery.deliveredDeviceIds]))
+    : delivery.deliveredDeviceIds;
+  const queued = enqueueOffline(message.to, envelope, deliveredDeviceIds);
   send(ws, {
     v: 1,
     type: 'sent',
     id: message.id,
     to: message.to,
     transport: 'relay',
-    deliveredConnections,
+    deliveredConnections: delivery.deliveredConnections,
     queued
   });
 }
@@ -830,19 +941,21 @@ function handleSignal(ws, state, message) {
     payload: message.payload
   };
 
-  const deliveredConnections = forwardToUser(message.to, envelope);
+  const delivery = forwardToUser(message.to, envelope);
   const canQueueSignal =
     message.signalType === 'crypto-handshake-init' ||
     message.signalType === 'crypto-handshake-accept';
   const queued =
-    deliveredConnections === 0 && canQueueSignal ? enqueueOffline(message.to, envelope) : false;
+    delivery.deliveredConnections === 0 && canQueueSignal
+      ? enqueueOffline(message.to, envelope, delivery.deliveredDeviceIds)
+      : false;
   send(ws, {
     v: 1,
     type: 'sent',
     id: message.id,
     to: message.to,
     transport: 'signal',
-    deliveredConnections,
+    deliveredConnections: delivery.deliveredConnections,
     queued
   });
 }
@@ -942,15 +1055,15 @@ function handleContactRequest(ws, state, message) {
     }
   };
 
-  const deliveredConnections = forwardToUser(message.to, envelope);
-  const queued = deliveredConnections === 0 ? enqueueOffline(message.to, envelope) : false;
+  const delivery = forwardToUser(message.to, envelope);
+  const queued = enqueueOffline(message.to, envelope, delivery.deliveredDeviceIds);
   send(ws, {
     v: 1,
     type: 'sent',
     id: message.id,
     to: message.to,
     transport: 'contact_request',
-    deliveredConnections,
+    deliveredConnections: delivery.deliveredConnections,
     queued
   });
 }

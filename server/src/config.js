@@ -34,7 +34,7 @@ export const config = Object.freeze({
   updateFilesDir: process.env.UPDATE_FILES_DIR || './updates/files',
   rateLimitMessages: readInt('RATE_LIMIT_MESSAGES', 80, 1, 500),
   rateLimitWindowMs: readInt('RATE_LIMIT_WINDOW_MS', 10_000, 1000, 60_000),
-  maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 4, 1, 20),
+  maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 12, 1, 20),
   securityLogs: readBool('SECURITY_LOGS', false)
 });
 
