@@ -32,7 +32,7 @@ curl http://127.0.0.1:8443/healthz
 
 ### TLS i publiczny adres
 
-Do testow w LAN mozesz uzyc `ws://ADRES_IP:8443`. Dla internetu uzywaj `wss://`, bo token relay i WebRTC/Web wymagaja bezpiecznego kontekstu.
+Do testow w LAN mozesz uzyc `ws://ADRES_IP:8443`. Dla internetu uzywaj `wss://`, bo token relay i komunikacja z internetu powinny isc przez bezpieczny kanal TLS.
 
 Przyklad Caddy:
 
@@ -65,12 +65,13 @@ Wymagania:
 - Flutter SDK
 - Dla Windows: Visual Studio z obciazeniem "Desktop development with C++"
 - Dla Androida: Android Studio, SDK i zaakceptowane licencje
+- Dla Linuxa: Flutter na Linuxie oraz pakiety developerskie GTK/CMake/Ninja
 
 Przygotowanie katalogow platform:
 
 ```powershell
 cd client
-flutter create . --platforms=windows,android,web
+flutter create . --platforms=windows,android,linux
 flutter pub get
 ```
 
@@ -97,13 +98,13 @@ flutter build windows --release
 
 Artefakt bedzie w `build/windows/x64/runner/Release/`.
 
-Web:
+Linux:
 
-```powershell
-flutter build web --release
+```bash
+flutter build linux --release
 ```
 
-Katalog `build/web` wystaw przez HTTPS. WebRTC i bezpieczne magazynowanie w przegladarce wymagaja HTTPS poza `localhost`.
+Artefakt bedzie w `build/linux/x64/release/bundle/`.
 
 ## 3. Pierwsze uruchomienie
 
@@ -119,7 +120,7 @@ Katalog `build/web` wystaw przez HTTPS. WebRTC i bezpieczne magazynowanie w prze
 - Relay nie ma kolejki offline.
 - Pliki sa trzymane w pamieci i maja domyslny limit 8 MB przed szyfrowaniem.
 - WebRTC bez wlasnego STUN/TURN moze nie przebic czesci NAT. Wtedy dziala relay fallback.
-- Klient Web ma slabsze gwarancje lokalnego magazynu niz Android/Windows. Dla najwyzszego poziomu prywatnosci preferuj aplikacje natywne.
+- Klienci sa natywni: Android, Windows i Linux. Webowy wariant aplikacji nie jest utrzymywany.
 - Ten kod jest solidnym punktem startowym, ale przed zastosowaniem operacyjnym wymaga testow penetracyjnych, hardeningu hosta i audytu.
 
 ## 5. Hardening produkcyjny

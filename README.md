@@ -1,6 +1,6 @@
 # Secure P2P Messenger
 
-Prywatny komunikator E2EE z lekkim serwerem Relay/Signaling oraz jednym klientem Flutter dla Windows, Android i Web.
+Prywatny komunikator E2EE z lekkim serwerem Relay/Signaling oraz jednym klientem Flutter dla Windows, Android i Linux.
 
 ## Co jest w projekcie
 

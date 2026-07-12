@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../app_state.dart';
 import '../crypto/codec.dart';
@@ -31,10 +32,10 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _text = TextEditingController();
   final _search = TextEditingController();
-  final _scrollController = ScrollController();
+  final _itemScrollController = ItemScrollController();
+  final _itemPositionsListener = ItemPositionsListener.create();
   final _inputFocus = FocusNode();
-  final _listViewportKey = GlobalKey();
-  final Map<String, GlobalKey> _messageKeys = {};
+  List<ChatMessage> _visibleMessages = const [];
   int _lastMessageCount = 0;
   int _pendingSends = 0;
   int _scrollEpoch = 0;
@@ -50,7 +51,6 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _text.dispose();
     _search.dispose();
-    _scrollController.dispose();
     _inputFocus.dispose();
     super.dispose();
   }
@@ -61,6 +61,7 @@ class _ChatScreenState extends State<ChatScreen> {
       animation: widget.appState,
       builder: (context, _) {
         final messages = widget.appState.messagesFor(widget.contact.userId);
+        _visibleMessages = messages;
         final p2p = widget.appState.isP2pConnected(widget.contact.userId);
         final online = widget.appState.isContactOnline(widget.contact.userId);
         final searchResults = _searchResults(messages);
@@ -158,25 +159,20 @@ class _ChatScreenState extends State<ChatScreen> {
                         onClose: _toggleSearch,
                       ),
                     Expanded(
-                      child: ListView(
-                        key: _listViewportKey,
-                        controller: _scrollController,
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
+                      child: ScrollablePositionedList.builder(
+                        itemScrollController: _itemScrollController,
+                        itemPositionsListener: _itemPositionsListener,
                         padding: const EdgeInsets.all(12),
-                        children: [
-                          for (final message in messages)
-                            Container(
-                              key: _keyForMessage(message.id),
-                              child: _MessageBubble(
-                                appState: widget.appState,
-                                contact: widget.contact,
-                                message: message,
-                                highlighted:
-                                    message.id == _highlightedMessageId,
-                              ),
-                            ),
-                        ],
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) {
+                          final message = messages[index];
+                          return _MessageBubble(
+                            appState: widget.appState,
+                            contact: widget.contact,
+                            message: message,
+                            highlighted: message.id == _highlightedMessageId,
+                          );
+                        },
                       ),
                     ),
                     SafeArea(
@@ -334,7 +330,6 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _highlightedMessageId = null;
       _lastMessageCount = 0;
-      _messageKeys.clear();
     });
   }
 
@@ -438,10 +433,6 @@ class _ChatScreenState extends State<ChatScreen> {
     };
   }
 
-  GlobalKey _keyForMessage(String messageId) {
-    return _messageKeys.putIfAbsent(messageId, GlobalKey.new);
-  }
-
   void _highlightAndScrollToMessage(String messageId) {
     if (!mounted) return;
     setState(() => _highlightedMessageId = messageId);
@@ -449,26 +440,16 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _scrollToMessageId(String messageId) {
+    final index = _visibleMessages.indexWhere((message) {
+      return message.id == messageId;
+    });
+    if (index < 0) return;
+
     final epoch = ++_scrollEpoch;
 
     void attempt(int remaining) {
-      if (epoch != _scrollEpoch) return;
-      final keyContext = _messageKeys[messageId]?.currentContext;
-      if (!mounted) return;
-      if (keyContext == null) {
-        if (remaining > 0) {
-          Future<void>.delayed(
-            const Duration(milliseconds: 60),
-            () => attempt(remaining - 1),
-          );
-        }
-        return;
-      }
-      final targetBox = keyContext.findRenderObject();
-      final viewportBox = _listViewportKey.currentContext?.findRenderObject();
-      if (targetBox is! RenderBox ||
-          viewportBox is! RenderBox ||
-          !_scrollController.hasClients) {
+      if (!mounted || epoch != _scrollEpoch) return;
+      if (!_itemScrollController.isAttached) {
         if (remaining > 0) {
           Future<void>.delayed(
             const Duration(milliseconds: 60),
@@ -478,18 +459,9 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      final targetTop = targetBox.localToGlobal(Offset.zero).dy;
-      final viewportTop = viewportBox.localToGlobal(Offset.zero).dy;
-      final viewportHeight = viewportBox.size.height;
-      final targetHeight = targetBox.size.height;
-      final centeredDelta =
-          targetTop - viewportTop - ((viewportHeight - targetHeight) / 2);
-      final position = _scrollController.position;
-      final targetOffset = (_scrollController.offset + centeredDelta)
-          .clamp(position.minScrollExtent, position.maxScrollExtent);
-
-      _scrollController.animateTo(
-        targetOffset,
+      _itemScrollController.scrollTo(
+        index: index,
+        alignment: 0.32,
         duration: const Duration(milliseconds: 280),
         curve: Curves.easeOutCubic,
       );
@@ -526,30 +498,51 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   bool _isNearBottom() {
-    if (!_scrollController.hasClients) return true;
-    final position = _scrollController.position;
-    return position.maxScrollExtent - position.pixels <= 96;
+    if (_visibleMessages.isEmpty) return true;
+    final lastIndex = _visibleMessages.length - 1;
+    final positions = _itemPositionsListener.itemPositions.value;
+    if (positions.isEmpty) return true;
+    return positions.any((position) {
+      return position.index == lastIndex && position.itemTrailingEdge <= 1.12;
+    });
   }
 
   void _scrollToBottom({bool jump = false}) {
+    if (_visibleMessages.isEmpty) return;
+    final lastIndex = _visibleMessages.length - 1;
     final epoch = _scrollEpoch;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (epoch != _scrollEpoch) return;
-      if (!mounted || !_scrollController.hasClients) return;
+    void attempt(int remaining) {
+      if (!mounted || epoch != _scrollEpoch) return;
+      if (!_itemScrollController.isAttached) {
+        if (remaining > 0) {
+          Future<void>.delayed(
+            const Duration(milliseconds: 60),
+            () => attempt(remaining - 1),
+          );
+        }
+        return;
+      }
+
       if (jump) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        _itemScrollController.jumpTo(index: lastIndex, alignment: 1);
         Future<void>.delayed(const Duration(milliseconds: 80), () {
-          if (epoch != _scrollEpoch) return;
-          if (!mounted || !_scrollController.hasClients) return;
-          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+          if (!mounted || epoch != _scrollEpoch) return;
+          if (!_itemScrollController.isAttached) return;
+          _itemScrollController.jumpTo(index: lastIndex, alignment: 1);
         });
         return;
       }
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
+
+      _itemScrollController.scrollTo(
+        index: lastIndex,
+        alignment: 1,
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
       );
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      attempt(10);
     });
   }
 

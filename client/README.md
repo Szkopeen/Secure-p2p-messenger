@@ -1,11 +1,11 @@
 # Secure P2P Client
 
-Klient Flutter dla Windows, Android i Web.
+Klient Flutter dla Windows, Android i Linux.
 
 ## Start
 
 ```powershell
-flutter create . --platforms=windows,android,web
+flutter create . --platforms=windows,android,linux
 flutter pub get
 flutter run -d windows
 ```

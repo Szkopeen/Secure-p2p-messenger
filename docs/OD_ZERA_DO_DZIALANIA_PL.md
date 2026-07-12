@@ -7,7 +7,7 @@ Zakladany wariant produkcyjny:
 - Serwer domowy: Ubuntu Server 24.04 LTS lub nowszy, staly dostep do internetu.
 - Relay: Node.js uruchomiony jako usluga systemd.
 - Publiczny dostep: domena, HTTPS/WSS przez Caddy.
-- Klient: Flutter budowany na Windows dla Windows, Android i Web.
+- Klient: Flutter budowany dla Windows, Android i Linux.
 
 Do testow lokalnych mozesz uruchomic relay bez domeny i TLS na `ws://ADRES_IP:8443`, ale do uzycia przez internet uzywaj `wss://`.
 
@@ -312,7 +312,7 @@ Na komputerze developerskim z Windows zainstaluj:
 - Flutter SDK.
 - Visual Studio z obciazeniem "Desktop development with C++".
 - Android Studio z Android SDK, jesli budujesz APK.
-- Chrome albo Edge, jesli testujesz Web.
+- Narzedzia Linux desktop, jesli budujesz wersje Linux na maszynie z Linuxem.
 
 Po instalacji otworz PowerShell i sprawdz:
 
@@ -337,7 +337,7 @@ cd "C:\Users\ulkhh\Documents\New project\client"
 Wygeneruj katalogi platform Flutter:
 
 ```powershell
-flutter create . --platforms=windows,android,web
+flutter create . --platforms=windows,android,linux
 ```
 
 Pobierz zaleznosci:
@@ -396,48 +396,19 @@ adb install -r .\build\app\outputs\flutter-apk\app-release.apk
 
 Jesli nie uzywasz `adb`, przenies APK na telefon i zainstaluj recznie. Android moze poprosic o zgode na instalacje z nieznanego zrodla.
 
-### Web
+### Linux
 
-```powershell
-cd "C:\Users\ulkhh\Documents\New project\client"
-flutter build web --release
+Wersje Linux najlepiej budowac na komputerze z Linuxem.
+
+```bash
+cd ~/secure-p2p/client
+flutter build linux --release
 ```
 
 Gotowy katalog:
 
 ```text
-client\build\web
-```
-
-Web wystawiaj tylko przez HTTPS. Dla prostego hostingu na tym samym serwerze mozesz skopiowac katalog:
-
-```powershell
-scp -r .\build\web relayadmin@ADRES_SERWERA:/tmp/secure-p2p-web
-```
-
-Na serwerze:
-
-```bash
-sudo mkdir -p /var/www/secure-p2p-web
-sudo rsync -a /tmp/secure-p2p-web/ /var/www/secure-p2p-web/
-sudo chown -R www-data:www-data /var/www/secure-p2p-web
-```
-
-Dodaj do Caddy osobna domene lub sciezke. Przyklad osobnej domeny:
-
-```caddyfile
-app.twojadomena.pl {
-  root * /var/www/secure-p2p-web
-  file_server
-  try_files {path} /index.html
-}
-```
-
-Przeladuj Caddy:
-
-```bash
-sudo caddy validate --config /etc/caddy/Caddyfile
-sudo systemctl reload caddy
+client/build/linux/x64/release/bundle/
 ```
 
 ## 13. Pierwsze spiecie dwoch uzytkownikow
