@@ -21,11 +21,13 @@ import {
 import { SlidingWindowRateLimiter } from './rateLimiter.js';
 
 const users = new Map();
+const knownUsers = new Map();
 const profiles = new Map();
 const offlineQueues = new Map();
 const publicDirectory = new Map();
 const bannedUsers = new Set();
 
+loadKnownUsers();
 loadProfiles();
 loadOfflineQueues();
 loadPublicDirectory();
@@ -54,6 +56,31 @@ function loadOfflineQueues() {
     }
   } catch (error) {
     audit('Nie wczytano kolejki offline', { error: String(error) });
+  }
+}
+
+function loadKnownUsers() {
+  try {
+    knownUsers.clear();
+    if (!fs.existsSync(config.knownUsersFile)) return;
+    const raw = fs.readFileSync(config.knownUsersFile, 'utf8');
+    const decoded = JSON.parse(raw);
+    if (!decoded || decoded.v !== 1 || !decoded.users) return;
+
+    for (const [userId, entry] of Object.entries(decoded.users)) {
+      if (!entry || typeof entry.identityPublicKey !== 'string') continue;
+      const nowIso = new Date().toISOString();
+      knownUsers.set(userId, {
+        v: 1,
+        userId,
+        identityPublicKey: entry.identityPublicKey,
+        firstSeenAt: entry.firstSeenAt || entry.lastSeenAt || nowIso,
+        lastSeenAt: entry.lastSeenAt || nowIso,
+        lastDeviceId: typeof entry.lastDeviceId === 'string' ? entry.lastDeviceId : null
+      });
+    }
+  } catch (error) {
+    audit('Nie wczytano znanych uzytkownikow', { error: String(error) });
   }
 }
 
@@ -110,6 +137,24 @@ function loadBannedUsers() {
   }
 }
 
+function persistKnownUsers() {
+  try {
+    const dir = path.dirname(config.knownUsersFile);
+    fs.mkdirSync(dir, { recursive: true });
+    const savedUsers = {};
+    for (const [userId, entry] of knownUsers.entries()) {
+      savedUsers[userId] = entry;
+    }
+    fs.writeFileSync(
+      config.knownUsersFile,
+      JSON.stringify({ v: 1, savedAt: new Date().toISOString(), users: savedUsers }),
+      'utf8'
+    );
+  } catch (error) {
+    audit('Nie zapisano znanych uzytkownikow', { error: String(error) });
+  }
+}
+
 function persistProfiles() {
   try {
     const dir = path.dirname(config.publicProfilesFile);
@@ -162,6 +207,20 @@ function persistOfflineQueues() {
   } catch (error) {
     audit('Nie zapisano kolejki offline', { error: String(error) });
   }
+}
+
+function rememberKnownUser(state) {
+  const nowIso = new Date().toISOString();
+  const existing = knownUsers.get(state.userId);
+  knownUsers.set(state.userId, {
+    v: 1,
+    userId: state.userId,
+    identityPublicKey: state.identityPublicKey,
+    firstSeenAt: existing?.firstSeenAt || nowIso,
+    lastSeenAt: nowIso,
+    lastDeviceId: state.deviceId
+  });
+  persistKnownUsers();
 }
 
 function pruneOfflineQueues() {
@@ -393,6 +452,7 @@ function handleHello(ws, state, message) {
   state.identityPublicKey = message.identityPublicKey;
 
   if (!registerClient(state, ws)) return;
+  rememberKnownUser(state);
 
   audit('Polaczono klienta', { userId: state.userId, deviceId: state.deviceId });
   send(ws, {
@@ -762,6 +822,7 @@ function shutdown(signal) {
   clearInterval(heartbeat);
   clearInterval(offlineQueueMaintenance);
   persistOfflineQueues();
+  persistKnownUsers();
   persistProfiles();
   for (const client of wss.clients) {
     client.close(1001, 'Server shutdown');

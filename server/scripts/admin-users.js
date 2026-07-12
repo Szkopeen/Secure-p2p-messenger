@@ -1,276 +1,367 @@
+#!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const SAFE_ID = /^[a-zA-Z0-9_.:@-]{3,128}$/;
+const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const SAFE_USER_ID = /^[a-zA-Z0-9_.:@-]{3,128}$/;
 
-loadDotEnv();
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
 
-const files = {
-  offlineQueue: process.env.OFFLINE_QUEUE_FILE || './data/offline-queue.json',
-  profiles: process.env.PUBLIC_PROFILES_FILE || './data/public-profiles.json',
-  directory: process.env.PUBLIC_DIRECTORY_FILE || './data/public-directory.json',
-  bannedUsers: process.env.BANNED_USERS_FILE || './data/banned-users.json'
-};
-
-function loadDotEnv(file = '.env') {
-  if (!fs.existsSync(file)) return;
-  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+function loadDotEnv(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const result = {};
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    const separator = trimmed.indexOf('=');
+    if (separator <= 0) continue;
+    const key = trimmed.slice(0, separator).trim();
+    let value = trimmed.slice(separator + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
       value = value.slice(1, -1);
     }
-    if (!process.env[key]) process.env[key] = value;
+    result[key] = value;
   }
+  return result;
 }
 
-const command = process.argv[2];
-const userId = process.argv[3];
-const flags = new Set(process.argv.slice(4));
-const confirmed = flags.has('--yes') || flags.has('-y');
+const dotEnv = loadDotEnv(path.join(SERVER_DIR, '.env'));
 
-function usage(exitCode = 0) {
-  console.log(`Uzycie:
-  npm run admin:users -- list
-  npm run admin:users -- show <userId>
-  npm run admin:users -- delete <userId> --yes
-  npm run admin:users -- ban <userId> --yes
-  npm run admin:users -- unban <userId> --yes
-
-Domyslnie delete usuwa dane relay i dodaje userId do banlisty.
-Opcje:
-  --no-ban   przy delete usuwa dane, ale nie blokuje ponownego polaczenia
-  --yes      wykonuje zmiany; bez tego narzedzie tylko pokazuje co zrobi`);
-  process.exit(exitCode);
+function setting(name, fallback) {
+  return process.env[name] || dotEnv[name] || fallback;
 }
 
-function assertUserId(value) {
-  if (!SAFE_ID.test(value || '')) {
-    throw new Error('Niepoprawny userId. Dozwolone: litery, cyfry, _, ., :, @, -; dlugosc 3-128.');
+function resolveServerPath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(SERVER_DIR, value);
+}
+
+const dataFiles = {
+  knownUsers: {
+    label: 'znani uzytkownicy',
+    path: resolveServerPath(setting('KNOWN_USERS_FILE', './data/known-users.json')),
+    empty: { v: 1, users: {} }
+  },
+  profiles: {
+    label: 'profile publiczne',
+    path: resolveServerPath(setting('PUBLIC_PROFILES_FILE', './data/public-profiles.json')),
+    empty: { v: 1, profiles: {} }
+  },
+  directory: {
+    label: 'publiczna lista',
+    path: resolveServerPath(setting('PUBLIC_DIRECTORY_FILE', './data/public-directory.json')),
+    empty: { v: 1, users: {} }
+  },
+  offlineQueue: {
+    label: 'kolejki offline',
+    path: resolveServerPath(setting('OFFLINE_QUEUE_FILE', './data/offline-queue.json')),
+    empty: { v: 1, queues: {} }
+  },
+  bannedUsers: {
+    label: 'banlista',
+    path: resolveServerPath(setting('BANNED_USERS_FILE', './data/banned-users.json')),
+    empty: { v: 1, users: [] }
   }
-}
+};
 
-function readJson(file, fallback) {
-  if (!fs.existsSync(file)) return structuredClone(fallback);
-  const raw = fs.readFileSync(file, 'utf8').trim();
-  if (!raw) return structuredClone(fallback);
+function readJson(definition) {
+  if (!fs.existsSync(definition.path)) return clone(definition.empty);
+  const raw = fs.readFileSync(definition.path, 'utf8');
+  if (!raw.trim()) return clone(definition.empty);
   return JSON.parse(raw);
 }
 
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-}
-
-function backupExistingFiles() {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupRoot = path.join('data', 'admin-backups', timestamp);
-  let count = 0;
-
-  for (const file of Object.values(files)) {
-    if (!fs.existsSync(file)) continue;
-    const target = path.join(backupRoot, path.basename(file));
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(file, target);
-    count += 1;
+function normalizeState(state) {
+  if (!state.knownUsers || state.knownUsers.v !== 1 || !state.knownUsers.users) {
+    state.knownUsers = clone(dataFiles.knownUsers.empty);
   }
-
-  return count > 0 ? backupRoot : null;
+  if (!state.profiles || state.profiles.v !== 1 || !state.profiles.profiles) {
+    state.profiles = clone(dataFiles.profiles.empty);
+  }
+  if (!state.directory || state.directory.v !== 1 || !state.directory.users) {
+    state.directory = clone(dataFiles.directory.empty);
+  }
+  if (!state.offlineQueue || state.offlineQueue.v !== 1 || !state.offlineQueue.queues) {
+    state.offlineQueue = clone(dataFiles.offlineQueue.empty);
+  }
+  if (!state.bannedUsers || state.bannedUsers.v !== 1 || !Array.isArray(state.bannedUsers.users)) {
+    state.bannedUsers = clone(dataFiles.bannedUsers.empty);
+  }
+  return state;
 }
 
-function loadState() {
-  const offlineQueue = readJson(files.offlineQueue, { v: 1, queues: {} });
-  const profiles = readJson(files.profiles, { v: 1, profiles: {} });
-  const directory = readJson(files.directory, { v: 1, users: {} });
-  const bannedUsers = readJson(files.bannedUsers, { v: 1, users: [] });
-
-  offlineQueue.queues ||= {};
-  profiles.profiles ||= {};
-  directory.users ||= {};
-  if (!Array.isArray(bannedUsers.users)) bannedUsers.users = [];
-
-  return { offlineQueue, profiles, directory, bannedUsers };
-}
-
-function saveState(state) {
-  const savedAt = new Date().toISOString();
-  writeJson(files.offlineQueue, { v: 1, savedAt, queues: state.offlineQueue.queues });
-  writeJson(files.profiles, { v: 1, savedAt, profiles: state.profiles.profiles });
-  writeJson(files.directory, { v: 1, savedAt, users: state.directory.users });
-  writeJson(files.bannedUsers, {
-    v: 1,
-    savedAt,
-    users: [...new Set(state.bannedUsers.users)].sort()
+function readState() {
+  return normalizeState({
+    knownUsers: readJson(dataFiles.knownUsers),
+    profiles: readJson(dataFiles.profiles),
+    directory: readJson(dataFiles.directory),
+    offlineQueue: readJson(dataFiles.offlineQueue),
+    bannedUsers: readJson(dataFiles.bannedUsers)
   });
 }
 
-function collectUserIds(state) {
-  const ids = new Set([
-    ...Object.keys(state.offlineQueue.queues),
-    ...Object.keys(state.profiles.profiles),
-    ...Object.keys(state.directory.users),
-    ...state.bannedUsers.users
-  ]);
+function backupExistingFiles(changedKeys) {
+  const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
+  const backupDir = path.join(SERVER_DIR, 'data', 'admin-backups', timestamp);
+  let copied = 0;
+  for (const key of changedKeys) {
+    const definition = dataFiles[key];
+    if (!definition || !fs.existsSync(definition.path)) continue;
+    fs.mkdirSync(backupDir, { recursive: true });
+    fs.copyFileSync(definition.path, path.join(backupDir, path.basename(definition.path)));
+    copied += 1;
+  }
+  return copied > 0 ? backupDir : null;
+}
 
-  for (const items of Object.values(state.offlineQueue.queues)) {
+function writeJson(definition, value) {
+  fs.mkdirSync(path.dirname(definition.path), { recursive: true });
+  const payload = {
+    ...value,
+    v: 1,
+    savedAt: new Date().toISOString()
+  };
+  fs.writeFileSync(definition.path, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
+
+function writeState(state, changedKeys) {
+  if (changedKeys.size === 0) return null;
+  const backupDir = backupExistingFiles(changedKeys);
+  for (const key of changedKeys) {
+    writeJson(dataFiles[key], state[key]);
+  }
+  return backupDir;
+}
+
+function envelopeForQueueItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (item.envelope && typeof item.envelope === 'object') return item.envelope;
+  return item;
+}
+
+function collectUserIds(state) {
+  const ids = new Set();
+  for (const id of Object.keys(state.knownUsers.users)) ids.add(id);
+  for (const id of Object.keys(state.profiles.profiles)) ids.add(id);
+  for (const id of Object.keys(state.directory.users)) ids.add(id);
+  for (const id of state.bannedUsers.users) ids.add(id);
+
+  for (const [queueOwner, items] of Object.entries(state.offlineQueue.queues)) {
+    ids.add(queueOwner);
     if (!Array.isArray(items)) continue;
     for (const item of items) {
-      const envelope = item?.envelope;
+      const envelope = envelopeForQueueItem(item);
       if (typeof envelope?.from === 'string') ids.add(envelope.from);
       if (typeof envelope?.to === 'string') ids.add(envelope.to);
     }
   }
 
-  return [...ids].sort();
+  return Array.from(ids).sort((left, right) => left.localeCompare(right));
 }
 
-function userSummary(state, id) {
-  let queuedIncoming = 0;
-  let queuedOutgoing = 0;
-
-  const ownQueue = state.offlineQueue.queues[id];
-  if (Array.isArray(ownQueue)) queuedIncoming += ownQueue.length;
-
-  for (const [queueOwner, items] of Object.entries(state.offlineQueue.queues)) {
+function summarizeUser(state, userId) {
+  const known = state.knownUsers.users[userId] || null;
+  const profile = state.profiles.profiles[userId] || null;
+  const directory = state.directory.users[userId] || null;
+  const queueIn = Array.isArray(state.offlineQueue.queues[userId])
+    ? state.offlineQueue.queues[userId].length
+    : 0;
+  let queueOut = 0;
+  for (const items of Object.values(state.offlineQueue.queues)) {
     if (!Array.isArray(items)) continue;
     for (const item of items) {
-      const envelope = item?.envelope;
-      if (queueOwner !== id && envelope?.to === id) queuedIncoming += 1;
-      if (envelope?.from === id) queuedOutgoing += 1;
+      const envelope = envelopeForQueueItem(item);
+      if (envelope?.from === userId) queueOut += 1;
     }
   }
 
   return {
-    userId: id,
-    displayName: state.directory.users[id]?.displayName || null,
-    inDirectory: Boolean(state.directory.users[id]),
-    hasProfile: Boolean(state.profiles.profiles[id]),
-    banned: state.bannedUsers.users.includes(id),
-    queuedIncoming,
-    queuedOutgoing
+    userId,
+    displayName: directory?.displayName || null,
+    known: Boolean(known),
+    directory: Boolean(directory),
+    profile: Boolean(profile),
+    banned: state.bannedUsers.users.includes(userId),
+    queuedIn: queueIn,
+    queuedOut: queueOut,
+    firstSeenAt: known?.firstSeenAt || null,
+    lastSeenAt: known?.lastSeenAt || null,
+    lastDeviceId: known?.lastDeviceId || null,
+    identityPublicKey: known?.identityPublicKey || directory?.identityPublicKey || null
   };
 }
 
-function printSummary(summary) {
-  console.log([
-    summary.userId,
-    summary.displayName ? `name="${summary.displayName}"` : 'name=-',
-    `directory=${summary.inDirectory ? 'yes' : 'no'}`,
-    `profile=${summary.hasProfile ? 'yes' : 'no'}`,
-    `banned=${summary.banned ? 'yes' : 'no'}`,
-    `queued_in=${summary.queuedIncoming}`,
-    `queued_out=${summary.queuedOutgoing}`
-  ].join(' | '));
+function printList(state) {
+  const userIds = collectUserIds(state);
+  if (userIds.length === 0) {
+    console.log('Brak zapisanych uzytkownikow w danych relay.');
+    console.log('Uwaga: aktywni online uzytkownicy pojawia sie tutaj po ponownym polaczeniu z relay po tej aktualizacji.');
+    return;
+  }
+
+  console.log(`Znaleziono zapisanych uzytkownikow: ${userIds.length}`);
+  for (const userId of userIds) {
+    const user = summarizeUser(state, userId);
+    const name = user.displayName ? `"${user.displayName}"` : '-';
+    const lastSeen = user.lastSeenAt || '-';
+    console.log(
+      `${user.userId} | nazwa=${name} | known=${user.known ? 'tak' : 'nie'} | katalog=${user.directory ? 'tak' : 'nie'} | profil=${user.profile ? 'tak' : 'nie'} | banned=${user.banned ? 'tak' : 'nie'} | offline_in=${user.queuedIn} | offline_out=${user.queuedOut} | last_seen=${lastSeen}`
+    );
+  }
 }
 
-function deleteUser(state, id, shouldBan) {
-  const summaryBefore = userSummary(state, id);
-  let removedQueuedItems = 0;
+function printShow(state, userId) {
+  const summary = summarizeUser(state, userId);
+  console.log(JSON.stringify(summary, null, 2));
+}
 
-  delete state.profiles.profiles[id];
-  delete state.directory.users[id];
+function assertUserId(userId) {
+  if (!SAFE_USER_ID.test(userId || '')) {
+    throw new Error('Podaj poprawny userId, np. npm run admin:users -- show USER_ID');
+  }
+}
 
-  const ownQueue = state.offlineQueue.queues[id];
-  if (Array.isArray(ownQueue)) removedQueuedItems += ownQueue.length;
-  delete state.offlineQueue.queues[id];
+function ensureYes(flags, action) {
+  if (flags.has('--yes')) return true;
+  console.log(`Tryb testowy: ${action} nie zostalo zapisane. Dodaj --yes, zeby wykonac operacje.`);
+  return false;
+}
 
+function deleteUser(state, userId, flags) {
+  assertUserId(userId);
+  const changed = new Set();
+
+  if (state.knownUsers.users[userId]) {
+    delete state.knownUsers.users[userId];
+    changed.add('knownUsers');
+  }
+  if (state.profiles.profiles[userId]) {
+    delete state.profiles.profiles[userId];
+    changed.add('profiles');
+  }
+  if (state.directory.users[userId]) {
+    delete state.directory.users[userId];
+    changed.add('directory');
+  }
+
+  let changedQueue = false;
   for (const [queueOwner, items] of Object.entries(state.offlineQueue.queues)) {
+    if (queueOwner === userId) {
+      delete state.offlineQueue.queues[queueOwner];
+      changedQueue = true;
+      continue;
+    }
     if (!Array.isArray(items)) continue;
     const filtered = items.filter((item) => {
-      const envelope = item?.envelope;
-      const remove = envelope?.from === id || envelope?.to === id;
-      if (remove) removedQueuedItems += 1;
-      return !remove;
+      const envelope = envelopeForQueueItem(item);
+      return envelope?.from !== userId && envelope?.to !== userId;
     });
-    if (filtered.length === 0) {
-      delete state.offlineQueue.queues[queueOwner];
-    } else {
+    if (filtered.length !== items.length) {
       state.offlineQueue.queues[queueOwner] = filtered;
+      changedQueue = true;
     }
   }
+  if (changedQueue) changed.add('offlineQueue');
 
-  if (shouldBan && !state.bannedUsers.users.includes(id)) {
-    state.bannedUsers.users.push(id);
+  if (!flags.has('--no-ban') && !state.bannedUsers.users.includes(userId)) {
+    state.bannedUsers.users.push(userId);
+    state.bannedUsers.users.sort((left, right) => left.localeCompare(right));
+    changed.add('bannedUsers');
   }
 
-  return { ...summaryBefore, removedQueuedItems, willBan: shouldBan };
+  console.log('Podsumowanie przed usunieciem:');
+  console.log(JSON.stringify(summarizeUser(readState(), userId), null, 2));
+  if (!ensureYes(flags, `usuniecie ${userId}`)) return;
+
+  const backupDir = writeState(state, changed);
+  console.log(`Usunieto dane userId: ${userId}`);
+  if (!flags.has('--no-ban')) console.log('UserId dodany do banlisty.');
+  if (backupDir) console.log(`Backup: ${backupDir}`);
 }
 
-function setBan(state, id, banned) {
-  const before = state.bannedUsers.users.includes(id);
-  if (banned && !before) state.bannedUsers.users.push(id);
-  if (!banned) state.bannedUsers.users = state.bannedUsers.users.filter((value) => value !== id);
-  return { before, after: banned };
+function banUser(state, userId, flags) {
+  assertUserId(userId);
+  if (!state.bannedUsers.users.includes(userId)) {
+    state.bannedUsers.users.push(userId);
+    state.bannedUsers.users.sort((left, right) => left.localeCompare(right));
+  }
+  if (!ensureYes(flags, `blokada ${userId}`)) return;
+  const backupDir = writeState(state, new Set(['bannedUsers']));
+  console.log(`Zablokowano userId: ${userId}`);
+  if (backupDir) console.log(`Backup: ${backupDir}`);
+}
+
+function unbanUser(state, userId, flags) {
+  assertUserId(userId);
+  const before = state.bannedUsers.users.length;
+  state.bannedUsers.users = state.bannedUsers.users.filter((id) => id !== userId);
+  if (!ensureYes(flags, `odblokowanie ${userId}`)) return;
+  const changed = before === state.bannedUsers.users.length ? new Set() : new Set(['bannedUsers']);
+  const backupDir = writeState(state, changed);
+  console.log(`Odblokowano userId: ${userId}`);
+  if (backupDir) console.log(`Backup: ${backupDir}`);
+}
+
+function printHelp() {
+  console.log(`Uzycie:
+  npm run admin:users -- list
+  npm run admin:users -- show USER_ID
+  npm run admin:users -- delete USER_ID --yes
+  npm run admin:users -- delete USER_ID --yes --no-ban
+  npm run admin:users -- ban USER_ID --yes
+  npm run admin:users -- unban USER_ID --yes
+
+Pliki danych:
+  known users:   ${dataFiles.knownUsers.path}
+  profiles:      ${dataFiles.profiles.path}
+  directory:     ${dataFiles.directory.path}
+  offline queue: ${dataFiles.offlineQueue.path}
+  banned users:  ${dataFiles.bannedUsers.path}`);
+}
+
+function main() {
+  const [command, userId, ...rest] = process.argv.slice(2);
+  const flags = new Set(rest);
+  const state = readState();
+
+  switch (command) {
+    case 'list':
+      printList(state);
+      break;
+    case 'show':
+      assertUserId(userId);
+      printShow(state, userId);
+      break;
+    case 'delete':
+      deleteUser(state, userId, flags);
+      break;
+    case 'ban':
+      banUser(state, userId, flags);
+      break;
+    case 'unban':
+      unbanUser(state, userId, flags);
+      break;
+    case 'help':
+    case '--help':
+    case '-h':
+    case undefined:
+      printHelp();
+      break;
+    default:
+      throw new Error(`Nieznana komenda: ${command}`);
+  }
 }
 
 try {
-  if (!command || command === 'help' || command === '--help' || command === '-h') usage();
-  const state = loadState();
-
-  if (command === 'list') {
-    const ids = collectUserIds(state);
-    if (ids.length === 0) {
-      console.log('Brak zapisanych uzytkownikow w danych relay.');
-      process.exit(0);
-    }
-    for (const id of ids) printSummary(userSummary(state, id));
-    process.exit(0);
-  }
-
-  if (!userId) usage(1);
-  assertUserId(userId);
-
-  if (command === 'show') {
-    printSummary(userSummary(state, userId));
-    process.exit(0);
-  }
-
-  if (command === 'delete') {
-    const shouldBan = !flags.has('--no-ban');
-    const result = deleteUser(state, userId, shouldBan);
-    console.log('Plan usuniecia:');
-    printSummary(result);
-    console.log(`queued_removed=${result.removedQueuedItems}`);
-    console.log(`ban_after_delete=${shouldBan ? 'yes' : 'no'}`);
-
-    if (!confirmed) {
-      console.log('Tryb podgladu. Dodaj --yes, zeby wykonac zmiany.');
-      process.exit(0);
-    }
-
-    const backup = backupExistingFiles();
-    saveState(state);
-    console.log(`Usunieto userId: ${userId}`);
-    if (backup) console.log(`Backup: ${backup}`);
-    process.exit(0);
-  }
-
-  if (command === 'ban' || command === 'unban') {
-    const targetBan = command === 'ban';
-    const result = setBan(state, userId, targetBan);
-    console.log(`ban_before=${result.before ? 'yes' : 'no'}`);
-    console.log(`ban_after=${result.after ? 'yes' : 'no'}`);
-
-    if (!confirmed) {
-      console.log('Tryb podgladu. Dodaj --yes, zeby wykonac zmiany.');
-      process.exit(0);
-    }
-
-    const backup = backupExistingFiles();
-    saveState(state);
-    console.log(`${targetBan ? 'Zablokowano' : 'Odblokowano'} userId: ${userId}`);
-    if (backup) console.log(`Backup: ${backup}`);
-    process.exit(0);
-  }
-
-  usage(1);
+  main();
 } catch (error) {
-  console.error(`Blad: ${error.message}`);
+  console.error(error.message || String(error));
   process.exit(1);
 }

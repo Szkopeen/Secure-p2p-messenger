@@ -25,6 +25,7 @@ export const config = Object.freeze({
   offlineQueueMaxPerUser: readInt('OFFLINE_QUEUE_MAX_PER_USER', 200, 1, 2000),
   profileAvatarMaxBytes: readInt('PROFILE_AVATAR_MAX_BYTES', 1024 * 1024, 1024, 1024 * 1024),
   offlineQueueFile: process.env.OFFLINE_QUEUE_FILE || './data/offline-queue.json',
+  knownUsersFile: process.env.KNOWN_USERS_FILE || './data/known-users.json',
   publicProfilesFile: process.env.PUBLIC_PROFILES_FILE || './data/public-profiles.json',
   publicDirectoryFile: process.env.PUBLIC_DIRECTORY_FILE || './data/public-directory.json',
   bannedUsersFile: process.env.BANNED_USERS_FILE || './data/banned-users.json',

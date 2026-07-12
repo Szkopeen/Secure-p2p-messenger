@@ -21,7 +21,11 @@ Wygenerowany token wpisz do `.env` jako `RELAY_TOKEN`.
 ## Administracja uzytkownikami
 
 Serwer nie przechowuje hasel ani tresci rozmow, ale przechowuje dane pomocnicze:
-publiczna lista opt-in, publiczne profile oraz kolejki offline.
+znane `userId`, publiczna lista opt-in, publiczne profile oraz kolejki offline.
+
+Wazne: lista `known-users.json` jest uzupelniana przy polaczeniu klienta z relay.
+Uzytkownicy, ktorzy byli online przed ta wersja, pojawia sie na liscie po ponownym
+uruchomieniu aplikacji albo ponownym polaczeniu z serwerem.
 
 Lista zapisanych userId:
 
