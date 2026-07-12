@@ -138,16 +138,37 @@ class _ChatScreenState extends State<ChatScreen> {
                 onSelected: (value) {
                   if (value == 'clear-local') {
                     unawaited(_confirmClearConversation());
+                  } else if (value == 'leave-group') {
+                    unawaited(_confirmLeaveGroup());
+                  } else if (value == 'delete-group-local') {
+                    unawaited(_confirmDeleteGroupLocally());
                   }
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(
+                itemBuilder: (context) => [
+                  const PopupMenuItem(
                     value: 'clear-local',
                     child: _MessageMenuItem(
                       icon: Icons.delete_sweep_outlined,
-                      label: 'Usun lokalnie',
+                      label: 'Usun wiadomosci lokalnie',
                     ),
                   ),
+                  if (_isGroup) ...[
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'leave-group',
+                      child: _MessageMenuItem(
+                        icon: Icons.logout,
+                        label: 'Wyjdz z grupy',
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: 'delete-group-local',
+                      child: _MessageMenuItem(
+                        icon: Icons.delete_outline,
+                        label: 'Usun grupe lokalnie',
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ],
@@ -362,6 +383,64 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  Future<void> _confirmLeaveGroup() async {
+    final group = widget.group;
+    if (group == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Wyjdz z grupy'),
+          content: const Text(
+            'Grupa zniknie z tego urzadzenia. Pozostali czlonkowie dostana informacje, ze wyszedles.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Anuluj'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Wyjdz'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    await widget.appState.leaveGroup(group);
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  Future<void> _confirmDeleteGroupLocally() async {
+    final group = widget.group;
+    if (group == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Usun grupe lokalnie'),
+          content: const Text(
+            'To usunie grupe i jej wiadomosci tylko u Ciebie. Inni czlonkowie nie dostana powiadomienia.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Anuluj'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Usun'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    await widget.appState.deleteGroupLocally(group);
+    if (mounted) Navigator.of(context).pop();
+  }
+
   void _toggleSearch() {
     setState(() {
       _searchOpen = !_searchOpen;
@@ -403,6 +482,7 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.groupInvite => 'zaproszenie do grupy',
       PlainPayloadType.groupInviteResponse => 'odpowiedz na zaproszenie',
       PlainPayloadType.groupText => message.payload.text?.toLowerCase() ?? '',
+      PlainPayloadType.groupLeave => 'wyjscie z grupy',
     };
   }
 
@@ -469,6 +549,7 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
       PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
       PlainPayloadType.groupText => message.payload.text ?? '',
+      PlainPayloadType.groupLeave => 'Wyjscie z grupy',
     };
   }
 
@@ -1218,6 +1299,7 @@ class _PayloadView extends StatelessWidget {
       PlainPayloadType.groupInviteResponse =>
         const Text('Odpowiedz na zaproszenie do grupy.'),
       PlainPayloadType.groupText => SelectableText(payload.text ?? ''),
+      PlainPayloadType.groupLeave => const Text('Uzytkownik wyszedl z grupy.'),
       PlainPayloadType.file => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,

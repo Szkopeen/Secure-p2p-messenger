@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../crypto/codec.dart';
 import '../models/contact.dart';
+import '../models/contact_invite.dart';
 import '../models/group.dart';
 import '../models/identity.dart';
 import '../models/session.dart';
@@ -25,6 +26,8 @@ class SecureStore {
   static const _localArchiveKey = 'local.archive.key.v1';
   static const _ownProfile = 'profile.public.v1';
   static const _sessions = 'sessions.v1';
+  static const _directoryEnabled = 'directory.enabled.v1';
+  static const _contactInvites = 'contact.invites.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -90,6 +93,31 @@ class SecureStore {
     return list
         .map((item) => Contact.fromJson((item as Map).cast<String, dynamic>()))
         .toList(growable: false);
+  }
+
+  Future<void> saveContactInvites(List<ContactInvite> invites) async {
+    await _storage.write(
+      key: _contactInvites,
+      value: jsonEncode(invites.map((invite) => invite.toJson()).toList()),
+    );
+  }
+
+  Future<List<ContactInvite>> loadContactInvites() async {
+    final raw = await _storage.read(key: _contactInvites);
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list
+        .map((item) =>
+            ContactInvite.fromJson((item as Map).cast<String, dynamic>()))
+        .toList(growable: false);
+  }
+
+  Future<void> saveDirectoryEnabled(bool enabled) async {
+    await _storage.write(key: _directoryEnabled, value: enabled ? '1' : '0');
+  }
+
+  Future<bool> loadDirectoryEnabled() async {
+    return await _storage.read(key: _directoryEnabled) == '1';
   }
 
   Future<void> saveGroups(List<GroupConversation> groups) async {

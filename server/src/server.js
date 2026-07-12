@@ -8,6 +8,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './config.js';
 import {
   safeJsonParse,
+  validateContactRequest,
+  validateDirectoryQuery,
+  validateDirectoryUpdate,
   validateHello,
   validatePresenceQuery,
   validateProfileQuery,
@@ -20,9 +23,11 @@ import { SlidingWindowRateLimiter } from './rateLimiter.js';
 const users = new Map();
 const profiles = new Map();
 const offlineQueues = new Map();
+const publicDirectory = new Map();
 
 loadProfiles();
 loadOfflineQueues();
+loadPublicDirectory();
 
 function audit(message, fields = {}) {
   if (!config.securityLogs) return;
@@ -65,6 +70,28 @@ function loadProfiles() {
   }
 }
 
+function loadPublicDirectory() {
+  try {
+    if (!fs.existsSync(config.publicDirectoryFile)) return;
+    const raw = fs.readFileSync(config.publicDirectoryFile, 'utf8');
+    const decoded = JSON.parse(raw);
+    if (!decoded || decoded.v !== 1 || !decoded.users) return;
+
+    for (const [userId, entry] of Object.entries(decoded.users)) {
+      if (!entry || typeof entry.identityPublicKey !== 'string') continue;
+      publicDirectory.set(userId, {
+        v: 1,
+        userId,
+        displayName: sanitizeDisplayName(entry.displayName, userId),
+        identityPublicKey: entry.identityPublicKey,
+        updatedAt: entry.updatedAt || new Date().toISOString()
+      });
+    }
+  } catch (error) {
+    audit('Nie wczytano publicznej listy uzytkownikow', { error: String(error) });
+  }
+}
+
 function persistProfiles() {
   try {
     const dir = path.dirname(config.publicProfilesFile);
@@ -80,6 +107,24 @@ function persistProfiles() {
     );
   } catch (error) {
     audit('Nie zapisano profili publicznych', { error: String(error) });
+  }
+}
+
+function persistPublicDirectory() {
+  try {
+    const dir = path.dirname(config.publicDirectoryFile);
+    fs.mkdirSync(dir, { recursive: true });
+    const users = {};
+    for (const [userId, entry] of publicDirectory.entries()) {
+      users[userId] = entry;
+    }
+    fs.writeFileSync(
+      config.publicDirectoryFile,
+      JSON.stringify({ v: 1, savedAt: new Date().toISOString(), users }),
+      'utf8'
+    );
+  } catch (error) {
+    audit('Nie zapisano publicznej listy uzytkownikow', { error: String(error) });
   }
 }
 
@@ -158,6 +203,13 @@ function sanitizeProfile(profile) {
     avatarBytes: profile.avatarBytes || null,
     updatedAt: profile.updatedAt || new Date().toISOString()
   };
+}
+
+function sanitizeDisplayName(value, fallback) {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim().replace(/\s+/g, ' ');
+  if (!trimmed) return fallback;
+  return trimmed.slice(0, 80);
 }
 
 function sendProfileToUser(userId, targetUserId) {
@@ -415,6 +467,89 @@ function handlePresenceQuery(ws, message) {
   });
 }
 
+function directoryEntriesFor(requestingUserId) {
+  return Array.from(publicDirectory.values())
+    .filter((entry) => entry.userId !== requestingUserId)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName))
+    .map((entry) => ({
+      ...entry,
+      online: users.has(entry.userId)
+    }));
+}
+
+function handleDirectoryUpdate(ws, state, message) {
+  const error = validateDirectoryUpdate(message);
+  if (error) {
+    send(ws, { v: 1, type: 'error', code: 'bad_directory_update', reason: error });
+    return;
+  }
+
+  if (!message.enabled) {
+    publicDirectory.delete(state.userId);
+    persistPublicDirectory();
+    send(ws, { v: 1, type: 'directory_updated', enabled: false });
+    return;
+  }
+
+  publicDirectory.set(state.userId, {
+    v: 1,
+    userId: state.userId,
+    displayName: sanitizeDisplayName(message.displayName, state.userId),
+    identityPublicKey: state.identityPublicKey,
+    updatedAt: new Date().toISOString()
+  });
+  persistPublicDirectory();
+  send(ws, { v: 1, type: 'directory_updated', enabled: true });
+}
+
+function handleDirectoryQuery(ws, state, message) {
+  const error = validateDirectoryQuery(message);
+  if (error) {
+    send(ws, { v: 1, type: 'error', code: 'bad_directory_query', reason: error });
+    return;
+  }
+  send(ws, {
+    v: 1,
+    type: 'directory',
+    entries: directoryEntriesFor(state.userId)
+  });
+}
+
+function handleContactRequest(ws, state, message) {
+  const error = validateContactRequest(message);
+  if (error) {
+    send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_contact_request', reason: error });
+    return;
+  }
+
+  const envelope = {
+    v: 1,
+    type: 'deliver',
+    kind: 'contact_request',
+    id: message.id,
+    from: state.userId,
+    to: message.to,
+    sentAt: new Date().toISOString(),
+    payload: {
+      v: 1,
+      displayName: sanitizeDisplayName(message.displayName, state.userId),
+      identityPublicKey: state.identityPublicKey
+    }
+  };
+
+  const deliveredConnections = forwardToUser(message.to, envelope);
+  const queued = deliveredConnections === 0 ? enqueueOffline(message.to, envelope) : false;
+  send(ws, {
+    v: 1,
+    type: 'sent',
+    id: message.id,
+    to: message.to,
+    transport: 'contact_request',
+    deliveredConnections,
+    queued
+  });
+}
+
 function handleProfileUpdate(ws, state, message) {
   const error = validateProfileUpdate(message, config.profileAvatarMaxBytes);
   if (error) {
@@ -532,6 +667,15 @@ wss.on('connection', (ws, request) => {
         break;
       case 'presence_query':
         handlePresenceQuery(ws, message);
+        break;
+      case 'directory_update':
+        handleDirectoryUpdate(ws, state, message);
+        break;
+      case 'directory_query':
+        handleDirectoryQuery(ws, state, message);
+        break;
+      case 'contact_request':
+        handleContactRequest(ws, state, message);
         break;
       case 'profile_update':
         handleProfileUpdate(ws, state, message);

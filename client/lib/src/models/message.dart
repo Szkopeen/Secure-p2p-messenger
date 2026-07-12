@@ -13,6 +13,7 @@ enum PlainPayloadType {
   groupInvite,
   groupInviteResponse,
   groupText,
+  groupLeave,
 }
 
 enum ReceiptKind { delivered, read }
@@ -197,6 +198,24 @@ class PlainPayload {
         groupMemberIds = null,
         groupAccepted = null;
 
+  const PlainPayload.groupLeave({
+    required this.groupId,
+  })  : type = PlainPayloadType.groupLeave,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        targetMessageId = null,
+        reactionEmoji = null,
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null,
+        groupName = null,
+        groupMemberIds = null,
+        groupAccepted = null,
+        groupMessageId = null;
+
   final PlainPayloadType type;
   final String? text;
   final String? fileName;
@@ -276,6 +295,11 @@ class PlainPayload {
             'groupId': groupId,
             'groupMessageId': groupMessageId,
             'text': text,
+          },
+        PlainPayloadType.groupLeave => {
+            'v': 1,
+            'type': 'groupLeave',
+            'groupId': groupId,
           },
       };
 
@@ -373,6 +397,12 @@ class PlainPayload {
           groupMessageId: groupMessageId,
           text: json['text'] as String? ?? '',
         );
+      case 'groupLeave':
+        final groupId = json['groupId'] as String?;
+        if (groupId == null || groupId.isEmpty) {
+          throw const FormatException('Brak identyfikatora grupy.');
+        }
+        return PlainPayload.groupLeave(groupId: groupId);
       default:
         throw const FormatException('Nieznany typ payloadu.');
     }

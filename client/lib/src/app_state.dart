@@ -13,6 +13,8 @@ import 'package:uuid/uuid.dart';
 import 'crypto/codec.dart';
 import 'crypto/crypto_service.dart';
 import 'models/contact.dart';
+import 'models/contact_invite.dart';
+import 'models/directory_entry.dart';
 import 'models/encrypted_packet.dart';
 import 'models/group.dart';
 import 'models/identity.dart';
@@ -48,7 +50,9 @@ class AppState extends ChangeNotifier {
   final AesGcm _accountExportAead = AesGcm.with256bits();
   Future<void> _persistQueue = Future<void>.value();
   final List<Contact> _contacts = [];
+  final List<ContactInvite> _contactInvites = [];
   final List<GroupConversation> _groups = [];
+  final List<DirectoryEntry> _directoryEntries = [];
   final Map<String, List<ChatMessage>> _messages = {};
   final Map<String, SessionState> _sessions = {};
   final Map<String, PendingSession> _pendingSessions = {};
@@ -68,7 +72,10 @@ class AppState extends ChangeNotifier {
   bool _relayConnected = false;
   bool _initializing = true;
   bool _retryingGroupInvites = false;
+  bool _directoryEnabled = false;
+  bool _loadingDirectory = false;
   String? _status;
+  String? _directoryStatus;
   String _currentVersionLabel = '';
   int _currentBuildNumber = 0;
   AvailableUpdate? _availableUpdate;
@@ -89,7 +96,13 @@ class AppState extends ChangeNotifier {
   UserProfile? get ownProfile => _ownProfile;
   RelaySettings? get relaySettings => _relaySettings;
   List<Contact> get contacts => List.unmodifiable(_contacts);
+  List<ContactInvite> get contactInvites => List.unmodifiable(_contactInvites);
   List<GroupConversation> get groups => List.unmodifiable(_groups);
+  List<DirectoryEntry> get directoryEntries =>
+      List.unmodifiable(_directoryEntries);
+  bool get directoryEnabled => _directoryEnabled;
+  bool get loadingDirectory => _loadingDirectory;
+  String? get directoryStatus => _directoryStatus;
   String get currentVersionLabel => _currentVersionLabel;
   AvailableUpdate? get availableUpdate => _availableUpdate;
   bool get checkingForUpdate => _checkingForUpdate;
@@ -151,9 +164,13 @@ class AppState extends ChangeNotifier {
       _contacts
         ..clear()
         ..addAll(await _store.loadContacts());
+      _contactInvites
+        ..clear()
+        ..addAll(await _store.loadContactInvites());
       _groups
         ..clear()
         ..addAll(await _store.loadGroups());
+      _directoryEnabled = await _store.loadDirectoryEnabled();
       await _loadArchivedMessages();
       await _loadSessions();
       _initializing = false;
@@ -212,6 +229,7 @@ class AppState extends ChangeNotifier {
       'relaySettings': settings.toJson(),
       'contacts': _contacts.map((contact) => contact.toJson()).toList(),
       'groups': _groups.map((group) => group.toJson()).toList(),
+      'directoryEnabled': _directoryEnabled,
       'ownProfile': _ownProfile?.toJson(),
     });
 
@@ -306,6 +324,7 @@ class AppState extends ChangeNotifier {
         .map((item) =>
             GroupConversation.fromJson((item as Map).cast<String, dynamic>()))
         .toList(growable: false);
+    final importedDirectoryEnabled = clear['directoryEnabled'] == true;
     final profileJson = clear['ownProfile'];
     final importedProfile = profileJson == null
         ? null
@@ -326,6 +345,9 @@ class AppState extends ChangeNotifier {
     _groups
       ..clear()
       ..addAll(importedGroups);
+    _contactInvites.clear();
+    _directoryEntries.clear();
+    _directoryEnabled = importedDirectoryEnabled;
     _messages.clear();
     _sessions.clear();
     _pendingSessions.clear();
@@ -341,6 +363,8 @@ class AppState extends ChangeNotifier {
     await _store.saveRelaySettings(importedRelaySettings);
     await _store.saveContacts(_contacts);
     await _store.saveGroups(_groups);
+    await _store.saveContactInvites(_contactInvites);
+    await _store.saveDirectoryEnabled(_directoryEnabled);
     if (importedProfile != null) {
       await _store.saveOwnProfile(importedProfile);
     }
@@ -469,7 +493,7 @@ class AppState extends ChangeNotifier {
       _downloadedUpdatePath = file.path;
       _updateDownloadProgress = 1;
       _updateStatus = 'Pobrano aktualizacje: ${file.path}';
-      unawaited(_revealDownloadedUpdate(file));
+      unawaited(_openDownloadedUpdate(file));
     } catch (error) {
       _updateStatus = 'Nie udalo sie pobrac aktualizacji: $error';
       rethrow;
@@ -537,8 +561,83 @@ class AppState extends ChangeNotifier {
       ),
     );
     _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+    _contactInvites.removeWhere((item) => item.userId == contact.userId);
+    _directoryEntries.removeWhere((item) => item.userId == contact.userId);
     await _store.saveContacts(_contacts);
+    await _store.saveContactInvites(_contactInvites);
     if (_relayConnected) _relay?.queryProfiles([contact.userId]);
+    notifyListeners();
+  }
+
+  Future<void> setDirectoryEnabled(bool enabled) async {
+    _directoryEnabled = enabled;
+    await _store.saveDirectoryEnabled(enabled);
+    _syncDirectoryVisibility();
+    if (enabled) {
+      refreshDirectory();
+    } else {
+      _directoryEntries.clear();
+      _directoryStatus = 'Ukryto z globalnej listy uzytkownikow.';
+      notifyListeners();
+    }
+  }
+
+  void refreshDirectory() {
+    final relay = _relay;
+    if (!_relayConnected || relay == null) {
+      _directoryStatus = 'Najpierw polacz sie z relay.';
+      notifyListeners();
+      return;
+    }
+    _loadingDirectory = true;
+    _directoryStatus = 'Odswiezam globalna liste...';
+    notifyListeners();
+    relay.queryDirectory();
+  }
+
+  Future<void> sendContactInvite(DirectoryEntry entry) async {
+    final identity = _requireIdentity();
+    final relay = _requireRelay();
+    if (!_relayConnected) {
+      throw StateError('Najpierw polacz sie z relay.');
+    }
+    if (entry.userId == identity.userId) {
+      throw StateError('To jest Twoje konto.');
+    }
+
+    await addContact(
+      Contact(
+        userId: entry.userId,
+        displayName: entry.displayName,
+        identityPublicKey: entry.identityPublicKey,
+      ),
+    );
+    relay.sendContactRequest(
+      to: entry.userId,
+      displayName: identity.userId,
+    );
+    _directoryStatus =
+        'Wyslano zaproszenie do ${entry.displayName}. Jesli jest offline, poczeka na serwerze.';
+    notifyListeners();
+  }
+
+  Future<void> acceptContactInvite(ContactInvite invite) async {
+    await addContact(
+      Contact(
+        userId: invite.userId,
+        displayName: invite.displayName,
+        identityPublicKey: invite.identityPublicKey,
+      ),
+    );
+    _contactInvites.removeWhere((item) => item.requestId == invite.requestId);
+    await _store.saveContactInvites(_contactInvites);
+    _setStatus('Dodano kontakt ${invite.displayName}.');
+    notifyListeners();
+  }
+
+  Future<void> rejectContactInvite(ContactInvite invite) async {
+    _contactInvites.removeWhere((item) => item.requestId == invite.requestId);
+    await _store.saveContactInvites(_contactInvites);
     notifyListeners();
   }
 
@@ -753,6 +852,39 @@ class AppState extends ChangeNotifier {
       changed = true;
     }
     if (!changed) return;
+    await _persistMessages();
+    notifyListeners();
+  }
+
+  Future<void> leaveGroup(GroupConversation group) async {
+    final identity = _requireIdentity();
+    if (group.pendingInvite) {
+      await respondToGroupInvite(group, false);
+      return;
+    }
+
+    final recipients = group.memberIds
+        .where((userId) => userId != identity.userId)
+        .toList(growable: false);
+    for (final userId in recipients) {
+      final contact = _contactById(userId);
+      if (contact == null) continue;
+      try {
+        await _sendHiddenPayload(
+          contact,
+          PlainPayload.groupLeave(groupId: group.groupId),
+        );
+      } catch (_) {
+        // Wyjscie z grupy ma zadzialac lokalnie nawet gdy czesc osob jest offline.
+      }
+    }
+    await deleteGroupLocally(group);
+  }
+
+  Future<void> deleteGroupLocally(GroupConversation group) async {
+    _groups.removeWhere((item) => item.groupId == group.groupId);
+    _messages.remove(group.groupId);
+    await _store.saveGroups(_groups);
     await _persistMessages();
     notifyListeners();
   }
@@ -996,7 +1128,9 @@ class AppState extends ChangeNotifier {
     _relay = null;
     _p2p = null;
     _contacts.clear();
+    _contactInvites.clear();
     _groups.clear();
+    _directoryEntries.clear();
     _messages.clear();
     _sessions.clear();
     _pendingSessions.clear();
@@ -1008,6 +1142,9 @@ class AppState extends ChangeNotifier {
     _presenceTimer?.cancel();
     _relayConnected = false;
     _retryingGroupInvites = false;
+    _directoryEnabled = false;
+    _loadingDirectory = false;
+    _directoryStatus = null;
     await _messageArchive.delete();
     _setStatus('Wyczyszczono lokalne dane.');
   }
@@ -1255,6 +1392,8 @@ class AppState extends ChangeNotifier {
         final contactIds = _contacts.map((contact) => contact.userId).toList();
         _relay?.queryPresence(contactIds);
         _relay?.queryProfiles(contactIds);
+        _syncDirectoryVisibility();
+        _relay?.queryDirectory();
         _startPresencePolling();
         unawaited(_retryPendingGroupInvites());
         break;
@@ -1301,6 +1440,21 @@ class AppState extends ChangeNotifier {
       case RelayProfile():
         await _applyContactProfile(event.userId, event.profile);
         break;
+      case RelayDirectory():
+        _directoryEntries
+          ..clear()
+          ..addAll(event.entries.where((entry) {
+            return entry.userId != _identity?.userId &&
+                _contactById(entry.userId) == null;
+          }));
+        _loadingDirectory = false;
+        _directoryStatus =
+            'Lista zawiera ${_directoryEntries.length} publicznych uzytkownikow spoza kontaktow.';
+        notifyListeners();
+        break;
+      case RelayContactRequest():
+        await _handleContactRequest(event);
+        break;
       case RelayProblem():
         _relayConnected = false;
         _relayPresence.clear();
@@ -1317,6 +1471,42 @@ class AppState extends ChangeNotifier {
       _relay
           ?.queryPresence(_contacts.map((contact) => contact.userId).toList());
     });
+  }
+
+  void _syncDirectoryVisibility() {
+    final identity = _identity;
+    final relay = _relay;
+    if (identity == null || relay == null || !_relayConnected) return;
+    relay.updateDirectory(
+      enabled: _directoryEnabled,
+      displayName: identity.userId,
+    );
+  }
+
+  Future<void> _handleContactRequest(RelayContactRequest event) async {
+    final identity = _identity;
+    if (identity == null || event.from == identity.userId) return;
+    if (_contactById(event.from) != null) return;
+
+    final existingIndex =
+        _contactInvites.indexWhere((invite) => invite.userId == event.from);
+    final invite = ContactInvite(
+      requestId: event.id,
+      userId: event.from,
+      displayName: event.displayName.trim().isEmpty
+          ? event.from
+          : event.displayName.trim(),
+      identityPublicKey: event.identityPublicKey,
+      createdAt: event.sentAt,
+    );
+    if (existingIndex >= 0) {
+      _contactInvites[existingIndex] = invite;
+    } else {
+      _contactInvites.add(invite);
+    }
+    await _store.saveContactInvites(_contactInvites);
+    _setStatus('Masz nowe zaproszenie do kontaktow od ${invite.displayName}.');
+    notifyListeners();
   }
 
   Future<void> _handleSignal(RelayDeliver event) async {
@@ -1457,6 +1647,10 @@ class AppState extends ChangeNotifier {
         await _handleGroupInviteResponse(from, decrypted.payload);
         return;
       }
+      if (decrypted.payload.type == PlainPayloadType.groupLeave) {
+        await _handleGroupLeave(from, decrypted.payload);
+        return;
+      }
       if (decrypted.payload.type == PlainPayloadType.groupText) {
         _handleGroupText(
             from, decrypted.payload, decrypted.createdAt, transport);
@@ -1577,6 +1771,23 @@ class AppState extends ChangeNotifier {
         '${displayNameForUser(from)} odrzucil zaproszenie do grupy.',
       );
     }
+    await _store.saveGroups(_groups);
+    notifyListeners();
+  }
+
+  Future<void> _handleGroupLeave(String from, PlainPayload payload) async {
+    final groupId = payload.groupId;
+    if (groupId == null || groupId.isEmpty) return;
+    final index = _groups.indexWhere((group) => group.groupId == groupId);
+    if (index < 0) return;
+
+    final group = _groups[index];
+    if (!group.memberIds.contains(from)) return;
+    final acceptedIds = group.acceptedMemberIds
+        .where((userId) => userId != from)
+        .toList(growable: false);
+    _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
+    _addSystemMessage(groupId, '${displayNameForUser(from)} wyszedl z grupy.');
     await _store.saveGroups(_groups);
     notifyListeners();
   }
@@ -1967,15 +2178,15 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> _revealDownloadedUpdate(File file) async {
+  Future<void> _openDownloadedUpdate(File file) async {
     try {
       if (Platform.isWindows) {
-        await Process.start('explorer.exe', ['/select,', file.path]);
+        await Process.start('cmd', ['/c', 'start', '', file.path]);
       } else if (Platform.isLinux) {
-        await Process.start('xdg-open', [file.parent.path]);
+        await Process.start('xdg-open', [file.path]);
       }
     } catch (_) {
-      // Otwieranie folderu jest dodatkiem. Pobieranie jest juz zakonczone.
+      // Otwieranie pliku jest dodatkiem. Pobieranie jest juz zakonczone.
     }
   }
 

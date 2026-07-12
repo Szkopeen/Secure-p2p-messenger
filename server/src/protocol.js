@@ -72,6 +72,43 @@ export function validateSignal(message) {
   return null;
 }
 
+export function validateDirectoryUpdate(message) {
+  if (!isObject(message) || message.v !== 1 || message.type !== 'directory_update') {
+    return 'Niepoprawny pakiet directory_update.';
+  }
+  if (typeof message.enabled !== 'boolean') return 'Brak pola enabled.';
+  if (message.displayName !== undefined && message.displayName !== null) {
+    if (typeof message.displayName !== 'string' || message.displayName.length > 80) {
+      return 'Niepoprawna nazwa publiczna.';
+    }
+  }
+  if (typeof message.identityPublicKey !== 'string' || message.identityPublicKey.length > 256) {
+    return 'Niepoprawny klucz publiczny.';
+  }
+  return null;
+}
+
+export function validateDirectoryQuery(message) {
+  if (!isObject(message) || message.v !== 1 || message.type !== 'directory_query') {
+    return 'Niepoprawny pakiet directory_query.';
+  }
+  return null;
+}
+
+export function validateContactRequest(message) {
+  if (!isObject(message) || message.v !== 1 || message.type !== 'contact_request') {
+    return 'Niepoprawny pakiet contact_request.';
+  }
+  if (!isMessageId(message.id)) return 'Niepoprawne id zaproszenia.';
+  if (!isSafeId(message.to)) return 'Niepoprawny adresat.';
+  if (message.displayName !== undefined && message.displayName !== null) {
+    if (typeof message.displayName !== 'string' || message.displayName.length > 80) {
+      return 'Niepoprawna nazwa wyswietlana.';
+    }
+  }
+  return null;
+}
+
 export function validatePresenceQuery(message) {
   if (!isObject(message) || message.v !== 1 || message.type !== 'presence_query') {
     return 'Niepoprawny pakiet presence_query.';

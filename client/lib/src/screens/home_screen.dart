@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import '../app_state.dart';
 import '../crypto/codec.dart';
 import '../models/contact.dart';
+import '../models/contact_invite.dart';
+import '../models/directory_entry.dart';
 import '../models/group.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
@@ -23,10 +25,12 @@ class HomeScreen extends StatelessWidget {
         final pendingGroupInvites = appState.groups
             .where((group) => group.pendingInvite)
             .toList(growable: false);
+        final contactInvites = appState.contactInvites;
         final activeGroups = appState.groups
             .where((group) => !group.pendingInvite)
             .toList(growable: false);
         final hasContent = appState.contacts.isNotEmpty ||
+            contactInvites.isNotEmpty ||
             pendingGroupInvites.isNotEmpty ||
             activeGroups.isNotEmpty;
         return Scaffold(
@@ -46,6 +50,11 @@ class HomeScreen extends StatelessWidget {
                 tooltip: 'Utworz grupe',
                 onPressed: () => _showCreateGroupDialog(context),
                 icon: const Icon(Icons.group_add_outlined),
+              ),
+              IconButton(
+                tooltip: 'Globalna lista',
+                onPressed: () => _openDirectory(context),
+                icon: const Icon(Icons.public),
               ),
               IconButton(
                 tooltip: 'Polacz ponownie',
@@ -100,6 +109,14 @@ class HomeScreen extends StatelessWidget {
                                 appState: appState,
                                 group: group,
                                 subtitle: _groupSubtitle(group),
+                              ),
+                          ],
+                          if (contactInvites.isNotEmpty) ...[
+                            const _SectionHeader(title: 'Zaproszenia do kontaktow'),
+                            for (final invite in contactInvites)
+                              _ContactInviteTile(
+                                appState: appState,
+                                invite: invite,
                               ),
                           ],
                           if (appState.contacts.isNotEmpty) ...[
@@ -221,6 +238,14 @@ class HomeScreen extends StatelessWidget {
     publicKey.dispose();
   }
 
+  void _openDirectory(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _DirectoryScreen(appState: appState),
+      ),
+    );
+  }
+
   Future<void> _showCreateGroupDialog(BuildContext context) async {
     final name = TextEditingController();
     final selected = <String>{};
@@ -339,6 +364,7 @@ class HomeScreen extends StatelessWidget {
       PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
       PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
       PlainPayloadType.groupText => last.payload.text ?? '',
+      PlainPayloadType.groupLeave => 'Uzytkownik wyszedl z grupy',
     };
   }
 
@@ -375,6 +401,123 @@ class _SectionHeader extends StatelessWidget {
         style: Theme.of(context).textTheme.labelLarge,
       ),
     );
+  }
+}
+
+class _DirectoryScreen extends StatelessWidget {
+  const _DirectoryScreen({required this.appState});
+
+  final AppState appState;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: appState,
+      builder: (context, _) {
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Globalna lista'),
+            actions: [
+              IconButton(
+                tooltip: 'Odswiez',
+                onPressed:
+                    appState.loadingDirectory ? null : appState.refreshDirectory,
+                icon: appState.loadingDirectory
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh),
+              ),
+            ],
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              SwitchListTile(
+                value: appState.directoryEnabled,
+                onChanged: (value) => appState.setDirectoryEnabled(value),
+                secondary: const Icon(Icons.public),
+                title: const Text('Pokazuj mnie w globalnej liscie'),
+                subtitle: const Text(
+                  'Widoczne beda tylko Twoj identyfikator, nazwa i klucz publiczny.',
+                ),
+              ),
+              if (appState.directoryStatus != null)
+                ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('Status'),
+                  subtitle: Text(appState.directoryStatus!),
+                ),
+              const SizedBox(height: 8),
+              if (appState.directoryEntries.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('Brak publicznych uzytkownikow.')),
+                )
+              else
+                for (final entry in appState.directoryEntries)
+                  _DirectoryEntryTile(appState: appState, entry: entry),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DirectoryEntryTile extends StatelessWidget {
+  const _DirectoryEntryTile({
+    required this.appState,
+    required this.entry,
+  });
+
+  final AppState appState;
+  final DirectoryEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          const CircleAvatar(child: Icon(Icons.person_outline)),
+          Positioned(
+            right: -1,
+            bottom: -1,
+            child: Icon(
+              Icons.circle,
+              size: 12,
+              color: entry.online
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.outline,
+            ),
+          ),
+        ],
+      ),
+      title: Text(entry.displayName),
+      subtitle: Text('${entry.userId} / ${entry.online ? 'online' : 'offline'}'),
+      trailing: FilledButton.icon(
+        onPressed: () => _sendInvite(context),
+        icon: const Icon(Icons.person_add_alt_1),
+        label: const Text('Zapros'),
+      ),
+    );
+  }
+
+  Future<void> _sendInvite(BuildContext context) async {
+    try {
+      await appState.sendContactInvite(entry);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Wyslano zaproszenie do ${entry.displayName}.')),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
   }
 }
 
@@ -423,6 +566,40 @@ class _ContactTile extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _ContactInviteTile extends StatelessWidget {
+  const _ContactInviteTile({
+    required this.appState,
+    required this.invite,
+  });
+
+  final AppState appState;
+  final ContactInvite invite;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: const CircleAvatar(child: Icon(Icons.person_add_alt_1)),
+      title: Text(invite.displayName),
+      subtitle: Text('${invite.userId} chce dodac Cie do kontaktow.'),
+      trailing: Wrap(
+        spacing: 4,
+        children: [
+          IconButton(
+            tooltip: 'Odrzuc',
+            onPressed: () => appState.rejectContactInvite(invite),
+            icon: const Icon(Icons.close),
+          ),
+          IconButton.filled(
+            tooltip: 'Akceptuj',
+            onPressed: () => appState.acceptContactInvite(invite),
+            icon: const Icon(Icons.check),
+          ),
+        ],
+      ),
     );
   }
 }

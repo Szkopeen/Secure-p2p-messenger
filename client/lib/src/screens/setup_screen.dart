@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_state.dart';
 
@@ -108,6 +109,8 @@ class _SetupScreenState extends State<SetupScreen> {
                     icon: const Icon(Icons.devices_other_outlined),
                     label: const Text('Importuj konto z pliku'),
                   ),
+                  const SizedBox(height: 20),
+                  _ChatControlPanel(onCopy: _copyUrl),
                 ],
               ),
             ),
@@ -212,5 +215,76 @@ class _SetupScreenState extends State<SetupScreen> {
     );
     controller.dispose();
     return result;
+  }
+
+  Future<void> _copyUrl(String url) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Skopiowano link.')),
+    );
+  }
+}
+
+class _ChatControlPanel extends StatelessWidget {
+  const _ChatControlPanel({required this.onCopy});
+
+  final ValueChanged<String> onCopy;
+
+  static const _mullvadUrl = 'https://mullvad.net/en/chatcontrol';
+  static const _breyerUrl = 'https://www.patrick-breyer.de/en/posts/chat-control/';
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.policy_outlined,
+                    color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 10),
+                Text(
+                  'Chat Control - status prawny',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Stan na 12.07.2026: zrodla wskazuja, ze Chat Control 1.0 wygaslo 04.04.2026, a Chat Control 2.0 pozostaje tematem negocjacji UE. To nie jest porada prawna; sprawdz aktualny status w linkach.',
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => onCopy(_mullvadUrl),
+                  icon: const Icon(Icons.copy),
+                  label: const Text('Kopiuj Mullvad'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => onCopy(_breyerUrl),
+                  icon: const Icon(Icons.copy),
+                  label: const Text('Kopiuj Breyer'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const SelectableText('Mullvad: $_mullvadUrl'),
+            const SelectableText('Patrick Breyer: $_breyerUrl'),
+          ],
+        ),
+      ),
+    );
   }
 }

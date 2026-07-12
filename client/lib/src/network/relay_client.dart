@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../crypto/codec.dart';
+import '../models/directory_entry.dart';
 import '../models/identity.dart';
 import '../models/user_profile.dart';
 
@@ -79,6 +80,28 @@ class RelayProfile extends RelayEvent {
 
   final String userId;
   final UserProfile profile;
+}
+
+class RelayDirectory extends RelayEvent {
+  const RelayDirectory(this.entries);
+
+  final List<DirectoryEntry> entries;
+}
+
+class RelayContactRequest extends RelayEvent {
+  const RelayContactRequest({
+    required this.id,
+    required this.from,
+    required this.displayName,
+    required this.identityPublicKey,
+    required this.sentAt,
+  });
+
+  final String id;
+  final String from;
+  final String displayName;
+  final String identityPublicKey;
+  final DateTime sentAt;
 }
 
 class RelayClient {
@@ -174,11 +197,46 @@ class RelayClient {
     return id;
   }
 
+  String sendContactRequest({
+    required String to,
+    required String displayName,
+  }) {
+    final id = _uuid.v4();
+    _send({
+      'v': 1,
+      'type': 'contact_request',
+      'id': id,
+      'to': to,
+      'displayName': displayName,
+    });
+    return id;
+  }
+
   void queryPresence(List<String> contacts) {
     _send({
       'v': 1,
       'type': 'presence_query',
       'contacts': contacts,
+    });
+  }
+
+  void updateDirectory({
+    required bool enabled,
+    required String displayName,
+  }) {
+    _send({
+      'v': 1,
+      'type': 'directory_update',
+      'enabled': enabled,
+      'displayName': displayName,
+      'identityPublicKey': b64(identity.publicKey.bytes),
+    });
+  }
+
+  void queryDirectory() {
+    _send({
+      'v': 1,
+      'type': 'directory_query',
     });
   }
 
@@ -220,10 +278,25 @@ class RelayClient {
           );
           break;
         case 'deliver':
+          final kind = requiredString(message, 'kind');
+          if (kind == 'contact_request') {
+            final payload = asStringKeyMap(message['payload'], 'payload');
+            _events.add(
+              RelayContactRequest(
+                id: requiredString(message, 'id'),
+                from: requiredString(message, 'from'),
+                displayName: payload['displayName'] as String? ??
+                    requiredString(message, 'from'),
+                identityPublicKey: requiredString(payload, 'identityPublicKey'),
+                sentAt: DateTime.parse(requiredString(message, 'sentAt')),
+              ),
+            );
+            break;
+          }
           _events.add(
             RelayDeliver(
               id: requiredString(message, 'id'),
-              kind: requiredString(message, 'kind'),
+              kind: kind,
               from: requiredString(message, 'from'),
               to: requiredString(message, 'to'),
               signalType: message['signalType'] as String?,
@@ -231,6 +304,15 @@ class RelayClient {
               sentAt: DateTime.parse(requiredString(message, 'sentAt')),
             ),
           );
+          break;
+        case 'directory':
+          final entries = (message['entries'] as List? ?? const [])
+              .map((item) =>
+                  DirectoryEntry.fromJson((item as Map).cast<String, dynamic>()))
+              .toList(growable: false);
+          _events.add(RelayDirectory(entries));
+          break;
+        case 'directory_updated':
           break;
         case 'sent':
           _events.add(

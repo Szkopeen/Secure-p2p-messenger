@@ -9,6 +9,7 @@ Prywatny komunikator E2EE z lekkim serwerem Relay/Signaling oraz jednym klientem
 - `docs/DEPLOYMENT_PL.md` - skrocona instrukcja uruchomienia serwera i budowania klientow.
 - `docs/OD_ZERA_DO_DZIALANIA_PL.md` - pelny przewodnik od instalacji systemu do pierwszej rozmowy.
 - `docs/AKTUALIZACJE_PL.md` - publikowanie nowych wersji aplikacji na relay.
+- `docs/FINALNE_BUILDY_PL.md` - komendy do finalnych paczek Windows, Android i Linux.
 
 ## Model bezpieczenstwa
 

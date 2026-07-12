@@ -123,6 +123,7 @@ class DesktopNotifier {
       PlainPayloadType.groupInvite => 'Zaproszenie do grupy.',
       PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie.',
       PlainPayloadType.groupText => _trim(payload.text ?? ''),
+      PlainPayloadType.groupLeave => 'Uzytkownik wyszedl z grupy.',
     };
   }
 
