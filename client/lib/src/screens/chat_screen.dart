@@ -43,6 +43,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _searchOpen = false;
   bool _dragging = false;
   String? _highlightedMessageId;
+  String? _lastReadMarkMessageId;
   int _searchResultIndex = 0;
 
   bool get _isSending => _pendingSends > 0;
@@ -69,6 +70,7 @@ class _ChatScreenState extends State<ChatScreen> {
             messages.where((message) => message.pinned).toList();
         _scheduleInitialScroll(messages.length);
         _handleMessageCountChange(messages.length);
+        _scheduleMarkConversationRead(messages);
 
         return Scaffold(
           appBar: AppBar(
@@ -369,6 +371,8 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.retraction => 'wiadomosc usunieta',
       PlainPayloadType.reaction => 'reakcja',
       PlainPayloadType.pin => 'przypiecie',
+      PlainPayloadType.receipt => 'potwierdzenie',
+      PlainPayloadType.edit => message.payload.editedText?.toLowerCase() ?? '',
     };
   }
 
@@ -430,7 +434,31 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.retraction => 'Wiadomosc usunieta',
       PlainPayloadType.reaction => 'Reakcja na wiadomosc',
       PlainPayloadType.pin => 'Przypieto wiadomosc',
+      PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
+      PlainPayloadType.edit => 'Edytowano wiadomosc',
     };
+  }
+
+  void _scheduleMarkConversationRead(List<ChatMessage> messages) {
+    String? newestUnreadId;
+    for (final message in messages) {
+      if (message.direction == MessageDirection.inbound &&
+          message.status != MessageStatus.read &&
+          !message.retracted &&
+          (message.payload.type == PlainPayloadType.text ||
+              message.payload.type == PlainPayloadType.file)) {
+        newestUnreadId = message.id;
+      }
+    }
+    if (newestUnreadId == null || newestUnreadId == _lastReadMarkMessageId) {
+      return;
+    }
+
+    _lastReadMarkMessageId = newestUnreadId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(widget.appState.markConversationRead(widget.contact));
+    });
   }
 
   void _highlightAndScrollToMessage(String messageId) {
@@ -686,7 +714,7 @@ class _SearchBar extends StatelessWidget {
   }
 }
 
-enum _MessageAction { react, retract, pin, unpin, deleteLocal }
+enum _MessageAction { react, edit, retract, pin, unpin, deleteLocal }
 
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
@@ -766,6 +794,7 @@ class _MessageBubble extends StatelessWidget {
                   const SizedBox(width: 4),
                   _MessageActionsButton(
                     canReact: _canReact(message),
+                    canEdit: _canEdit(message),
                     canRetract: _canRetract(message),
                     pinned: message.pinned,
                     onSelected: (action) => _handleAction(context, action),
@@ -784,14 +813,33 @@ class _MessageBubble extends StatelessWidget {
         TimeOfDay.fromDateTime(message.createdAt.toLocal()).format(context);
     final transport =
         message.transport == null ? '' : ' / ${message.transport}';
-    return '${message.status.name}$transport / $time';
+    final edited = message.editedAt == null ? '' : ' / edytowano';
+    return '${_statusLabel(message.status)}$transport / $time$edited';
+  }
+
+  String _statusLabel(MessageStatus status) {
+    return switch (status) {
+      MessageStatus.pending => 'wysylanie',
+      MessageStatus.sent => 'wyslano',
+      MessageStatus.delivered => 'dostarczono',
+      MessageStatus.read => 'odczytano',
+      MessageStatus.failed => 'blad',
+    };
+  }
+
+  bool _canEdit(ChatMessage message) {
+    return message.direction == MessageDirection.outbound &&
+        !message.retracted &&
+        message.status != MessageStatus.failed &&
+        message.payload.type == PlainPayloadType.text;
   }
 
   bool _canRetract(ChatMessage message) {
     return message.direction == MessageDirection.outbound &&
         !message.retracted &&
         message.status != MessageStatus.failed &&
-        message.payload.type != PlainPayloadType.retraction;
+        (message.payload.type == PlainPayloadType.text ||
+            message.payload.type == PlainPayloadType.file);
   }
 
   bool _canReact(ChatMessage message) {
@@ -799,7 +847,9 @@ class _MessageBubble extends StatelessWidget {
         !message.retracted &&
         message.payload.type != PlainPayloadType.retraction &&
         message.payload.type != PlainPayloadType.reaction &&
-        message.payload.type != PlainPayloadType.pin;
+        message.payload.type != PlainPayloadType.pin &&
+        message.payload.type != PlainPayloadType.receipt &&
+        message.payload.type != PlainPayloadType.edit;
   }
 
   Future<void> _handleAction(
@@ -808,6 +858,9 @@ class _MessageBubble extends StatelessWidget {
       switch (action) {
         case _MessageAction.react:
           await _showReactionPicker(context);
+          break;
+        case _MessageAction.edit:
+          await _showEditDialog(context);
           break;
         case _MessageAction.retract:
           await appState.retractMessage(contact, message);
@@ -828,6 +881,44 @@ class _MessageBubble extends StatelessWidget {
         SnackBar(content: Text(error.toString())),
       );
     }
+  }
+
+  Future<void> _showEditDialog(BuildContext context) async {
+    final controller = TextEditingController(text: message.payload.text ?? '');
+    final edited = await showDialog<String?>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Edytuj wiadomosc'),
+          content: SizedBox(
+            width: 520,
+            child: TextField(
+              controller: controller,
+              autofocus: true,
+              minLines: 3,
+              maxLines: 8,
+              keyboardType: TextInputType.multiline,
+              decoration: const InputDecoration(
+                hintText: 'Nowa tresc wiadomosci',
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Anuluj'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(controller.text),
+              child: const Text('Zapisz'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    if (edited == null) return;
+    await appState.editMessage(contact, message, edited);
   }
 
   Future<void> _showReactionPicker(BuildContext context) async {
@@ -877,12 +968,14 @@ class _MessageBubble extends StatelessWidget {
 class _MessageActionsButton extends StatelessWidget {
   const _MessageActionsButton({
     required this.canReact,
+    required this.canEdit,
     required this.canRetract,
     required this.pinned,
     required this.onSelected,
   });
 
   final bool canReact;
+  final bool canEdit;
   final bool canRetract;
   final bool pinned;
   final ValueChanged<_MessageAction> onSelected;
@@ -901,6 +994,14 @@ class _MessageActionsButton extends StatelessWidget {
             child: _MessageMenuItem(
               icon: Icons.add_reaction_outlined,
               label: 'Reaguj',
+            ),
+          ),
+        if (canEdit)
+          const PopupMenuItem(
+            value: _MessageAction.edit,
+            child: _MessageMenuItem(
+              icon: Icons.edit_outlined,
+              label: 'Edytuj',
             ),
           ),
         if (canReact)
@@ -1031,6 +1132,8 @@ class _PayloadView extends StatelessWidget {
       PlainPayloadType.retraction => const Text('Wiadomosc zostala usunieta.'),
       PlainPayloadType.reaction => const Text('Reakcja na wiadomosc.'),
       PlainPayloadType.pin => const Text('Przypieto wiadomosc.'),
+      PlainPayloadType.receipt => const Text('Potwierdzono wiadomosc.'),
+      PlainPayloadType.edit => const Text('Edytowano wiadomosc.'),
       PlainPayloadType.file => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,

@@ -12,7 +12,8 @@ class SecureMessengerApp extends StatefulWidget {
   State<SecureMessengerApp> createState() => _SecureMessengerAppState();
 }
 
-class _SecureMessengerAppState extends State<SecureMessengerApp> with WidgetsBindingObserver {
+class _SecureMessengerAppState extends State<SecureMessengerApp>
+    with WidgetsBindingObserver {
   late final AppState appState;
 
   @override
@@ -39,16 +40,52 @@ class _SecureMessengerAppState extends State<SecureMessengerApp> with WidgetsBin
 
   @override
   Widget build(BuildContext context) {
+    final darkScheme = ColorScheme.fromSeed(
+      seedColor: const Color(0xff38bdf8),
+      brightness: Brightness.dark,
+      surface: const Color(0xff0b1016),
+      surfaceContainerLowest: const Color(0xff070b10),
+      surfaceContainerLow: const Color(0xff101820),
+      surfaceContainer: const Color(0xff141d26),
+      surfaceContainerHigh: const Color(0xff1a2530),
+      surfaceContainerHighest: const Color(0xff22303c),
+    );
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Secure P2P',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xff1f7a5a),
-          brightness: Brightness.light,
-        ),
+      themeMode: ThemeMode.dark,
+      darkTheme: ThemeData(
+        colorScheme: darkScheme,
+        scaffoldBackgroundColor: darkScheme.surface,
+        canvasColor: darkScheme.surface,
         useMaterial3: true,
-        inputDecorationTheme: const InputDecorationTheme(border: OutlineInputBorder()),
+        appBarTheme: AppBarTheme(
+          backgroundColor: darkScheme.surfaceContainerLow,
+          foregroundColor: darkScheme.onSurface,
+          elevation: 0,
+          surfaceTintColor: Colors.transparent,
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: darkScheme.surfaceContainerHigh,
+          surfaceTintColor: Colors.transparent,
+        ),
+        bottomSheetTheme: BottomSheetThemeData(
+          backgroundColor: darkScheme.surfaceContainerHigh,
+          surfaceTintColor: Colors.transparent,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          border: const OutlineInputBorder(),
+          filled: true,
+          fillColor: darkScheme.surfaceContainerLow,
+        ),
+        listTileTheme: ListTileThemeData(
+          iconColor: darkScheme.onSurfaceVariant,
+        ),
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: darkScheme.inverseSurface,
+          contentTextStyle: TextStyle(color: darkScheme.onInverseSurface),
+        ),
         visualDensity: VisualDensity.standard,
       ),
       home: AnimatedBuilder(

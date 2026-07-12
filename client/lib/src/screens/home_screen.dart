@@ -6,6 +6,7 @@ import '../crypto/codec.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({required this.appState, super.key});
@@ -17,23 +18,35 @@ class HomeScreen extends StatelessWidget {
     return AnimatedBuilder(
       animation: appState,
       builder: (context, _) {
+        final totalUnread = appState.totalUnreadCount;
         return Scaffold(
           appBar: AppBar(
-            title: const Text('Secure P2P'),
+            title: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Secure P2P'),
+                if (totalUnread > 0) ...[
+                  const SizedBox(width: 12),
+                  Badge.count(count: totalUnread),
+                ],
+              ],
+            ),
             actions: [
               IconButton(
                 tooltip: 'Polacz ponownie',
                 onPressed: () => appState.connectRelay(),
                 icon: const Icon(Icons.refresh),
               ),
-              PopupMenuButton<String>(
-                onSelected: (value) {
-                  if (value == 'wipe') appState.wipeLocalData();
+              IconButton(
+                tooltip: 'Ustawienia',
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => SettingsScreen(appState: appState),
+                    ),
+                  );
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(
-                      value: 'wipe', child: Text('Wyczysc dane lokalne')),
-                ],
+                icon: const Icon(Icons.settings_outlined),
               ),
             ],
           ),
@@ -73,16 +86,21 @@ class HomeScreen extends StatelessWidget {
                               appState.isContactOnline(contact.userId);
                           final messages = appState.messagesFor(contact.userId);
                           final last = messages.isEmpty ? null : messages.last;
+                          final unread =
+                              appState.unreadCountFor(contact.userId);
                           final initial = contact.displayName.isEmpty
                               ? '?'
                               : contact.displayName
                                   .substring(0, 1)
                                   .toUpperCase();
                           return ListTile(
-                            leading: _AvatarView(
-                              bytesBase64: contact.avatarBytesBase64,
-                              fallback: initial,
-                              online: online,
+                            leading: _UnreadBadge(
+                              count: unread,
+                              child: _AvatarView(
+                                bytesBase64: contact.avatarBytesBase64,
+                                fallback: initial,
+                                online: online,
+                              ),
                             ),
                             title: Text(contact.displayName),
                             subtitle: Text(
@@ -92,7 +110,7 @@ class HomeScreen extends StatelessWidget {
                             ),
                             trailing: Icon(
                               p2p ? Icons.hub_outlined : Icons.cloud_queue,
-                              color: p2p ? Colors.green.shade700 : null,
+                              color: p2p ? Colors.green.shade400 : null,
                             ),
                             onTap: () {
                               Navigator.of(context).push(
@@ -199,13 +217,36 @@ class HomeScreen extends StatelessWidget {
   String _contactSubtitle(Contact contact, ChatMessage? last, bool p2p) {
     if (last == null) return '${contact.userId} / ${p2p ? 'P2P' : 'Relay'}';
     if (last.retracted) return 'Wiadomosc usunieta';
+    final edited = last.editedAt == null ? '' : 'Edytowano: ';
     return switch (last.payload.type) {
-      PlainPayloadType.text => last.payload.text ?? '',
+      PlainPayloadType.text => '$edited${last.payload.text ?? ''}',
       PlainPayloadType.file => 'Plik: ${last.payload.fileName ?? 'zalacznik'}',
       PlainPayloadType.retraction => 'Wiadomosc usunieta',
       PlainPayloadType.reaction => 'Reakcja na wiadomosc',
       PlainPayloadType.pin => 'Przypieto wiadomosc',
+      PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
+      PlainPayloadType.edit => 'Edytowano wiadomosc',
     };
+  }
+}
+
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({
+    required this.count,
+    required this.child,
+  });
+
+  final int count;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Badge.count(
+      count: count,
+      isLabelVisible: count > 0,
+      offset: const Offset(2, -2),
+      child: child,
+    );
   }
 }
 

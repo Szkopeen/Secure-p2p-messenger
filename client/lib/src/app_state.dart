@@ -70,6 +70,18 @@ class AppState extends ChangeNotifier {
     return List.unmodifiable(items);
   }
 
+  int unreadCountFor(String contactId) {
+    final items = _messages[contactId] ?? const <ChatMessage>[];
+    return items.where(_isUnreadIncomingMessage).length;
+  }
+
+  int get totalUnreadCount {
+    return _messages.values
+        .expand((messages) => messages)
+        .where(_isUnreadIncomingMessage)
+        .length;
+  }
+
   bool isP2pConnected(String contactId) => _p2pConnected[contactId] == true;
 
   bool isContactOnline(String contactId) {
@@ -228,6 +240,75 @@ class AppState extends ChangeNotifier {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
     await _sendPlainPayload(contact, PlainPayload.text(trimmed));
+  }
+
+  Future<void> markConversationRead(Contact contact) async {
+    final list = _messages[contact.userId];
+    if (list == null) return;
+
+    final readMessageIds = <String>[];
+    var changed = false;
+    for (var index = 0; index < list.length; index += 1) {
+      final message = list[index];
+      if (!_isUnreadIncomingMessage(message)) continue;
+
+      list[index] = message.copyWith(status: MessageStatus.read);
+      readMessageIds.add(message.id);
+      changed = true;
+    }
+
+    if (!changed) return;
+    await _persistMessages();
+    notifyListeners();
+
+    for (final messageId in readMessageIds) {
+      unawaited(_sendReceipt(contact, messageId, ReceiptKind.read));
+    }
+  }
+
+  Future<void> editMessage(
+    Contact contact,
+    ChatMessage message,
+    String text,
+  ) async {
+    if (message.contactId != contact.userId) {
+      throw ArgumentError('Wiadomosc nie nalezy do tego kontaktu.');
+    }
+    if (message.direction != MessageDirection.outbound) {
+      throw StateError('Mozesz edytowac tylko wlasne wiadomosci.');
+    }
+    if (message.retracted || message.payload.type != PlainPayloadType.text) {
+      throw StateError('Tej wiadomosci nie mozna edytowac.');
+    }
+    if (message.status == MessageStatus.failed) {
+      throw StateError(
+          'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.');
+    }
+
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      throw ArgumentError('Edytowana wiadomosc nie moze byc pusta.');
+    }
+    if (trimmed == (message.payload.text ?? '').trim()) return;
+
+    final identity = _requireIdentity();
+    final session = await _ensureSession(contact);
+    final packet = await _crypto.encryptPayload(
+      session: session,
+      from: identity.userId,
+      to: contact.userId,
+      payload: PlainPayload.edit(
+        targetMessageId: message.id,
+        editedText: trimmed,
+      ),
+    );
+    await _sendEncryptedPacket(contact, packet);
+    _applyEdit(
+      contact.userId,
+      message.id,
+      trimmed,
+      allowedDirection: MessageDirection.outbound,
+    );
   }
 
   Future<void> retractMessage(Contact contact, ChatMessage message) async {
@@ -464,6 +545,42 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> _sendReceipt(
+    Contact contact,
+    String messageId,
+    ReceiptKind kind,
+  ) async {
+    await _sendControlPayload(
+      contact,
+      PlainPayload.receipt(
+        targetMessageId: messageId,
+        receiptKind: kind,
+      ),
+    );
+  }
+
+  Future<void> _sendControlPayload(
+    Contact contact,
+    PlainPayload payload,
+  ) async {
+    final identity = _identity;
+    final session = _sessions[contact.userId];
+    if (identity == null || session == null || _relay == null) return;
+    if (!_relayConnected) return;
+
+    try {
+      final packet = await _crypto.encryptPayload(
+        session: session,
+        from: identity.userId,
+        to: contact.userId,
+        payload: payload,
+      );
+      await _sendEncryptedPacket(contact, packet);
+    } catch (_) {
+      // Potwierdzenia i edycje sterujace nie moga blokowac odbioru wiadomosci.
+    }
+  }
+
   Future<SessionState> _ensureSession(Contact contact) async {
     final existing = _sessions[contact.userId];
     if (existing != null) return existing;
@@ -676,7 +793,25 @@ class AppState extends ChangeNotifier {
         );
         return;
       }
-      _addMessage(
+      if (decrypted.payload.type == PlainPayloadType.receipt) {
+        _applyReceipt(
+          from,
+          decrypted.payload.targetMessageId!,
+          decrypted.payload.receiptKind ?? ReceiptKind.delivered,
+        );
+        return;
+      }
+      if (decrypted.payload.type == PlainPayloadType.edit) {
+        _applyEdit(
+          from,
+          decrypted.payload.targetMessageId!,
+          decrypted.payload.editedText ?? '',
+          allowedDirection: MessageDirection.inbound,
+          editedAt: decrypted.createdAt,
+        );
+        return;
+      }
+      final added = _addMessage(
         ChatMessage(
           id: decrypted.messageId,
           contactId: from,
@@ -687,12 +822,16 @@ class AppState extends ChangeNotifier {
           transport: transport,
         ),
       );
-      unawaited(
-        DesktopNotifier.instance.notifyIncoming(
-          senderName: contact.displayName,
-          payload: decrypted.payload,
-        ),
-      );
+      if (added) {
+        unawaited(
+            _sendReceipt(contact, decrypted.messageId, ReceiptKind.delivered));
+        unawaited(
+          DesktopNotifier.instance.notifyIncoming(
+            senderName: contact.displayName,
+            payload: decrypted.payload,
+          ),
+        );
+      }
     } catch (error) {
       _setStatus('Odrzucono pakiet: $error');
     }
@@ -705,13 +844,14 @@ class AppState extends ChangeNotifier {
     await _p2p!.ensureStarted(contact.userId, initiator: shouldInitiate);
   }
 
-  void _addMessage(ChatMessage message) {
+  bool _addMessage(ChatMessage message) {
     final list =
         _messages.putIfAbsent(message.contactId, () => <ChatMessage>[]);
-    if (list.any((item) => item.id == message.id)) return;
+    if (list.any((item) => item.id == message.id)) return false;
     list.add(message);
     unawaited(_persistMessages());
     notifyListeners();
+    return true;
   }
 
   bool _markMessageRetracted(
@@ -733,6 +873,7 @@ class AppState extends ChangeNotifier {
         retracted: true,
         pinned: false,
         reactions: const {},
+        clearEditedAt: true,
       );
       unawaited(_persistMessages());
       notifyListeners();
@@ -752,6 +893,63 @@ class AppState extends ChangeNotifier {
         transport: fallbackTransport,
       ),
     );
+    unawaited(_persistMessages());
+    notifyListeners();
+    return true;
+  }
+
+  bool _applyEdit(
+    String contactId,
+    String messageId,
+    String text, {
+    required MessageDirection allowedDirection,
+    DateTime? editedAt,
+  }) {
+    final list = _messages[contactId];
+    if (list == null) return false;
+    final index = list.indexWhere((message) => message.id == messageId);
+    if (index < 0) return false;
+
+    final message = list[index];
+    if (message.direction != allowedDirection ||
+        message.retracted ||
+        message.payload.type != PlainPayloadType.text) {
+      return false;
+    }
+
+    final normalizedText = text.trim();
+    if (normalizedText.isEmpty) return false;
+
+    list[index] = message.copyWith(
+      payload: PlainPayload.text(normalizedText),
+      editedAt: editedAt ?? DateTime.now().toUtc(),
+    );
+    unawaited(_persistMessages());
+    notifyListeners();
+    return true;
+  }
+
+  bool _applyReceipt(
+    String contactId,
+    String messageId,
+    ReceiptKind kind,
+  ) {
+    final list = _messages[contactId];
+    if (list == null) return false;
+    final index = list.indexWhere((message) => message.id == messageId);
+    if (index < 0) return false;
+
+    final message = list[index];
+    if (message.direction != MessageDirection.outbound) return false;
+
+    final nextStatus = switch (kind) {
+      ReceiptKind.delivered => MessageStatus.delivered,
+      ReceiptKind.read => MessageStatus.read,
+    };
+    final promotedStatus = _promoteStatus(message.status, nextStatus);
+    if (promotedStatus == message.status) return true;
+
+    list[index] = message.copyWith(status: promotedStatus);
     unawaited(_persistMessages());
     notifyListeners();
     return true;
@@ -829,10 +1027,44 @@ class AppState extends ChangeNotifier {
     if (list == null) return;
     final index = list.indexWhere((message) => message.id == messageId);
     if (index < 0) return;
-    list[index] = list[index]
-        .copyWith(status: status, transport: transport, error: error);
+    list[index] = list[index].copyWith(
+      status: _promoteStatus(list[index].status, status),
+      transport: transport,
+      error: error,
+    );
     unawaited(_persistMessages());
     notifyListeners();
+  }
+
+  bool _isUnreadIncomingMessage(ChatMessage message) {
+    return message.direction == MessageDirection.inbound &&
+        message.status != MessageStatus.read &&
+        !message.retracted &&
+        (message.payload.type == PlainPayloadType.text ||
+            message.payload.type == PlainPayloadType.file);
+  }
+
+  MessageStatus _promoteStatus(
+    MessageStatus current,
+    MessageStatus incoming,
+  ) {
+    if (incoming == MessageStatus.failed) {
+      return current == MessageStatus.delivered || current == MessageStatus.read
+          ? current
+          : MessageStatus.failed;
+    }
+    if (current == MessageStatus.failed) return incoming;
+    return _statusRank(incoming) > _statusRank(current) ? incoming : current;
+  }
+
+  int _statusRank(MessageStatus status) {
+    return switch (status) {
+      MessageStatus.pending => 0,
+      MessageStatus.sent => 1,
+      MessageStatus.delivered => 2,
+      MessageStatus.read => 3,
+      MessageStatus.failed => -1,
+    };
   }
 
   Future<void> _loadArchivedMessages() async {

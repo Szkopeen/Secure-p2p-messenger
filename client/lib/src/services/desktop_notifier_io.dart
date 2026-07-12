@@ -118,6 +118,8 @@ class DesktopNotifier {
       PlainPayloadType.retraction => 'Wiadomosc zostala usunieta.',
       PlainPayloadType.reaction => 'Reakcja na wiadomosc.',
       PlainPayloadType.pin => 'Przypieto wiadomosc.',
+      PlainPayloadType.receipt => 'Potwierdzenie wiadomosci.',
+      PlainPayloadType.edit => 'Edytowano wiadomosc.',
     };
   }
 

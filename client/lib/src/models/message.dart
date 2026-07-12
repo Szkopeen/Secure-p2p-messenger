@@ -1,8 +1,10 @@
 enum MessageDirection { inbound, outbound, system }
 
-enum MessageStatus { pending, sent, delivered, failed }
+enum MessageStatus { pending, sent, delivered, read, failed }
 
-enum PlainPayloadType { text, file, retraction, reaction, pin }
+enum PlainPayloadType { text, file, retraction, reaction, pin, receipt, edit }
+
+enum ReceiptKind { delivered, read }
 
 class PlainPayload {
   const PlainPayload.text(this.text)
@@ -13,7 +15,9 @@ class PlainPayload {
         fileSize = null,
         targetMessageId = null,
         reactionEmoji = null,
-        pinPinned = null;
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null;
 
   const PlainPayload.file({
     required this.fileName,
@@ -24,7 +28,9 @@ class PlainPayload {
         text = null,
         targetMessageId = null,
         reactionEmoji = null,
-        pinPinned = null;
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null;
 
   const PlainPayload.retraction({
     required this.targetMessageId,
@@ -35,7 +41,9 @@ class PlainPayload {
         fileBytesBase64 = null,
         fileSize = null,
         reactionEmoji = null,
-        pinPinned = null;
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null;
 
   const PlainPayload.reaction({
     required this.targetMessageId,
@@ -46,7 +54,9 @@ class PlainPayload {
         mimeType = null,
         fileBytesBase64 = null,
         fileSize = null,
-        pinPinned = null;
+        pinPinned = null,
+        receiptKind = null,
+        editedText = null;
 
   const PlainPayload.pin({
     required this.targetMessageId,
@@ -57,7 +67,35 @@ class PlainPayload {
         mimeType = null,
         fileBytesBase64 = null,
         fileSize = null,
-        reactionEmoji = null;
+        reactionEmoji = null,
+        receiptKind = null,
+        editedText = null;
+
+  const PlainPayload.receipt({
+    required this.targetMessageId,
+    required this.receiptKind,
+  })  : type = PlainPayloadType.receipt,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        reactionEmoji = null,
+        pinPinned = null,
+        editedText = null;
+
+  const PlainPayload.edit({
+    required this.targetMessageId,
+    required this.editedText,
+  })  : type = PlainPayloadType.edit,
+        text = null,
+        fileName = null,
+        mimeType = null,
+        fileBytesBase64 = null,
+        fileSize = null,
+        reactionEmoji = null,
+        pinPinned = null,
+        receiptKind = null;
 
   final PlainPayloadType type;
   final String? text;
@@ -68,6 +106,8 @@ class PlainPayload {
   final String? targetMessageId;
   final String? reactionEmoji;
   final bool? pinPinned;
+  final ReceiptKind? receiptKind;
+  final String? editedText;
 
   Map<String, dynamic> toJson() => switch (type) {
         PlainPayloadType.text => {
@@ -99,6 +139,18 @@ class PlainPayload {
             'type': 'pin',
             'targetMessageId': targetMessageId,
             'pinned': pinPinned,
+          },
+        PlainPayloadType.receipt => {
+            'v': 1,
+            'type': 'receipt',
+            'targetMessageId': targetMessageId,
+            'kind': receiptKind?.name,
+          },
+        PlainPayloadType.edit => {
+            'v': 1,
+            'type': 'edit',
+            'targetMessageId': targetMessageId,
+            'text': editedText,
           },
       };
 
@@ -140,6 +192,27 @@ class PlainPayload {
           targetMessageId: targetMessageId,
           pinPinned: json['pinned'] == true,
         );
+      case 'receipt':
+        final targetMessageId = json['targetMessageId'] as String?;
+        if (targetMessageId == null || targetMessageId.isEmpty) {
+          throw const FormatException(
+              'Brak identyfikatora wiadomosci dla potwierdzenia.');
+        }
+        return PlainPayload.receipt(
+          targetMessageId: targetMessageId,
+          receiptKind:
+              ReceiptKind.values.byName(json['kind'] as String? ?? 'delivered'),
+        );
+      case 'edit':
+        final targetMessageId = json['targetMessageId'] as String?;
+        if (targetMessageId == null || targetMessageId.isEmpty) {
+          throw const FormatException(
+              'Brak identyfikatora edytowanej wiadomosci.');
+        }
+        return PlainPayload.edit(
+          targetMessageId: targetMessageId,
+          editedText: json['text'] as String? ?? '',
+        );
       default:
         throw const FormatException('Nieznany typ payloadu.');
     }
@@ -157,6 +230,7 @@ class ChatMessage {
     this.retracted = false,
     this.pinned = false,
     this.reactions = const {},
+    this.editedAt,
     this.transport,
     this.error,
   });
@@ -170,6 +244,7 @@ class ChatMessage {
   final bool retracted;
   final bool pinned;
   final Map<String, String> reactions;
+  final DateTime? editedAt;
   final String? transport;
   final String? error;
 
@@ -184,6 +259,7 @@ class ChatMessage {
         'retracted': retracted,
         'pinned': pinned,
         'reactions': reactions,
+        'editedAt': editedAt?.toUtc().toIso8601String(),
         'transport': transport,
         'error': error,
       };
@@ -201,6 +277,9 @@ class ChatMessage {
       pinned: json['pinned'] == true,
       reactions: ((json['reactions'] as Map?) ?? const {})
           .map((key, value) => MapEntry(key.toString(), value.toString())),
+      editedAt: json['editedAt'] == null
+          ? null
+          : DateTime.parse(json['editedAt'] as String),
       transport: json['transport'] as String?,
       error: json['error'] as String?,
     );
@@ -212,6 +291,8 @@ class ChatMessage {
     bool? retracted,
     bool? pinned,
     Map<String, String>? reactions,
+    DateTime? editedAt,
+    bool clearEditedAt = false,
     String? transport,
     String? error,
   }) {
@@ -225,6 +306,7 @@ class ChatMessage {
       retracted: retracted ?? this.retracted,
       pinned: pinned ?? this.pinned,
       reactions: reactions ?? this.reactions,
+      editedAt: clearEditedAt ? null : editedAt ?? this.editedAt,
       transport: transport ?? this.transport,
       error: error ?? this.error,
     );
