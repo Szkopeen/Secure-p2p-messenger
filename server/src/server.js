@@ -876,7 +876,7 @@ function handleHello(ws, state, message) {
 }
 
 function handleRelay(ws, state, message) {
-  const error = validateRelay(message);
+  const error = validateRelay(message, state.userId);
   if (error) {
     send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_relay', reason: error });
     return;

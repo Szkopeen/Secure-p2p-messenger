@@ -46,17 +46,26 @@ export function validateHello(message) {
   return null;
 }
 
-export function validateRelay(message) {
+export function validateRelay(message, senderUserId = null) {
   if (!isObject(message) || message.v !== 1 || message.type !== 'relay') {
     return 'Niepoprawny pakiet relay.';
   }
   if (!isMessageId(message.id)) return 'Niepoprawne id pakietu.';
   if (!isSafeId(message.to)) return 'Niepoprawny adresat.';
   if (!isObject(message.payload)) return 'Relay wymaga obiektu payload.';
-  if (message.payload.protocol !== 'secure-p2p-e2ee/v1') {
-    return 'Relay przyjmuje tylko pakiety E2EE v1.';
+
+  if (message.payload.protocol === 'secure-p2p-e2ee/v1') {
+    return null;
   }
-  return null;
+
+  if (message.payload.protocol === 'secure-p2p-device-sync/v1') {
+    if (senderUserId !== null && message.to !== senderUserId) {
+      return 'Synchronizacja urzadzen moze isc tylko do wlasnego konta.';
+    }
+    return null;
+  }
+
+  return 'Relay przyjmuje tylko pakiety E2EE v1 albo device-sync v1.';
 }
 
 export function validateSignal(message) {
