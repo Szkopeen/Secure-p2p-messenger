@@ -1,9 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto_hash;
+import 'package:cryptography/cryptography.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
-import 'package:cryptography/cryptography.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import 'crypto/codec.dart';
@@ -14,6 +18,7 @@ import 'models/group.dart';
 import 'models/identity.dart';
 import 'models/message.dart';
 import 'models/session.dart';
+import 'models/update_info.dart';
 import 'models/user_profile.dart';
 import 'network/relay_client.dart';
 import 'p2p/webrtc_transport.dart';
@@ -63,6 +68,14 @@ class AppState extends ChangeNotifier {
   bool _initializing = true;
   bool _retryingGroupInvites = false;
   String? _status;
+  String _currentVersionLabel = '';
+  int _currentBuildNumber = 0;
+  AvailableUpdate? _availableUpdate;
+  bool _checkingForUpdate = false;
+  bool _downloadingUpdate = false;
+  double? _updateDownloadProgress;
+  String? _updateStatus;
+  String? _downloadedUpdatePath;
   int _relayMaxPayloadBytes = 16 * 1024 * 1024;
 
   bool get initializing => _initializing;
@@ -76,6 +89,13 @@ class AppState extends ChangeNotifier {
   RelaySettings? get relaySettings => _relaySettings;
   List<Contact> get contacts => List.unmodifiable(_contacts);
   List<GroupConversation> get groups => List.unmodifiable(_groups);
+  String get currentVersionLabel => _currentVersionLabel;
+  AvailableUpdate? get availableUpdate => _availableUpdate;
+  bool get checkingForUpdate => _checkingForUpdate;
+  bool get downloadingUpdate => _downloadingUpdate;
+  double? get updateDownloadProgress => _updateDownloadProgress;
+  String? get updateStatus => _updateStatus;
+  String? get downloadedUpdatePath => _downloadedUpdatePath;
 
   List<ChatMessage> messagesFor(String contactId) {
     final items = _messages[contactId] ?? const <ChatMessage>[];
@@ -123,6 +143,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> initialize() async {
     try {
+      await _loadPackageInfo();
       _identity = await _store.loadIdentity();
       _ownProfile = await _store.loadOwnProfile();
       _relaySettings = await _store.loadRelaySettings();
@@ -139,6 +160,7 @@ class AppState extends ChangeNotifier {
 
       if (_identity != null && _relaySettings != null) {
         await connectRelay();
+        unawaited(checkForUpdate(silent: true));
       }
     } catch (error) {
       _initializing = false;
@@ -165,6 +187,7 @@ class AppState extends ChangeNotifier {
     );
     await _store.saveRelaySettings(_relaySettings!);
     await connectRelay();
+    unawaited(checkForUpdate(silent: true));
   }
 
   Future<void> exportAccountPackage(String passphrase) async {
@@ -321,6 +344,137 @@ class AppState extends ChangeNotifier {
     }
     notifyListeners();
     await connectRelay();
+    unawaited(checkForUpdate(silent: true));
+  }
+
+  Future<void> checkForUpdate({bool silent = false}) async {
+    final settings = _relaySettings;
+    if (settings == null) return;
+    final platform = _updatePlatform();
+    if (platform == null) {
+      _updateStatus = 'Aktualizacje nie sa wspierane na tej platformie.';
+      notifyListeners();
+      return;
+    }
+
+    _checkingForUpdate = true;
+    _updateStatus = silent ? _updateStatus : 'Sprawdzam aktualizacje...';
+    notifyListeners();
+
+    try {
+      await _ensurePackageInfoLoaded();
+      final manifestUri = _updateManifestUri(settings);
+      final response = await _readJson(manifestUri);
+      final latest = (response['latest'] as Map).cast<String, dynamic>();
+      final artifacts =
+          (latest['artifacts'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final artifactRaw = artifacts[platform];
+      if (artifactRaw is! Map) {
+        _availableUpdate = null;
+        _updateStatus = 'Brak paczki aktualizacji dla tej platformy.';
+        return;
+      }
+
+      final latestBuild = _asInt(latest['buildNumber']);
+      final latestVersion = latest['version']?.toString() ?? '0.0.0';
+      if (latestBuild <= _currentBuildNumber) {
+        _availableUpdate = null;
+        _updateStatus =
+            silent ? null : 'Masz najnowsza wersje: $_currentVersionLabel.';
+        return;
+      }
+
+      final artifact = artifactRaw.cast<String, dynamic>();
+      final fileName = artifact['file']?.toString() ?? '';
+      if (fileName.isEmpty) {
+        _availableUpdate = null;
+        _updateStatus = 'Manifest aktualizacji nie zawiera nazwy pliku.';
+        return;
+      }
+
+      _availableUpdate = AvailableUpdate(
+        version: latestVersion,
+        buildNumber: latestBuild,
+        releasedAt: latest['releasedAt'] == null
+            ? null
+            : DateTime.tryParse(latest['releasedAt'].toString()),
+        notes: ((latest['notes'] as List?) ?? const [])
+            .map((item) => item.toString())
+            .toList(growable: false),
+        artifact: UpdateArtifact(
+          platform: platform,
+          fileName: fileName,
+          url: _artifactUri(settings, artifact, fileName),
+          sha256: artifact['sha256']?.toString(),
+          size: _asNullableInt(artifact['size']),
+        ),
+      );
+      _updateStatus = 'Dostepna aktualizacja: ${_availableUpdate!.label}.';
+    } catch (error) {
+      if (!silent) {
+        _updateStatus = 'Nie udalo sie sprawdzic aktualizacji: $error';
+      }
+    } finally {
+      _checkingForUpdate = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> downloadAvailableUpdate() async {
+    final update = _availableUpdate;
+    if (update == null) {
+      await checkForUpdate();
+      if (_availableUpdate == null) return;
+    }
+
+    final selectedUpdate = _availableUpdate!;
+    _downloadingUpdate = true;
+    _updateDownloadProgress = 0;
+    _downloadedUpdatePath = null;
+    _updateStatus = 'Pobieram aktualizacje...';
+    notifyListeners();
+
+    try {
+      final directory = await _updateDownloadDirectory();
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}${selectedUpdate.artifact.fileName}',
+      );
+      final client = HttpClient();
+      try {
+        final request = await client.getUrl(selectedUpdate.artifact.url);
+        final response = await request.close();
+        if (response.statusCode != 200) {
+          throw StateError('Serwer zwrocil HTTP ${response.statusCode}.');
+        }
+
+        final sink = file.openWrite();
+        var received = 0;
+        final total = response.contentLength;
+        await for (final chunk in response) {
+          received += chunk.length;
+          sink.add(chunk);
+          if (total > 0) {
+            _updateDownloadProgress = received / total;
+            notifyListeners();
+          }
+        }
+        await sink.close();
+      } finally {
+        client.close(force: true);
+      }
+
+      await _verifyDownloadedUpdate(file, selectedUpdate.artifact.sha256);
+      _downloadedUpdatePath = file.path;
+      _updateDownloadProgress = 1;
+      _updateStatus = 'Pobrano aktualizacje: ${file.path}';
+      unawaited(_revealDownloadedUpdate(file));
+    } catch (error) {
+      _updateStatus = 'Nie udalo sie pobrac aktualizacji: $error';
+      rethrow;
+    } finally {
+      _downloadingUpdate = false;
+      notifyListeners();
+    }
   }
 
   Future<void> connectRelay() async {
@@ -1645,6 +1799,126 @@ class AppState extends ChangeNotifier {
       MessageStatus.read => 3,
       MessageStatus.failed => -1,
     };
+  }
+
+  Future<void> _loadPackageInfo() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      _currentBuildNumber = int.tryParse(info.buildNumber) ?? 0;
+      _currentVersionLabel = '${info.version}+${info.buildNumber}';
+    } catch (_) {
+      _currentBuildNumber = 0;
+      _currentVersionLabel = 'nieznana';
+    }
+  }
+
+  Future<void> _ensurePackageInfoLoaded() async {
+    if (_currentVersionLabel.isEmpty) {
+      await _loadPackageInfo();
+    }
+  }
+
+  String? _updatePlatform() {
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isLinux) return 'linux';
+    if (Platform.isAndroid) return 'android';
+    return null;
+  }
+
+  Uri _updateManifestUri(RelaySettings settings) {
+    final relayUri = Uri.parse(settings.serverUrl);
+    final scheme = relayUri.scheme == 'wss' ? 'https' : 'http';
+    return relayUri.replace(
+      scheme: scheme,
+      path: '/updates/manifest.json',
+      query: null,
+      fragment: null,
+    );
+  }
+
+  Uri _artifactUri(
+    RelaySettings settings,
+    Map<String, dynamic> artifact,
+    String fileName,
+  ) {
+    final explicitUrl = artifact['url']?.toString();
+    if (explicitUrl != null && explicitUrl.isNotEmpty) {
+      final uri = Uri.parse(explicitUrl);
+      if (uri.hasScheme) return uri;
+    }
+
+    final manifestUri = _updateManifestUri(settings);
+    return manifestUri.replace(
+      pathSegments: ['updates', 'files', fileName],
+      query: null,
+      fragment: null,
+    );
+  }
+
+  Future<Directory> _updateDownloadDirectory() async {
+    if (Platform.isAndroid) {
+      return getApplicationDocumentsDirectory();
+    }
+    try {
+      return await getDownloadsDirectory() ??
+          await getApplicationDocumentsDirectory();
+    } catch (_) {
+      return getApplicationDocumentsDirectory();
+    }
+  }
+
+  Future<Map<String, dynamic>> _readJson(Uri uri) async {
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode != 200) {
+        throw StateError('HTTP ${response.statusCode}');
+      }
+      final raw = await utf8.decodeStream(response);
+      return (jsonDecode(raw) as Map).cast<String, dynamic>();
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  int _asInt(Object? value) {
+    if (value is int) return value;
+    return int.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  int? _asNullableInt(Object? value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    return int.tryParse(value.toString());
+  }
+
+  Future<void> _verifyDownloadedUpdate(
+      File file, String? expectedSha256) async {
+    final expected = expectedSha256?.trim().toLowerCase();
+    if (expected == null || expected.isEmpty) return;
+
+    final actual =
+        crypto_hash.sha256.convert(await file.readAsBytes()).toString();
+    if (actual != expected) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      throw StateError(
+          'Suma SHA-256 pobranego pliku nie zgadza sie z manifestem.');
+    }
+  }
+
+  Future<void> _revealDownloadedUpdate(File file) async {
+    try {
+      if (Platform.isWindows) {
+        await Process.start('explorer.exe', ['/select,', file.path]);
+      } else if (Platform.isLinux) {
+        await Process.start('xdg-open', [file.parent.path]);
+      }
+    } catch (_) {
+      // Otwieranie folderu jest dodatkiem. Pobieranie jest juz zakonczone.
+    }
   }
 
   Future<SecretKey> _deriveAccountExportKey(

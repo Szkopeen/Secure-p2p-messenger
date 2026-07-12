@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "latest": {
+    "version": "1.0.1",
+    "buildNumber": 2,
+    "releasedAt": "2026-07-12T00:00:00.000Z",
+    "notes": [
+      "Opis zmian widoczny w aplikacji."
+    ],
+    "artifacts": {
+      "windows": {
+        "file": "secure-p2p-windows.zip",
+        "sha256": "",
+        "size": 0
+      },
+      "linux": {
+        "file": "secure-p2p-linux.zip",
+        "sha256": "",
+        "size": 0
+      },
+      "android": {
+        "file": "secure-p2p-android.apk",
+        "sha256": "",
+        "size": 0
+      }
+    }
+  }
+}

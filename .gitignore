@@ -5,6 +5,8 @@ server/.env
 # Node
 node_modules/
 npm-debug.log*
+server/updates/files/
+server/updates/manifest.json
 
 # Flutter/Dart
 .dart_tool/

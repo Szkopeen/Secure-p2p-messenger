@@ -183,6 +183,72 @@ function send(ws, message) {
   ws.send(JSON.stringify(message));
 }
 
+function sendJson(res, status, payload) {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store'
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function contentTypeForFile(fileName) {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.zip')) return 'application/zip';
+  if (lower.endsWith('.apk')) return 'application/vnd.android.package-archive';
+  if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function serveUpdateManifest(res) {
+  try {
+    if (!fs.existsSync(config.updateManifestFile)) {
+      sendJson(res, 404, {
+        ok: false,
+        error: 'Manifest aktualizacji nie jest jeszcze dostepny.'
+      });
+      return;
+    }
+    const raw = fs.readFileSync(config.updateManifestFile, 'utf8');
+    const parsed = JSON.parse(raw);
+    sendJson(res, 200, parsed);
+  } catch (error) {
+    sendJson(res, 500, {
+      ok: false,
+      error: 'Nie mozna odczytac manifestu aktualizacji.'
+    });
+  }
+}
+
+function serveUpdateFile(res, fileName) {
+  const cleanName = path.basename(fileName || '');
+  if (!cleanName || cleanName !== fileName) {
+    sendJson(res, 400, { ok: false, error: 'Niepoprawna nazwa pliku.' });
+    return;
+  }
+
+  const baseDir = path.resolve(config.updateFilesDir);
+  const filePath = path.resolve(baseDir, cleanName);
+  if (!filePath.startsWith(baseDir + path.sep)) {
+    sendJson(res, 400, { ok: false, error: 'Niepoprawna sciezka pliku.' });
+    return;
+  }
+  if (!fs.existsSync(filePath)) {
+    sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
+    return;
+  }
+
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    'content-type': contentTypeForFile(cleanName),
+    'content-length': stat.size,
+    'cache-control': 'no-store',
+    'content-disposition': `attachment; filename="${cleanName.replaceAll('"', '')}"`
+  });
+  fs.createReadStream(filePath)
+    .on('error', () => res.destroy())
+    .pipe(res);
+}
+
 function closeWithError(ws, code, reason) {
   try {
     send(ws, { v: 1, type: 'error', code, reason });
@@ -384,12 +450,26 @@ function handleProfileQuery(ws, message) {
 }
 
 const httpServer = http.createServer((req, res) => {
-  if (req.url === '/healthz') {
-    res.writeHead(200, {
-      'content-type': 'application/json',
-      'cache-control': 'no-store'
-    });
-    res.end(JSON.stringify({ ok: true, time: new Date().toISOString() }));
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  if (url.pathname === '/healthz') {
+    sendJson(res, 200, { ok: true, time: new Date().toISOString() });
+    return;
+  }
+
+  if (url.pathname === '/updates/manifest.json' || url.pathname === '/update/manifest') {
+    serveUpdateManifest(res);
+    return;
+  }
+
+  if (url.pathname.startsWith('/updates/files/')) {
+    let fileName;
+    try {
+      fileName = decodeURIComponent(url.pathname.slice('/updates/files/'.length));
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'Niepoprawna nazwa pliku.' });
+      return;
+    }
+    serveUpdateFile(res, fileName);
     return;
   }
 

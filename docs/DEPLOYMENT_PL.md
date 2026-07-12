@@ -58,6 +58,17 @@ wss://chat.example.com
 - Nie publikuj pliku `.env`.
 - `SECURITY_LOGS=false` zostaw wylaczone, jesli nie debugujesz polaczen.
 
+### Aktualizacje aplikacji
+
+Relay udostepnia tez najnowsze paczki aplikacji przez:
+
+```text
+https://twoja-domena/updates/manifest.json
+https://twoja-domena/updates/files/nazwa-pliku.zip
+```
+
+Do publikowania nowych wersji uzyj instrukcji `docs/AKTUALIZACJE_PL.md`.
+
 ## 2. Klient Flutter
 
 Wymagania:
@@ -117,7 +128,7 @@ Artefakt bedzie w `build/linux/x64/release/bundle/`.
 
 ## 4. Najwazniejsze ograniczenia
 
-- Relay nie ma kolejki offline.
+- Relay ma ograniczona kolejke offline zaszyfrowanych pakietow. Nie przechowuje kluczy ani tresci jawnej.
 - Pliki sa trzymane w pamieci i maja domyslny limit 8 MB przed szyfrowaniem.
 - WebRTC bez wlasnego STUN/TURN moze nie przebic czesci NAT. Wtedy dziala relay fallback.
 - Klienci sa natywni: Android, Windows i Linux. Webowy wariant aplikacji nie jest utrzymywany.

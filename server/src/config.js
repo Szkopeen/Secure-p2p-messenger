@@ -26,6 +26,8 @@ export const config = Object.freeze({
   profileAvatarMaxBytes: readInt('PROFILE_AVATAR_MAX_BYTES', 1024 * 1024, 1024, 1024 * 1024),
   offlineQueueFile: process.env.OFFLINE_QUEUE_FILE || './data/offline-queue.json',
   publicProfilesFile: process.env.PUBLIC_PROFILES_FILE || './data/public-profiles.json',
+  updateManifestFile: process.env.UPDATE_MANIFEST_FILE || './updates/manifest.json',
+  updateFilesDir: process.env.UPDATE_FILES_DIR || './updates/files',
   rateLimitMessages: readInt('RATE_LIMIT_MESSAGES', 80, 1, 500),
   rateLimitWindowMs: readInt('RATE_LIMIT_WINDOW_MS', 10_000, 1000, 60_000),
   maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 4, 1, 20),

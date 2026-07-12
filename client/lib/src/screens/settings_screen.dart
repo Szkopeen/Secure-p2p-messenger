@@ -91,6 +91,82 @@ class SettingsScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               _SettingsSection(
+                title: 'Aktualizacje',
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.system_update_outlined),
+                    title: const Text('Aktualna wersja'),
+                    subtitle: Text(
+                      appState.currentVersionLabel.isEmpty
+                          ? 'Wczytywanie...'
+                          : appState.currentVersionLabel,
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'Sprawdz aktualizacje',
+                      onPressed:
+                          appState.checkingForUpdate ? null : _checkForUpdate,
+                      icon: appState.checkingForUpdate
+                          ? const SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh),
+                    ),
+                  ),
+                  if (appState.availableUpdate != null) ...[
+                    ListTile(
+                      leading: const Icon(Icons.download_outlined),
+                      title: Text(
+                        'Dostepna wersja ${appState.availableUpdate!.label}',
+                      ),
+                      subtitle: Text(
+                        '${appState.availableUpdate!.artifact.fileName}'
+                        ' (${_formatBytes(appState.availableUpdate!.artifact.size)})\n'
+                        '${appState.availableUpdate!.notesText}',
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: appState.downloadingUpdate
+                              ? null
+                              : () => _downloadUpdate(context),
+                          icon: const Icon(Icons.download),
+                          label: Text(
+                            appState.downloadingUpdate
+                                ? 'Pobieram...'
+                                : 'Pobierz aktualizacje',
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (appState.downloadingUpdate) ...[
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: LinearProgressIndicator(
+                        value: appState.updateDownloadProgress,
+                      ),
+                    ),
+                  ],
+                  if (appState.updateStatus != null)
+                    ListTile(
+                      leading: const Icon(Icons.info_outline),
+                      title: const Text('Status'),
+                      subtitle: Text(appState.updateStatus!),
+                    ),
+                  if (appState.downloadedUpdatePath != null)
+                    ListTile(
+                      leading: const Icon(Icons.folder_outlined),
+                      title: const Text('Pobrany plik'),
+                      subtitle: SelectableText(appState.downloadedUpdatePath!),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsSection(
                 title: 'Prywatnosc i dane',
                 children: [
                   const ListTile(
@@ -142,6 +218,37 @@ class SettingsScreen extends StatelessWidget {
         SnackBar(content: Text(error.toString())),
       );
     }
+  }
+
+  Future<void> _checkForUpdate() async {
+    await appState.checkForUpdate();
+  }
+
+  Future<void> _downloadUpdate(BuildContext context) async {
+    try {
+      await appState.downloadAvailableUpdate();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Aktualizacja zostala pobrana.')),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
+  }
+
+  String _formatBytes(int? bytes) {
+    if (bytes == null || bytes <= 0) return 'rozmiar nieznany';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    var value = bytes.toDouble();
+    var unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    return '${value.toStringAsFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}';
   }
 
   Future<void> _confirmWipe(BuildContext context) async {
