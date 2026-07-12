@@ -56,6 +56,7 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _signalEnvelopeToContact = {};
   final Map<String, bool> _p2pConnected = {};
   final Map<String, bool> _relayPresence = {};
+  final Set<String> _pendingInviteHandshakeContacts = {};
 
   IdentityKeyMaterial? _identity;
   UserProfile? _ownProfile;
@@ -332,6 +333,7 @@ class AppState extends ChangeNotifier {
     _signalEnvelopeToContact.clear();
     _p2pConnected.clear();
     _relayPresence.clear();
+    _pendingInviteHandshakeContacts.clear();
     _relayConnected = false;
     _retryingGroupInvites = false;
 
@@ -1002,6 +1004,7 @@ class AppState extends ChangeNotifier {
     _signalEnvelopeToContact.clear();
     _p2pConnected.clear();
     _relayPresence.clear();
+    _pendingInviteHandshakeContacts.clear();
     _presenceTimer?.cancel();
     _relayConnected = false;
     _retryingGroupInvites = false;
@@ -1126,9 +1129,16 @@ class AppState extends ChangeNotifier {
       return true;
     }
 
-    final hasSession = _sessions.containsKey(memberId);
-    if (!hasSession && !isContactOnline(memberId)) {
-      return false;
+    if (!_sessions.containsKey(memberId)) {
+      if (!isContactOnline(memberId)) {
+        _beginSessionForPendingInvite(contact);
+        return false;
+      }
+      try {
+        await _ensureSession(contact);
+      } catch (_) {
+        return false;
+      }
     }
 
     try {
@@ -1145,6 +1155,24 @@ class AppState extends ChangeNotifier {
     } catch (_) {
       return false;
     }
+  }
+
+  void _beginSessionForPendingInvite(Contact contact) {
+    if (_sessions.containsKey(contact.userId) ||
+        _pendingSessions.containsKey(contact.userId) ||
+        _pendingInviteHandshakeContacts.contains(contact.userId)) {
+      return;
+    }
+    _pendingInviteHandshakeContacts.add(contact.userId);
+
+    unawaited(
+      _ensureSession(contact).then((_) {
+        _pendingInviteHandshakeContacts.remove(contact.userId);
+        unawaited(_retryPendingGroupInvites());
+      }).catchError((_) {
+        // Zaproszenie pozostaje oczekujace i zostanie ponowione przy obecnosci.
+      }),
+    );
   }
 
   void _markGroupInviteSent(String groupId, String memberId) {
@@ -1315,6 +1343,7 @@ class AppState extends ChangeNotifier {
           wirePayload: event.payload,
         );
         _sessions[contact.userId] = accept.session;
+        _pendingInviteHandshakeContacts.remove(contact.userId);
         await _saveSessions();
         final abandonedPending = _pendingSessions.remove(contact.userId);
         abandonedPending?.completer.complete(accept.session);
@@ -1326,6 +1355,7 @@ class AppState extends ChangeNotifier {
         _signalEnvelopeToContact[signalId] = contact.userId;
         _addSystemMessage(contact.userId, 'Utworzono nowa sesje E2EE.');
         await _startP2pIfNeeded(contact);
+        unawaited(_retryPendingGroupInvites());
         break;
       case 'crypto-handshake-accept':
         final pending = _pendingSessions.remove(contact.userId);
@@ -1338,10 +1368,12 @@ class AppState extends ChangeNotifier {
           wirePayload: event.payload,
         );
         _sessions[contact.userId] = session;
+        _pendingInviteHandshakeContacts.remove(contact.userId);
         await _saveSessions();
         pending.completer.complete(session);
         _addSystemMessage(contact.userId, 'Sesja E2EE jest gotowa.');
         await _startP2pIfNeeded(contact);
+        unawaited(_retryPendingGroupInvites());
         break;
       case 'webrtc-offer':
       case 'webrtc-answer':
@@ -1469,7 +1501,23 @@ class AppState extends ChangeNotifier {
 
     final existingIndex =
         _groups.indexWhere((group) => group.groupId == groupId);
-    if (existingIndex >= 0) return;
+    if (existingIndex >= 0) {
+      final existing = _groups[existingIndex];
+      if (existing.isAcceptedBy(identity.userId)) return;
+      _groups[existingIndex] = existing.copyWith(
+        name: payload.groupName ?? existing.name,
+        memberIds: memberIds,
+        acceptedMemberIds: <String>{
+          ...existing.acceptedMemberIds,
+          from,
+        }.toList(growable: false),
+        invitedBy: from,
+        pendingInvite: true,
+      );
+      await _store.saveGroups(_groups);
+      notifyListeners();
+      return;
+    }
 
     final group = GroupConversation(
       groupId: groupId,
@@ -1485,6 +1533,16 @@ class AppState extends ChangeNotifier {
     _addSystemMessage(
       groupId,
       'Zaproszenie do grupy "${group.name}" od ${displayNameForUser(from)}.',
+    );
+    unawaited(
+      DesktopNotifier.instance.notifyIncoming(
+        senderName: displayNameForUser(from),
+        payload: PlainPayload.groupInvite(
+          groupId: group.groupId,
+          groupName: group.name,
+          groupMemberIds: group.memberIds,
+        ),
+      ),
     );
     notifyListeners();
   }

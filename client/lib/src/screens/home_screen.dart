@@ -20,6 +20,15 @@ class HomeScreen extends StatelessWidget {
       animation: appState,
       builder: (context, _) {
         final totalUnread = appState.totalUnreadCount;
+        final pendingGroupInvites = appState.groups
+            .where((group) => group.pendingInvite)
+            .toList(growable: false);
+        final activeGroups = appState.groups
+            .where((group) => !group.pendingInvite)
+            .toList(growable: false);
+        final hasContent = appState.contacts.isNotEmpty ||
+            pendingGroupInvites.isNotEmpty ||
+            activeGroups.isNotEmpty;
         return Scaffold(
           appBar: AppBar(
             title: Row(
@@ -80,10 +89,19 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               Expanded(
-                child: appState.contacts.isEmpty && appState.groups.isEmpty
+                child: !hasContent
                     ? const Center(child: Text('Brak kontaktow'))
                     : ListView(
                         children: [
+                          if (pendingGroupInvites.isNotEmpty) ...[
+                            const _SectionHeader(title: 'Zaproszenia do grup'),
+                            for (final group in pendingGroupInvites)
+                              _GroupInviteTile(
+                                appState: appState,
+                                group: group,
+                                subtitle: _groupSubtitle(group),
+                              ),
+                          ],
                           if (appState.contacts.isNotEmpty) ...[
                             const _SectionHeader(title: 'Kontakty'),
                             for (final contact in appState.contacts)
@@ -101,9 +119,9 @@ class HomeScreen extends StatelessWidget {
                                 ),
                               ),
                           ],
-                          if (appState.groups.isNotEmpty) ...[
+                          if (activeGroups.isNotEmpty) ...[
                             const _SectionHeader(title: 'Grupy'),
-                            for (final group in appState.groups)
+                            for (final group in activeGroups)
                               _GroupTile(
                                 appState: appState,
                                 group: group,
@@ -405,6 +423,87 @@ class _ContactTile extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _GroupInviteTile extends StatelessWidget {
+  const _GroupInviteTile({
+    required this.appState,
+    required this.group,
+    required this.subtitle,
+  });
+
+  final AppState appState;
+  final GroupConversation group;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colors.primaryContainer,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: colors.primary),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.mark_email_unread_outlined,
+                      color: colors.onPrimaryContainer),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          group.name,
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleMedium
+                              ?.copyWith(color: colors.onPrimaryContainer),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: colors.onPrimaryContainer),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        appState.respondToGroupInvite(group, false),
+                    icon: const Icon(Icons.close),
+                    label: const Text('Odrzuc'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () => appState.respondToGroupInvite(group, true),
+                    icon: const Icon(Icons.check),
+                    label: const Text('Akceptuj'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -379,13 +379,19 @@ function handleSignal(ws, state, message) {
   };
 
   const deliveredConnections = forwardToUser(message.to, envelope);
+  const canQueueSignal =
+    message.signalType === 'crypto-handshake-init' ||
+    message.signalType === 'crypto-handshake-accept';
+  const queued =
+    deliveredConnections === 0 && canQueueSignal ? enqueueOffline(message.to, envelope) : false;
   send(ws, {
     v: 1,
     type: 'sent',
     id: message.id,
     to: message.to,
     transport: 'signal',
-    deliveredConnections
+    deliveredConnections,
+    queued
   });
 }
 
