@@ -37,7 +37,7 @@ function readJson(file, fallback) {
 }
 
 function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
   fs.renameSync(tmp, file);
@@ -97,11 +97,12 @@ function bearerToken(req) {
 
 export class V2Store {
   constructor({ dataDir }) {
-    this.dataDir = dataDir;
-    this.usersFile = path.join(dataDir, 'users.json');
-    this.sessionsFile = path.join(dataDir, 'sessions.json');
-    this.conversationsFile = path.join(dataDir, 'conversations.json');
-    this.messagesFile = path.join(dataDir, 'messages.json');
+    this.dataDir = path.resolve(dataDir);
+    fs.mkdirSync(this.dataDir, { recursive: true });
+    this.usersFile = path.join(this.dataDir, 'users.json');
+    this.sessionsFile = path.join(this.dataDir, 'sessions.json');
+    this.conversationsFile = path.join(this.dataDir, 'conversations.json');
+    this.messagesFile = path.join(this.dataDir, 'messages.json');
     this.users = readJson(this.usersFile, { v: 1, users: {} });
     this.sessions = readJson(this.sessionsFile, { v: 1, sessions: {} });
     this.conversations = readJson(this.conversationsFile, { v: 1, conversations: {} });
