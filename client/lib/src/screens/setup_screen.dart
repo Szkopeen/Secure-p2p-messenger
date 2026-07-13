@@ -14,6 +14,10 @@ class SetupScreen extends StatefulWidget {
 
 class _SetupScreenState extends State<SetupScreen> {
   final _formKey = GlobalKey<FormState>();
+  final _cloudFormKey = GlobalKey<FormState>();
+  final _cloudServerUrl = TextEditingController(text: 'https://chat.szkpn.pl');
+  final _cloudUsername = TextEditingController();
+  final _cloudPassword = TextEditingController();
   final _userId = TextEditingController();
   final _serverUrl = TextEditingController(text: 'ws://127.0.0.1:8443');
   final _relayToken = TextEditingController();
@@ -22,6 +26,9 @@ class _SetupScreenState extends State<SetupScreen> {
 
   @override
   void dispose() {
+    _cloudServerUrl.dispose();
+    _cloudUsername.dispose();
+    _cloudPassword.dispose();
     _userId.dispose();
     _serverUrl.dispose();
     _relayToken.dispose();
@@ -42,49 +49,73 @@ class _SetupScreenState extends State<SetupScreen> {
               child: ListView(
                 shrinkWrap: true,
                 children: [
-                  TextFormField(
-                    controller: _userId,
-                    decoration: const InputDecoration(
-                      labelText: 'Twoj identyfikator',
-                      prefixIcon: Icon(Icons.person_outline),
+                  Form(
+                    key: _cloudFormKey,
+                    child: Column(
+                      children: [
+                        TextFormField(
+                          controller: _cloudServerUrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Adres serwera',
+                            prefixIcon: Icon(Icons.cloud_outlined),
+                          ),
+                          validator: (value) {
+                            final text = (value ?? '').trim();
+                            if (text.isEmpty) return 'Podaj adres serwera';
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _cloudUsername,
+                          decoration: const InputDecoration(
+                            labelText: 'Login',
+                            prefixIcon: Icon(Icons.person_outline),
+                          ),
+                          validator: (value) {
+                            if ((value ?? '').trim().length < 3) {
+                              return 'Minimum 3 znaki';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _cloudPassword,
+                          decoration: const InputDecoration(
+                            labelText: 'Haslo',
+                            prefixIcon: Icon(Icons.password_outlined),
+                          ),
+                          obscureText: true,
+                          validator: (value) {
+                            if ((value ?? '').length < 8) {
+                              return 'Minimum 8 znakow';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: _saving ? null : _loginCloud,
+                                icon: const Icon(Icons.login),
+                                label: const Text('Zaloguj'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _saving ? null : _registerCloud,
+                                icon: const Icon(Icons.person_add_alt_1),
+                                label: const Text('Utworz konto'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                    validator: (value) {
-                      if ((value ?? '').trim().length < 3) {
-                        return 'Minimum 3 znaki';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    controller: _serverUrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Adres relay',
-                      prefixIcon: Icon(Icons.dns_outlined),
-                    ),
-                    validator: (value) {
-                      final text = (value ?? '').trim();
-                      if (!text.startsWith('ws://') &&
-                          !text.startsWith('wss://')) {
-                        return 'Uzyj ws:// albo wss://';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
-                    controller: _relayToken,
-                    decoration: const InputDecoration(
-                      labelText: 'Token relay',
-                      prefixIcon: Icon(Icons.key_outlined),
-                    ),
-                    obscureText: true,
-                    validator: (value) {
-                      if ((value ?? '').trim().length < 32) {
-                        return 'Minimum 32 znaki';
-                      }
-                      return null;
-                    },
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 12),
@@ -92,22 +123,67 @@ class _SetupScreenState extends State<SetupScreen> {
                         style: TextStyle(
                             color: Theme.of(context).colorScheme.error)),
                   ],
-                  const SizedBox(height: 20),
-                  FilledButton.icon(
-                    onPressed: _saving ? null : _save,
-                    icon: _saving
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.lock_outline),
-                    label: const Text('Utworz tozsamosc'),
-                  ),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    onPressed: _saving ? null : _importAccount,
-                    icon: const Icon(Icons.devices_other_outlined),
-                    label: const Text('Importuj konto z pliku'),
+                  const SizedBox(height: 16),
+                  ExpansionTile(
+                    title: const Text('Stary tryb P2P / relay'),
+                    children: [
+                      TextFormField(
+                        controller: _userId,
+                        decoration: const InputDecoration(
+                          labelText: 'Twoj identyfikator',
+                          prefixIcon: Icon(Icons.person_outline),
+                        ),
+                        validator: (value) {
+                          if ((value ?? '').trim().length < 3) {
+                            return 'Minimum 3 znaki';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _serverUrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Adres relay',
+                          prefixIcon: Icon(Icons.dns_outlined),
+                        ),
+                        validator: (value) {
+                          final text = (value ?? '').trim();
+                          if (!text.startsWith('ws://') &&
+                              !text.startsWith('wss://')) {
+                            return 'Uzyj ws:// albo wss://';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: _relayToken,
+                        decoration: const InputDecoration(
+                          labelText: 'Token relay',
+                          prefixIcon: Icon(Icons.key_outlined),
+                        ),
+                        obscureText: true,
+                        validator: (value) {
+                          if ((value ?? '').trim().length < 32) {
+                            return 'Minimum 32 znaki';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      FilledButton.icon(
+                        onPressed: _saving ? null : _save,
+                        icon: const Icon(Icons.lock_outline),
+                        label: const Text('Utworz tozsamosc legacy'),
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _saving ? null : _importAccount,
+                        icon: const Icon(Icons.devices_other_outlined),
+                        label: const Text('Importuj konto z pliku'),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 20),
                   _ChatControlPanel(onCopy: _copyUrl),
@@ -131,6 +207,44 @@ class _SetupScreenState extends State<SetupScreen> {
         userId: _userId.text,
         serverUrl: _serverUrl.text,
         relayToken: _relayToken.text,
+      );
+    } catch (error) {
+      setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _loginCloud() async {
+    if (!_cloudFormKey.currentState!.validate()) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.appState.loginCloudAccount(
+        serverUrl: _cloudServerUrl.text,
+        username: _cloudUsername.text,
+        password: _cloudPassword.text,
+      );
+    } catch (error) {
+      setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _registerCloud() async {
+    if (!_cloudFormKey.currentState!.validate()) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.appState.registerCloudAccount(
+        serverUrl: _cloudServerUrl.text,
+        username: _cloudUsername.text,
+        password: _cloudPassword.text,
       );
     } catch (error) {
       setState(() => _error = error.toString());
@@ -232,7 +346,8 @@ class _ChatControlPanel extends StatelessWidget {
   final ValueChanged<String> onCopy;
 
   static const _mullvadUrl = 'https://mullvad.net/en/chatcontrol';
-  static const _breyerUrl = 'https://www.patrick-breyer.de/en/posts/chat-control/';
+  static const _breyerUrl =
+      'https://www.patrick-breyer.de/en/posts/chat-control/';
 
   @override
   Widget build(BuildContext context) {

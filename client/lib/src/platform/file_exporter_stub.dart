@@ -3,5 +3,6 @@ Future<void> saveReceivedFileImpl({
   required List<int> bytes,
   String? mimeType,
 }) {
-  throw UnsupportedError('Zapisywanie plikow nie jest obslugiwane na tej platformie.');
+  throw UnsupportedError(
+      'Zapisywanie plikow nie jest obslugiwane na tej platformie.');
 }

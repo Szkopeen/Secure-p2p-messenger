@@ -307,8 +307,8 @@ class RelayClient {
           break;
         case 'directory':
           final entries = (message['entries'] as List? ?? const [])
-              .map((item) =>
-                  DirectoryEntry.fromJson((item as Map).cast<String, dynamic>()))
+              .map((item) => DirectoryEntry.fromJson(
+                  (item as Map).cast<String, dynamic>()))
               .toList(growable: false);
           _events.add(RelayDirectory(entries));
           break;

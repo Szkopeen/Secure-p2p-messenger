@@ -23,7 +23,8 @@ class MessageArchive {
     if (!await file.exists()) return [];
 
     try {
-      final encrypted = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final encrypted =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       final key = await _archiveSecretKey();
       final box = SecretBox(
         unb64(encrypted['ciphertext'] as String),
@@ -35,10 +36,12 @@ class MessageArchive {
         secretKey: key,
         aad: utf8Bytes(_aad),
       );
-      final decoded = jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
+      final decoded =
+          jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
       final items = decoded['messages'] as List<dynamic>? ?? const [];
       return items
-          .map((item) => ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
+          .map((item) =>
+              ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
           .toList(growable: false);
     } catch (_) {
       // Przy zmianie klucza albo uszkodzeniu pliku nie pokazujemy plaintextu ani stack trace.
@@ -95,6 +98,7 @@ class MessageArchive {
 
   Future<File> _archiveFile() async {
     final directory = await getApplicationSupportDirectory();
-    return File('${directory.path}${Platform.pathSeparator}message_archive.enc.json');
+    return File(
+        '${directory.path}${Platform.pathSeparator}message_archive.enc.json');
   }
 }

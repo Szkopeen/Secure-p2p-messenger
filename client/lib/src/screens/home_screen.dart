@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../app_state.dart';
 import '../crypto/codec.dart';
+import '../models/cloud_account.dart';
 import '../models/contact.dart';
 import '../models/contact_invite.dart';
 import '../models/directory_entry.dart';
@@ -76,7 +77,9 @@ class HomeScreen extends StatelessWidget {
           ),
           floatingActionButton: FloatingActionButton(
             tooltip: 'Dodaj kontakt',
-            onPressed: () => _showAddContactDialog(context),
+            onPressed: () => appState.cloudMode
+                ? _openCloudUsers(context)
+                : _showAddContactDialog(context),
             child: const Icon(Icons.person_add_alt_1),
           ),
           body: Column(
@@ -237,6 +240,42 @@ class HomeScreen extends StatelessWidget {
     name.dispose();
     userId.dispose();
     publicKey.dispose();
+  }
+
+  Future<void> _openCloudUsers(BuildContext context) async {
+    await appState.refreshCloudUsers();
+    if (!context.mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return AnimatedBuilder(
+          animation: appState,
+          builder: (context, _) {
+            final users = appState.cloudUsers;
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    'Uzytkownicy',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                if (users.isEmpty)
+                  const ListTile(
+                    leading: Icon(Icons.info_outline),
+                    title: Text('Brak innych kont na serwerze'),
+                  ),
+                for (final user in users)
+                  _CloudUserTile(appState: appState, user: user),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   void _openDirectory(BuildContext context) {
@@ -637,6 +676,47 @@ class _ContactTile extends StatelessWidget {
     );
     if (confirmed != true) return;
     await appState.removeContact(contact);
+  }
+}
+
+class _CloudUserTile extends StatelessWidget {
+  const _CloudUserTile({
+    required this.appState,
+    required this.user,
+  });
+
+  final AppState appState;
+  final CloudPublicUser user;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial = user.displayName.isEmpty
+        ? '?'
+        : user.displayName.substring(0, 1).toUpperCase();
+    return ListTile(
+      leading: _AvatarView(
+        bytesBase64: null,
+        fallback: initial,
+        online: true,
+      ),
+      title: Text(user.displayName),
+      subtitle: Text(user.username),
+      trailing: FilledButton.icon(
+        onPressed: () async {
+          try {
+            await appState.startCloudConversation(user);
+            if (context.mounted) Navigator.of(context).pop();
+          } catch (error) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(error.toString())),
+            );
+          }
+        },
+        icon: const Icon(Icons.chat_outlined),
+        label: const Text('Czat'),
+      ),
+    );
   }
 }
 

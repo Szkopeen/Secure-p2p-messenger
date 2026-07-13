@@ -19,6 +19,7 @@ import {
   validateSignal
 } from './protocol.js';
 import { SlidingWindowRateLimiter } from './rateLimiter.js';
+import { V2Store, handleV2Http, handleV2WebSocket } from './v2Store.js';
 
 const SAFE_USER_ID = /^[a-zA-Z0-9_.:@-]{3,128}$/;
 
@@ -28,6 +29,7 @@ const profiles = new Map();
 const offlineQueues = new Map();
 const publicDirectory = new Map();
 const bannedUsers = new Set();
+const v2Store = new V2Store({ dataDir: config.v2DataDir });
 
 loadKnownUsers();
 loadProfiles();
@@ -1115,6 +1117,11 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === '/v2' || url.pathname.startsWith('/v2/')) {
+    handleV2Http(v2Store, req, res, url);
+    return;
+  }
+
   if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
     handleAdminRequest(req, res, url);
     return;
@@ -1148,6 +1155,12 @@ const wss = new WebSocketServer({
 });
 
 wss.on('connection', (ws, request) => {
+  const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
+  if (requestUrl.pathname === '/v2/ws') {
+    handleV2WebSocket(v2Store, ws, request);
+    return;
+  }
+
   const state = {
     authenticated: false,
     connectionId: crypto.randomUUID(),

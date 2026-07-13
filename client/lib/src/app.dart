@@ -96,7 +96,8 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
               body: Center(child: CircularProgressIndicator()),
             );
           }
-          if (!appState.hasIdentity || appState.relaySettings == null) {
+          if (!appState.hasAccount ||
+              (!appState.cloudMode && appState.relaySettings == null)) {
             return SetupScreen(appState: appState);
           }
           return HomeScreen(appState: appState);

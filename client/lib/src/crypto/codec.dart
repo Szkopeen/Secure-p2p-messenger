@@ -13,7 +13,8 @@ Uint8List unb64(String value) {
 
 Uint8List secureRandomBytes(int length) {
   return Uint8List.fromList(
-    List<int>.generate(length, (_) => _secureRandom.nextInt(256), growable: false),
+    List<int>.generate(length, (_) => _secureRandom.nextInt(256),
+        growable: false),
   );
 }
 

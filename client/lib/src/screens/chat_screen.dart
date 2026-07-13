@@ -109,7 +109,9 @@ class _ChatScreenState extends State<ChatScreen> {
                       Text(
                         contact == null
                             ? _groupStatus(group!)
-                            : '${online ? 'Online' : 'Offline'} / ${p2p ? 'P2P' : 'Relay'}',
+                            : widget.appState.cloudMode
+                                ? 'Cloud sync'
+                                : '${online ? 'Online' : 'Offline'} / ${p2p ? 'P2P' : 'Relay'}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],

@@ -30,6 +30,7 @@ export const config = Object.freeze({
   publicProfilesFile: process.env.PUBLIC_PROFILES_FILE || './data/public-profiles.json',
   publicDirectoryFile: process.env.PUBLIC_DIRECTORY_FILE || './data/public-directory.json',
   bannedUsersFile: process.env.BANNED_USERS_FILE || './data/banned-users.json',
+  v2DataDir: process.env.V2_DATA_DIR || './data-v2',
   updateManifestFile: process.env.UPDATE_MANIFEST_FILE || './updates/manifest.json',
   updateFilesDir: process.env.UPDATE_FILES_DIR || './updates/files',
   rateLimitMessages: readInt('RATE_LIMIT_MESSAGES', 80, 1, 500),

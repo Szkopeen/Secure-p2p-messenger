@@ -54,7 +54,8 @@ class WebRtcTransport {
     final init = RTCDataChannelInit()
       ..ordered = true
       ..maxRetransmits = 5;
-    final channel = await peer.connection.createDataChannel('secure-packets', init);
+    final channel =
+        await peer.connection.createDataChannel('secure-packets', init);
     _bindDataChannel(peerId, peer, channel);
 
     final offer = await peer.connection.createOffer(<String, dynamic>{});
@@ -83,9 +84,11 @@ class WebRtcTransport {
     }
   }
 
-  Future<bool> sendEncryptedPacket(String peerId, Map<String, dynamic> packet) async {
+  Future<bool> sendEncryptedPacket(
+      String peerId, Map<String, dynamic> packet) async {
     final channel = _peers[peerId]?.dataChannel;
-    if (channel == null || channel.state != RTCDataChannelState.RTCDataChannelOpen) {
+    if (channel == null ||
+        channel.state != RTCDataChannelState.RTCDataChannelOpen) {
       return false;
     }
 
@@ -135,7 +138,8 @@ class WebRtcTransport {
     };
 
     connection.onConnectionState = (state) {
-      final connected = state == RTCPeerConnectionState.RTCPeerConnectionStateConnected;
+      final connected =
+          state == RTCPeerConnectionState.RTCPeerConnectionStateConnected;
       onPeerStateChanged?.call(peerId, connected);
     };
 
@@ -173,7 +177,8 @@ class WebRtcTransport {
     await _flushCandidates(peer);
   }
 
-  Future<void> _handleCandidate(String from, Map<String, dynamic> payload) async {
+  Future<void> _handleCandidate(
+      String from, Map<String, dynamic> payload) async {
     final peer = await _getOrCreatePeer(from);
     final candidate = RTCIceCandidate(
       requiredString(payload, 'candidate'),
@@ -196,11 +201,13 @@ class WebRtcTransport {
     peer.pendingCandidates.clear();
   }
 
-  void _bindDataChannel(String peerId, _PeerState peer, RTCDataChannel channel) {
+  void _bindDataChannel(
+      String peerId, _PeerState peer, RTCDataChannel channel) {
     peer.dataChannel = channel;
 
     channel.onDataChannelState = (state) {
-      onPeerStateChanged?.call(peerId, state == RTCDataChannelState.RTCDataChannelOpen);
+      onPeerStateChanged?.call(
+          peerId, state == RTCDataChannelState.RTCDataChannelOpen);
     };
 
     channel.onMessage = (message) {

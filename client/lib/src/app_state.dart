@@ -11,7 +11,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import 'crypto/codec.dart';
+import 'crypto/cloud_crypto.dart';
 import 'crypto/crypto_service.dart';
+import 'models/cloud_account.dart';
 import 'models/contact.dart';
 import 'models/contact_invite.dart';
 import 'models/directory_entry.dart';
@@ -25,6 +27,7 @@ import 'models/user_profile.dart';
 import 'network/relay_client.dart';
 import 'p2p/webrtc_transport.dart';
 import 'platform/file_exporter.dart';
+import 'services/cloud_api_client.dart';
 import 'services/desktop_notifier.dart';
 import 'storage/message_archive.dart';
 import 'storage/secure_store.dart';
@@ -47,6 +50,7 @@ class AppState extends ChangeNotifier {
 
   final SecureStore _store;
   final CryptoService _crypto;
+  final CloudCrypto _cloudCrypto = CloudCrypto();
   late final MessageArchive _messageArchive;
   final Uuid _uuid = const Uuid();
   final AesGcm _accountExportAead = AesGcm.with256bits();
@@ -64,9 +68,17 @@ class AppState extends ChangeNotifier {
   final Map<String, bool> _p2pConnected = {};
   final Map<String, bool> _relayPresence = {};
   final Map<String, ChatMessage> _pendingDeviceSyncMessages = {};
+  final Map<String, CloudConversation> _cloudConversations = {};
+  final Map<String, String> _cloudContactToConversation = {};
+  final Map<String, int> _cloudLastSeq = {};
+  final List<CloudPublicUser> _cloudUsers = [];
   final Set<String> _pendingInviteHandshakeContacts = {};
 
   IdentityKeyMaterial? _identity;
+  CloudSession? _cloudSession;
+  CloudVault? _cloudVault;
+  CloudApiClient? _cloudClient;
+  StreamSubscription<CloudEvent>? _cloudSubscription;
   UserProfile? _ownProfile;
   RelaySettings? _relaySettings;
   RelayClient? _relay;
@@ -95,11 +107,14 @@ class AppState extends ChangeNotifier {
 
   bool get initializing => _initializing;
   bool get hasIdentity => _identity != null;
+  bool get cloudMode => _cloudSession != null;
+  bool get hasAccount => hasIdentity || cloudMode;
   bool get relayConnected => _relayConnected;
   String? get status => _status;
-  String? get ownUserId => _identity?.userId;
+  String? get ownUserId => _cloudSession?.username ?? _identity?.userId;
   String? get ownPublicKey =>
-      _identity == null ? null : b64(_identity!.publicKey.bytes);
+      _cloudVault?.keyAgreementPublicKey ??
+      (_identity == null ? null : b64(_identity!.publicKey.bytes));
   UserProfile? get ownProfile => _ownProfile;
   RelaySettings? get relaySettings => _relaySettings;
   List<Contact> get contacts => List.unmodifiable(_contacts);
@@ -107,6 +122,7 @@ class AppState extends ChangeNotifier {
   List<GroupConversation> get groups => List.unmodifiable(_groups);
   List<DirectoryEntry> get directoryEntries =>
       List.unmodifiable(_directoryEntries);
+  List<CloudPublicUser> get cloudUsers => List.unmodifiable(_cloudUsers);
   bool get directoryEnabled => _directoryEnabled;
   bool get loadingDirectory => _loadingDirectory;
   String? get directoryStatus => _directoryStatus;
@@ -138,6 +154,7 @@ class AppState extends ChangeNotifier {
   bool isP2pConnected(String contactId) => _p2pConnected[contactId] == true;
 
   bool isContactOnline(String contactId) {
+    if (cloudMode) return true;
     return _p2pConnected[contactId] == true ||
         _relayPresence[contactId] == true;
   }
@@ -159,12 +176,15 @@ class AppState extends ChangeNotifier {
 
   String displayNameForUser(String userId) {
     return _contactById(userId)?.displayName ??
-        (userId == _identity?.userId ? 'Ty' : userId);
+        (userId == _cloudSession?.userId || userId == _identity?.userId
+            ? 'Ty'
+            : userId);
   }
 
   Future<void> initialize() async {
     try {
       await _loadPackageInfo();
+      _cloudSession = await _store.loadCloudSession();
       _identity = await _store.loadIdentity();
       _ownProfile = await _store.loadOwnProfile();
       _relaySettings = await _store.loadRelaySettings();
@@ -183,7 +203,10 @@ class AppState extends ChangeNotifier {
       _initializing = false;
       notifyListeners();
 
-      if (_identity != null && _relaySettings != null) {
+      if (_cloudSession != null) {
+        await connectCloud();
+        unawaited(checkForUpdate(silent: true));
+      } else if (_identity != null && _relaySettings != null) {
         await connectRelay();
         unawaited(checkForUpdate(silent: true));
       }
@@ -213,6 +236,132 @@ class AppState extends ChangeNotifier {
     await _store.saveRelaySettings(_relaySettings!);
     await connectRelay();
     unawaited(checkForUpdate(silent: true));
+  }
+
+  Future<void> registerCloudAccount({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    final normalizedServer = _normalizeCloudServerUrl(serverUrl);
+    final normalizedUsername = username.trim().toLowerCase();
+    if (normalizedUsername.length < 3) {
+      throw ArgumentError('Login musi miec minimum 3 znaki.');
+    }
+    if (password.length < 8) {
+      throw ArgumentError('Haslo musi miec minimum 8 znakow.');
+    }
+
+    final vaultSalt = b64(secureRandomBytes(16));
+    final vaultKey = await _cloudCrypto.deriveVaultKey(
+      password: password,
+      salt: vaultSalt,
+    );
+    final vault = await _cloudCrypto.createVault();
+    final encryptedVault = await _cloudCrypto.encryptVault(vault, vaultKey);
+    final deviceId = _uuid.v4();
+    final client = CloudApiClient(serverUrl: normalizedServer);
+    final result = await client.register(
+      username: normalizedUsername,
+      password: password,
+      deviceId: deviceId,
+      deviceName: Platform.localHostname,
+      keyAgreementPublicKey: vault.keyAgreementPublicKey,
+      vaultSalt: vaultSalt,
+      vaultKey: vaultKey,
+      encryptedVault: encryptedVault,
+    );
+    await _activateCloudSession(result.session, vault);
+    await _cloudClient?.saveVault(encryptedVault);
+    await connectCloud();
+  }
+
+  Future<void> loginCloudAccount({
+    required String serverUrl,
+    required String username,
+    required String password,
+  }) async {
+    final normalizedServer = _normalizeCloudServerUrl(serverUrl);
+    final deviceId = _uuid.v4();
+    final probe = CloudApiClient(serverUrl: normalizedServer);
+    final loginProbe = await probe.login(
+      username: username.trim().toLowerCase(),
+      password: password,
+      deviceId: deviceId,
+      deviceName: Platform.localHostname,
+      vaultKey: '',
+    );
+    final vaultKey = await _cloudCrypto.deriveVaultKey(
+      password: password,
+      salt: loginProbe.session.vaultSalt,
+    );
+    final session = CloudSession(
+      serverUrl: loginProbe.session.serverUrl,
+      token: loginProbe.session.token,
+      userId: loginProbe.session.userId,
+      username: loginProbe.session.username,
+      displayName: loginProbe.session.displayName,
+      deviceId: loginProbe.session.deviceId,
+      vaultSalt: loginProbe.session.vaultSalt,
+      vaultKey: vaultKey,
+    );
+    final encryptedVault = loginProbe.encryptedVault;
+    if (encryptedVault == null) {
+      throw StateError('Konto nie ma vaulta z kluczami.');
+    }
+    final vault = await _cloudCrypto.decryptVault(encryptedVault, vaultKey);
+    await _activateCloudSession(session, vault);
+    await connectCloud();
+  }
+
+  Future<void> _activateCloudSession(
+    CloudSession session,
+    CloudVault vault,
+  ) async {
+    await _relaySubscription?.cancel();
+    await _relay?.dispose();
+    await _p2p?.dispose();
+    await _cloudSubscription?.cancel();
+    await _cloudClient?.dispose();
+
+    _cloudSession = session;
+    _cloudVault = vault;
+    _cloudClient = CloudApiClient(
+      serverUrl: session.serverUrl,
+      token: session.token,
+    );
+    _identity = null;
+    _relaySettings = null;
+    _relay = null;
+    _p2p = null;
+    _contacts.clear();
+    _groups.clear();
+    _contactInvites.clear();
+    _directoryEntries.clear();
+    _messages.clear();
+    _sessions.clear();
+    _pendingSessions.clear();
+    _cloudConversations.clear();
+    _cloudContactToConversation.clear();
+    _cloudLastSeq.clear();
+    _relayConnected = false;
+    await _store.saveCloudSession(session);
+    await _persistMessages();
+    notifyListeners();
+  }
+
+  String _normalizeCloudServerUrl(String value) {
+    final trimmed = value.trim();
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+    if (trimmed.startsWith('ws://')) {
+      return trimmed.replaceFirst('ws://', 'http://');
+    }
+    if (trimmed.startsWith('wss://')) {
+      return trimmed.replaceFirst('wss://', 'https://');
+    }
+    return 'https://$trimmed';
   }
 
   Future<void> exportAccountPackage(String passphrase) async {
@@ -562,7 +711,280 @@ class AppState extends ChangeNotifier {
     _setStatus('Laczenie z relay...');
   }
 
+  Future<void> connectCloud() async {
+    final session = _cloudSession;
+    if (session == null) return;
+    await _cloudSubscription?.cancel();
+    await _cloudClient?.dispose();
+    _cloudClient = CloudApiClient(
+      serverUrl: session.serverUrl,
+      token: session.token,
+    );
+    _relayConnected = false;
+    _setStatus('Laczenie z kontem...');
+
+    final encryptedVault = await _cloudClient!.vault();
+    if (encryptedVault != null) {
+      _cloudVault =
+          await _cloudCrypto.decryptVault(encryptedVault, session.vaultKey);
+    }
+    await refreshCloudUsers();
+    await _loadCloudConversations();
+    _cloudSubscription = _cloudClient!.events.listen(
+      (event) => unawaited(_handleCloudEvent(event)),
+    );
+    await _cloudClient!.connectEvents();
+    _relayConnected = true;
+    _setStatus('Konto polaczone.');
+    notifyListeners();
+  }
+
+  Future<void> refreshCloudUsers() async {
+    final client = _cloudClient;
+    if (client == null || _cloudSession == null) return;
+    final users = await client.users();
+    _cloudUsers
+      ..clear()
+      ..addAll(users);
+    notifyListeners();
+  }
+
+  Future<void> _loadCloudConversations() async {
+    final client = _cloudClient;
+    final session = _cloudSession;
+    if (client == null || session == null) return;
+    final conversations = await client.conversations();
+    for (final conversation in conversations) {
+      await _rememberCloudConversation(conversation);
+      await _loadCloudMessages(conversation);
+    }
+  }
+
+  Future<void> _rememberCloudConversation(
+    CloudConversation conversation,
+  ) async {
+    final session = _cloudSession;
+    if (session == null) return;
+    _cloudConversations[conversation.conversationId] = conversation;
+    String? peerId;
+    for (final memberId in conversation.memberIds) {
+      if (memberId != session.userId) {
+        peerId = memberId;
+        break;
+      }
+    }
+    if (peerId == null) return;
+    _cloudContactToConversation[peerId] = conversation.conversationId;
+
+    CloudPublicUser? peer;
+    for (final user in _cloudUsers) {
+      if (user.userId == peerId) {
+        peer = user;
+        break;
+      }
+    }
+    final existing = _contactById(peerId);
+    if (existing == null && peer != null) {
+      _contacts.add(
+        Contact(
+          userId: peer.userId,
+          displayName: peer.displayName,
+          identityPublicKey: peer.keyAgreementPublicKey,
+        ),
+      );
+      _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+      await _store.saveContacts(_contacts);
+    }
+    await _ensureCloudConversationKey(conversation);
+  }
+
+  Future<void> _loadCloudMessages(CloudConversation conversation) async {
+    final client = _cloudClient;
+    if (client == null) return;
+    final afterSeq = _cloudLastSeq[conversation.conversationId] ?? 0;
+    final messages = await client.messages(
+      conversationId: conversation.conversationId,
+      afterSeq: afterSeq,
+    );
+    for (final message in messages) {
+      await _applyCloudMessage(message, notify: false);
+    }
+    if (messages.isNotEmpty) {
+      await _persistMessages();
+      notifyListeners();
+    }
+  }
+
+  Future<void> _handleCloudEvent(CloudEvent event) async {
+    switch (event) {
+      case CloudReady():
+        _relayConnected = true;
+        _setStatus('Konto polaczone.');
+        break;
+      case CloudConversationEvent():
+        await _rememberCloudConversation(event.conversation);
+        notifyListeners();
+        break;
+      case CloudMessageEvent():
+        await _applyCloudMessage(event.message);
+        break;
+      case CloudProblem():
+        _relayConnected = false;
+        _setStatus(event.message);
+        break;
+    }
+  }
+
+  Future<void> _saveCloudVault() async {
+    final client = _cloudClient;
+    final vault = _cloudVault;
+    final session = _cloudSession;
+    if (client == null || vault == null || session == null) return;
+    final encryptedVault =
+        await _cloudCrypto.encryptVault(vault, session.vaultKey);
+    await client.saveVault(encryptedVault);
+  }
+
+  Future<String?> _ensureCloudConversationKey(
+    CloudConversation conversation,
+  ) async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    if (session == null || vault == null) return null;
+    final existing = vault.conversationKeys[conversation.conversationId];
+    if (existing != null) return existing;
+    final envelope = conversation.memberKeys[session.userId];
+    if (envelope is! Map) return null;
+    final key = await _cloudCrypto.unwrapConversationKey(
+      vault: vault,
+      localUserId: session.userId,
+      envelope: envelope.cast<String, dynamic>(),
+    );
+    final keys = Map<String, String>.of(vault.conversationKeys);
+    keys[conversation.conversationId] = key;
+    _cloudVault = vault.copyWith(conversationKeys: keys);
+    await _saveCloudVault();
+    return key;
+  }
+
+  Future<void> _applyCloudMessage(
+    CloudStoredMessage stored, {
+    bool notify = true,
+  }) async {
+    final session = _cloudSession;
+    if (session == null) return;
+    final conversation = _cloudConversations[stored.conversationId];
+    if (conversation == null) return;
+    final key = await _ensureCloudConversationKey(conversation);
+    if (key == null) return;
+
+    String? peerId;
+    for (final memberId in conversation.memberIds) {
+      if (memberId != session.userId) {
+        peerId = memberId;
+        break;
+      }
+    }
+    if (peerId == null) return;
+
+    final decrypted = await _cloudCrypto.decryptMessage(
+      conversationId: stored.conversationId,
+      conversationKey: key,
+      payload: stored.payload,
+    );
+    final direction = stored.senderUserId == session.userId
+        ? MessageDirection.outbound
+        : MessageDirection.inbound;
+    final added = _addMessage(
+      ChatMessage(
+        id: decrypted.messageId,
+        contactId: peerId,
+        direction: direction,
+        payload: decrypted.payload,
+        createdAt: decrypted.createdAt,
+        status: direction == MessageDirection.outbound
+            ? MessageStatus.sent
+            : MessageStatus.delivered,
+        senderId: stored.senderUserId,
+        transport: 'cloud',
+      ),
+    );
+    final currentSeq = _cloudLastSeq[stored.conversationId] ?? 0;
+    if (stored.seq > currentSeq) {
+      _cloudLastSeq[stored.conversationId] = stored.seq;
+    }
+    if (added && direction == MessageDirection.inbound) {
+      final contact = _contactById(peerId);
+      unawaited(
+        DesktopNotifier.instance.notifyIncoming(
+          senderName: contact?.displayName ?? peerId,
+          payload: decrypted.payload,
+        ),
+      );
+    }
+    if (notify) notifyListeners();
+  }
+
+  Future<void> _sendCloudPayload(Contact contact, PlainPayload payload) async {
+    final session = _cloudSession;
+    final client = _cloudClient;
+    if (session == null || client == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    await _startCloudDirectContact(contact);
+    final conversationId = _cloudContactToConversation[contact.userId];
+    if (conversationId == null) {
+      throw StateError('Nie mozna utworzyc rozmowy cloud.');
+    }
+    final conversation = _cloudConversations[conversationId];
+    if (conversation == null) {
+      throw StateError('Brak rozmowy cloud.');
+    }
+    final key = await _ensureCloudConversationKey(conversation);
+    if (key == null) {
+      throw StateError('Brak klucza rozmowy cloud.');
+    }
+    final encrypted = await _cloudCrypto.encryptMessage(
+      conversationId: conversationId,
+      senderUserId: session.userId,
+      conversationKey: key,
+      payload: payload,
+    );
+    final messageId = requiredString(encrypted, 'messageId');
+    _addMessage(
+      ChatMessage(
+        id: messageId,
+        contactId: contact.userId,
+        direction: MessageDirection.outbound,
+        payload: payload,
+        createdAt: DateTime.parse(
+          requiredString(asStringKeyMap(encrypted['aad'], 'aad'), 'createdAt'),
+        ),
+        status: MessageStatus.pending,
+        senderId: session.userId,
+        transport: 'cloud',
+      ),
+    );
+    final stored = await client.sendMessage(
+      conversationId: conversationId,
+      messageId: messageId,
+      payload: encrypted,
+    );
+    _updateMessage(
+      contact.userId,
+      messageId,
+      MessageStatus.sent,
+      transport: 'cloud',
+    );
+    final currentSeq = _cloudLastSeq[conversationId] ?? 0;
+    if (stored.seq > currentSeq) _cloudLastSeq[conversationId] = stored.seq;
+  }
+
   Future<void> addContact(Contact contact) async {
+    if (cloudMode) {
+      await _startCloudDirectContact(contact);
+      return;
+    }
     final localUserId = _identity?.userId;
     if (contact.userId == localUserId) {
       throw ArgumentError('Nie dodawaj wlasnej tozsamosci jako kontaktu.');
@@ -591,6 +1013,65 @@ class AppState extends ChangeNotifier {
     await _store.saveContacts(_contacts);
     await _store.saveContactInvites(_contactInvites);
     if (_relayConnected) _relay?.queryProfiles([contact.userId]);
+    notifyListeners();
+  }
+
+  Future<void> startCloudConversation(CloudPublicUser user) async {
+    await _startCloudDirectContact(
+      Contact(
+        userId: user.userId,
+        displayName: user.displayName,
+        identityPublicKey: user.keyAgreementPublicKey,
+      ),
+    );
+  }
+
+  Future<void> _startCloudDirectContact(Contact contact) async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    final client = _cloudClient;
+    if (session == null || vault == null || client == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    if (contact.userId == session.userId) {
+      throw StateError('To jest Twoje konto.');
+    }
+
+    final existing = _contactById(contact.userId);
+    if (existing == null) {
+      _contacts.add(contact);
+      _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+      await _store.saveContacts(_contacts);
+    }
+
+    final existingConversationId = _cloudContactToConversation[contact.userId];
+    if (existingConversationId != null) {
+      notifyListeners();
+      return;
+    }
+
+    final conversationKey = await _cloudCrypto.newConversationKey();
+    final memberKeys = <String, dynamic>{
+      session.userId: await _cloudCrypto.wrapConversationKey(
+        vault: vault,
+        senderUserId: session.userId,
+        recipientUserId: session.userId,
+        recipientPublicKey: vault.keyAgreementPublicKey,
+        conversationKey: conversationKey,
+      ),
+      contact.userId: await _cloudCrypto.wrapConversationKey(
+        vault: vault,
+        senderUserId: session.userId,
+        recipientUserId: contact.userId,
+        recipientPublicKey: contact.identityPublicKey,
+        conversationKey: conversationKey,
+      ),
+    };
+    final conversation = await client.createDirectConversation(
+      peerUserId: contact.userId,
+      memberKeys: memberKeys,
+    );
+    await _rememberCloudConversation(conversation);
     notifyListeners();
   }
 
@@ -1469,9 +1950,14 @@ class AppState extends ChangeNotifier {
   Future<void> wipeLocalData() async {
     await _relaySubscription?.cancel();
     await _relay?.dispose();
+    await _cloudSubscription?.cancel();
+    await _cloudClient?.dispose();
     await _p2p?.dispose();
     await _store.wipeLocalSecrets();
     _identity = null;
+    _cloudSession = null;
+    _cloudVault = null;
+    _cloudClient = null;
     _ownProfile = null;
     _relaySettings = null;
     _relay = null;
@@ -1488,6 +1974,10 @@ class AppState extends ChangeNotifier {
     _p2pConnected.clear();
     _relayPresence.clear();
     _pendingDeviceSyncMessages.clear();
+    _cloudConversations.clear();
+    _cloudContactToConversation.clear();
+    _cloudLastSeq.clear();
+    _cloudUsers.clear();
     _deviceSyncTimer?.cancel();
     _pendingInviteHandshakeContacts.clear();
     _presenceTimer?.cancel();
@@ -1502,6 +1992,10 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _sendPlainPayload(Contact contact, PlainPayload payload) async {
+    if (cloudMode) {
+      await _sendCloudPayload(contact, payload);
+      return;
+    }
     final identity = _requireIdentity();
     final session = await _ensureSession(contact);
     final packet = await _crypto.encryptPayload(
@@ -3425,6 +3919,8 @@ class AppState extends ChangeNotifier {
     _presenceTimer?.cancel();
     unawaited(_relaySubscription?.cancel());
     unawaited(_relay?.dispose());
+    unawaited(_cloudSubscription?.cancel());
+    unawaited(_cloudClient?.dispose());
     unawaited(_p2p?.dispose());
     super.dispose();
   }

@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../crypto/codec.dart';
 import '../models/contact.dart';
 import '../models/contact_invite.dart';
+import '../models/cloud_account.dart';
 import '../models/group.dart';
 import '../models/identity.dart';
 import '../models/session.dart';
@@ -29,6 +30,7 @@ class SecureStore {
   static const _sessions = 'sessions.v1';
   static const _directoryEnabled = 'directory.enabled.v1';
   static const _contactInvites = 'contact.invites.v1';
+  static const _cloudSession = 'cloud.session.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -122,6 +124,23 @@ class SecureStore {
         .map((item) =>
             ContactInvite.fromJson((item as Map).cast<String, dynamic>()))
         .toList(growable: false);
+  }
+
+  Future<void> saveCloudSession(CloudSession session) async {
+    await _storage.write(
+      key: _cloudSession,
+      value: jsonEncode(session.toJson()),
+    );
+  }
+
+  Future<CloudSession?> loadCloudSession() async {
+    final raw = await _storage.read(key: _cloudSession);
+    if (raw == null || raw.isEmpty) return null;
+    return CloudSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  }
+
+  Future<void> clearCloudSession() {
+    return _storage.delete(key: _cloudSession);
   }
 
   Future<void> saveDirectoryEnabled(bool enabled) async {
