@@ -31,6 +31,7 @@ class SecureStore {
   static const _directoryEnabled = 'directory.enabled.v1';
   static const _contactInvites = 'contact.invites.v1';
   static const _cloudSession = 'cloud.session.v1';
+  static const _cloudReplayStates = 'cloud.messageReplay.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -137,6 +138,26 @@ class SecureStore {
     final raw = await _storage.read(key: _cloudSession);
     if (raw == null || raw.isEmpty) return null;
     return CloudSession.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  }
+
+  Future<void> saveCloudMessageReplayStates(
+    Iterable<CloudMessageReplayState> states,
+  ) async {
+    await _storage.write(
+      key: _cloudReplayStates,
+      value: jsonEncode(states.map((state) => state.toJson()).toList()),
+    );
+  }
+
+  Future<List<CloudMessageReplayState>> loadCloudMessageReplayStates() async {
+    final raw = await _storage.read(key: _cloudReplayStates);
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list
+        .map((item) => CloudMessageReplayState.fromJson(
+              (item as Map).cast<String, dynamic>(),
+            ))
+        .toList(growable: false);
   }
 
   Future<void> clearCloudSession() {

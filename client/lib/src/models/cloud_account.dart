@@ -208,6 +208,47 @@ class CloudStoredMessage {
   }
 }
 
+class CloudMessageReplayState {
+  const CloudMessageReplayState({
+    required this.accountId,
+    required this.conversationId,
+    required this.senderUserId,
+    required this.senderDeviceId,
+    required this.lastCounter,
+    required this.lastMessageHash,
+  });
+
+  final String accountId;
+  final String conversationId;
+  final String senderUserId;
+  final String senderDeviceId;
+  final int lastCounter;
+  final String lastMessageHash;
+
+  String get key => '$accountId|$conversationId|$senderUserId|$senderDeviceId';
+
+  Map<String, dynamic> toJson() => {
+        'v': 1,
+        'accountId': accountId,
+        'conversationId': conversationId,
+        'senderUserId': senderUserId,
+        'senderDeviceId': senderDeviceId,
+        'lastCounter': lastCounter,
+        'lastMessageHash': lastMessageHash,
+      };
+
+  factory CloudMessageReplayState.fromJson(Map<String, dynamic> json) {
+    return CloudMessageReplayState(
+      accountId: requiredString(json, 'accountId'),
+      conversationId: requiredString(json, 'conversationId'),
+      senderUserId: requiredString(json, 'senderUserId'),
+      senderDeviceId: requiredString(json, 'senderDeviceId'),
+      lastCounter: requiredInt(json, 'lastCounter'),
+      lastMessageHash: requiredString(json, 'lastMessageHash'),
+    );
+  }
+}
+
 class CloudVault {
   const CloudVault({
     required this.keyAgreementPrivateKey,

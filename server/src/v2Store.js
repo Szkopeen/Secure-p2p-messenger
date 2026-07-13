@@ -38,6 +38,30 @@ function isValidIdentityRotationProof(value) {
     value.rotatedAt.length >= 16;
 }
 
+function validateCloudMessagePayload(payload, body, auth) {
+  if (!isObject(payload)) return 'Brak zaszyfrowanego payloadu.';
+  if (!isObject(payload.aad)) return 'Brak AAD wiadomosci.';
+  if (String(payload.messageId || '') !== String(body.messageId || '')) {
+    return 'messageId payloadu nie zgadza sie z zadaniem.';
+  }
+  if (String(payload.aad.messageId || '') !== String(body.messageId || '')) {
+    return 'messageId w AAD nie zgadza sie z zadaniem.';
+  }
+  if (String(payload.aad.senderUserId || '') !== auth.user.userId) {
+    return 'senderUserId w AAD nie zgadza sie z sesja.';
+  }
+  if (String(payload.aad.senderDeviceId || '') !== auth.session.deviceId) {
+    return 'senderDeviceId w AAD nie zgadza sie z sesja.';
+  }
+  if (!Number.isInteger(payload.aad.messageCounter) || payload.aad.messageCounter < 1) {
+    return 'Niepoprawny licznik wiadomosci.';
+  }
+  if (typeof payload.aad.previousMessageHash !== 'string') {
+    return 'Niepoprawny hash poprzedniej wiadomosci.';
+  }
+  return null;
+}
+
 function safeUsername(value) {
   return typeof value === 'string' && SAFE_ID.test(value);
 }
@@ -444,8 +468,9 @@ export async function handleV2Http(store, req, res, url) {
       if (!conversation || !conversation.memberIds.includes(auth.user.userId)) {
         return sendJson(res, 404, { ok: false, error: 'Nie ma takiej rozmowy.' });
       }
-      if (!isObject(body.payload)) {
-        return sendJson(res, 400, { ok: false, error: 'Brak zaszyfrowanego payloadu.' });
+      const payloadError = validateCloudMessagePayload(body.payload, body, auth);
+      if (payloadError) {
+        return sendJson(res, 400, { ok: false, error: payloadError });
       }
       const list = store.messages.messages[conversationId] || [];
       const seq = list.length === 0 ? 1 : list[list.length - 1].seq + 1;

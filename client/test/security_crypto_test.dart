@@ -5,6 +5,7 @@ import 'package:secure_p2p_messenger/src/crypto/cloud_origin.dart';
 import 'package:secure_p2p_messenger/src/crypto/codec.dart';
 import 'package:secure_p2p_messenger/src/crypto/safety_number.dart';
 import 'package:secure_p2p_messenger/src/models/cloud_account.dart';
+import 'package:secure_p2p_messenger/src/models/message.dart';
 
 void main() {
   const accountId = 'uuid-alice';
@@ -127,6 +128,79 @@ void main() {
       );
 
       expect(rebound, isNot(original));
+    });
+  });
+
+  group('Anty-replay wiadomosci', () {
+    test('licznik i hash poprzedniej wiadomosci sa chronione przez AAD',
+        () async {
+      final crypto = CloudCrypto();
+      final conversationKey = await crypto.newConversationKey();
+      final first = await crypto.encryptMessage(
+        conversationId: 'conversation-1',
+        senderUserId: 'uuid-alice',
+        senderDeviceId: 'device-a',
+        messageCounter: 1,
+        previousMessageHash: '',
+        conversationKey: conversationKey,
+        payload: const PlainPayload.text('pierwsza'),
+      );
+      final firstHash = crypto.cloudMessageHash(first);
+      final second = await crypto.encryptMessage(
+        conversationId: 'conversation-1',
+        senderUserId: 'uuid-alice',
+        senderDeviceId: 'device-a',
+        messageCounter: 2,
+        previousMessageHash: firstHash,
+        conversationKey: conversationKey,
+        payload: const PlainPayload.text('druga'),
+      );
+
+      final decryptedFirst = await crypto.decryptMessage(
+        conversationId: 'conversation-1',
+        conversationKey: conversationKey,
+        payload: first,
+      );
+      final decryptedSecond = await crypto.decryptMessage(
+        conversationId: 'conversation-1',
+        conversationKey: conversationKey,
+        payload: second,
+      );
+
+      expect(decryptedFirst.senderDeviceId, 'device-a');
+      expect(decryptedFirst.messageCounter, 1);
+      expect(decryptedFirst.previousMessageHash, isEmpty);
+      expect(decryptedFirst.messageHash, firstHash);
+      expect(decryptedSecond.messageCounter, 2);
+      expect(decryptedSecond.previousMessageHash, firstHash);
+    });
+
+    test('zmiana licznika w AAD uniewaznia szyfrogram', () async {
+      final crypto = CloudCrypto();
+      final conversationKey = await crypto.newConversationKey();
+      final encrypted = await crypto.encryptMessage(
+        conversationId: 'conversation-1',
+        senderUserId: 'uuid-alice',
+        senderDeviceId: 'device-a',
+        messageCounter: 1,
+        previousMessageHash: '',
+        conversationKey: conversationKey,
+        payload: const PlainPayload.text('test'),
+      );
+      final aad = Map<String, dynamic>.of(
+        (encrypted['aad'] as Map).cast<String, dynamic>(),
+      );
+      aad['messageCounter'] = 2;
+      final tampered = Map<String, dynamic>.of(encrypted)..['aad'] = aad;
+
+      expect(
+        () => crypto.decryptMessage(
+          conversationId: 'conversation-1',
+          conversationKey: conversationKey,
+          payload: tampered,
+        ),
+        throwsA(isA<SecretBoxAuthenticationError>()),
+      );
     });
   });
 

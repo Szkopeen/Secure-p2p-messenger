@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:cryptography/cryptography.dart';
 import 'package:uuid/uuid.dart';
 
@@ -14,11 +15,21 @@ class CloudDecryptedMessage {
     required this.messageId,
     required this.payload,
     required this.createdAt,
+    required this.senderUserId,
+    required this.senderDeviceId,
+    required this.messageCounter,
+    required this.previousMessageHash,
+    required this.messageHash,
   });
 
   final String messageId;
   final PlainPayload payload;
   final DateTime createdAt;
+  final String senderUserId;
+  final String senderDeviceId;
+  final int? messageCounter;
+  final String previousMessageHash;
+  final String messageHash;
 }
 
 class CloudIdentityRotation {
@@ -557,6 +568,9 @@ class CloudCrypto {
   Future<Map<String, dynamic>> encryptMessage({
     required String conversationId,
     required String senderUserId,
+    required String senderDeviceId,
+    required int messageCounter,
+    required String previousMessageHash,
     required String conversationKey,
     required PlainPayload payload,
   }) async {
@@ -568,6 +582,9 @@ class CloudCrypto {
       'conversationId': conversationId,
       'messageId': messageId,
       'senderUserId': senderUserId,
+      'senderDeviceId': senderDeviceId,
+      'messageCounter': messageCounter,
+      'previousMessageHash': previousMessageHash,
       'contentType': payload.type.name,
       'createdAt': createdAt,
     };
@@ -595,6 +612,10 @@ class CloudCrypto {
       'mac': b64(box.mac.bytes),
       'compression': 'zlib',
     };
+  }
+
+  String cloudMessageHash(Map<String, dynamic> payload) {
+    return crypto_hash.sha256.convert(canonicalJsonBytes(payload)).toString();
   }
 
   Future<CloudDecryptedMessage> decryptMessage({
@@ -628,10 +649,21 @@ class CloudCrypto {
     return CloudDecryptedMessage(
       messageId: requiredString(clear, 'messageId'),
       createdAt: DateTime.parse(requiredString(clear, 'createdAt')),
+      senderUserId: aad['senderUserId']?.toString() ?? '',
+      senderDeviceId: aad['senderDeviceId']?.toString() ?? '',
+      messageCounter: _optionalInt(aad['messageCounter']),
+      previousMessageHash: aad['previousMessageHash']?.toString() ?? '',
+      messageHash: cloudMessageHash(payload),
       payload: PlainPayload.fromJson(
         asStringKeyMap(clear['payload'], 'payload'),
       ),
     );
+  }
+
+  int? _optionalInt(Object? value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    return int.tryParse(value.toString());
   }
 
   Future<SecretKey> _deriveWrappingKey({

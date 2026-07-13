@@ -49,6 +49,10 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   prywatnego w chwili rotacji.
 - Dodano podpisane aktualizacje: manifest release jest podpisywany Ed25519, a
   klient weryfikuje podpis kluczem publicznym wbudowanym przy buildzie.
+- Dodano anty-replay nowych wiadomosci cloud: kazda nowa wiadomosc zawiera w
+  AAD `senderDeviceId`, monotoniczny `messageCounter` oraz
+  `previousMessageHash`, a klient trwale zapisuje ostatni zaakceptowany licznik
+  i hash dla strumienia `rozmowa + nadawca + urzadzenie`.
 
 Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
 pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
@@ -66,11 +70,13 @@ sekretem.
    pierwsze galezie rotacji miedzy grupy kontaktow, zanim zobacza one wspolny
    lancuch.
 5. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
-6. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
+6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; stare wiadomosci
+   bez licznikow sa traktowane jako format legacy.
+7. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
-7. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
+8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
-8. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
+9. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
    prototypu, ale nie dla duzej uslugi.
 
 ## Priorytet 1: prawdziwsze E2EE wzgledem serwera
