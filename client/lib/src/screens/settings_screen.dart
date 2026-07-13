@@ -26,8 +26,8 @@ class SettingsScreen extends StatelessWidget {
                 children: [
                   ListTile(
                     leading: const Icon(Icons.person_outline),
-                    title: const Text('Identyfikator'),
-                    subtitle: Text(appState.ownUserId ?? 'Brak'),
+                    title: Text(appState.ownDisplayName ?? 'Brak konta'),
+                    subtitle: Text(appState.ownUserId ?? 'Brak UUID konta'),
                   ),
                   ListTile(
                     leading: const Icon(Icons.vpn_key_outlined),

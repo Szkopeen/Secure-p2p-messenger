@@ -13,6 +13,7 @@ import 'package:uuid/uuid.dart';
 import 'crypto/codec.dart';
 import 'crypto/cloud_crypto.dart';
 import 'crypto/crypto_service.dart';
+import 'crypto/safety_number.dart';
 import 'models/cloud_account.dart';
 import 'models/contact.dart';
 import 'models/contact_invite.dart';
@@ -111,7 +112,11 @@ class AppState extends ChangeNotifier {
   bool get hasAccount => cloudMode;
   bool get relayConnected => _relayConnected;
   String? get status => _status;
-  String? get ownUserId => _cloudSession?.username ?? _identity?.userId;
+  String? get ownUserId => _cloudSession?.userId ?? _identity?.userId;
+  String? get ownDisplayName =>
+      _cloudSession?.displayName ??
+      _cloudSession?.username ??
+      _identity?.userId;
   String? get ownPublicKey =>
       _cloudVault?.identityPublicKey ??
       (_identity == null ? null : b64(_identity!.publicKey.bytes));
@@ -186,18 +191,12 @@ class AppState extends ChangeNotifier {
     if (ownKey == null || ownKey.isEmpty || contactKey.isEmpty) {
       return '';
     }
-    final material = [
-      ownUserId ?? '',
-      ownKey,
-      contact.userId,
-      contactKey,
-    ]..sort();
-    final digest =
-        crypto_hash.sha256.convert(utf8Bytes(material.join('|'))).toString();
-    return RegExp('.{1,5}')
-        .allMatches(digest.substring(0, 40))
-        .map((match) => match.group(0)!)
-        .join(' ');
+    return SafetyNumber.calculate(
+      ownUserId: ownUserId ?? '',
+      ownIdentityPublicKey: ownKey,
+      contactUserId: contact.userId,
+      contactIdentityPublicKey: contactKey,
+    );
   }
 
   Future<void> initialize() async {
@@ -277,7 +276,8 @@ class AppState extends ChangeNotifier {
       vaultSecret: vaultSecret,
       salt: vaultSalt,
     );
-    final vault = await _cloudCrypto.createVault();
+    final serverOrigin = _cloudSignatureOrigin(normalizedServer);
+    var vault = await _cloudCrypto.createVault(serverOrigin: serverOrigin);
     final encryptedVault = await _cloudCrypto.encryptVault(vault, vaultKey);
     final deviceId = _uuid.v4();
     final client = CloudApiClient(serverUrl: normalizedServer);
@@ -293,8 +293,14 @@ class AppState extends ChangeNotifier {
       vaultKey: vaultKey,
       encryptedVault: encryptedVault,
     );
+    vault = await _cloudCrypto.ensureSignedIdentity(
+      vault,
+      accountId: result.session.userId,
+      serverOrigin: _cloudSignatureOrigin(result.session.serverUrl),
+    );
     await _activateCloudSession(result.session, vault);
-    await _cloudClient?.saveVault(encryptedVault);
+    await _saveCloudVault();
+    await _publishCloudKeyBundle();
     await connectCloud();
   }
 
@@ -337,6 +343,8 @@ class AppState extends ChangeNotifier {
     }
     final vault = await _cloudCrypto.ensureSignedIdentity(
       await _cloudCrypto.decryptVault(encryptedVault, vaultKey),
+      accountId: session.userId,
+      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
     );
     await _activateCloudSession(session, vault);
     await _saveCloudVault();
@@ -400,6 +408,16 @@ class AppState extends ChangeNotifier {
       throw ArgumentError('Adres serwera musi zaczynac sie od https://.');
     }
     return normalized;
+  }
+
+  String _cloudSignatureOrigin(String serverUrl) {
+    final uri = Uri.parse(_normalizeCloudServerUrl(serverUrl));
+    final scheme = uri.scheme.toLowerCase();
+    final host = uri.host.toLowerCase();
+    final hasDefaultPort = (scheme == 'https' && uri.port == 443) ||
+        (scheme == 'http' && uri.port == 80);
+    final port = uri.hasPort && !hasDefaultPort ? ':${uri.port}' : '';
+    return '$scheme://$host$port';
   }
 
   bool _isLocalDevelopmentHost(String host) {
@@ -759,6 +777,8 @@ class AppState extends ChangeNotifier {
     if (encryptedVault != null) {
       _cloudVault = await _cloudCrypto.ensureSignedIdentity(
         await _cloudCrypto.decryptVault(encryptedVault, session.vaultKey),
+        accountId: session.userId,
+        serverOrigin: _cloudSignatureOrigin(session.serverUrl),
       );
       await _saveCloudVault();
       await _publishCloudKeyBundle();
@@ -807,6 +827,8 @@ class AppState extends ChangeNotifier {
       );
     }
     final valid = await _cloudCrypto.verifyKeyAgreementSignature(
+      accountId: user.userId,
+      serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
       identityPublicKey: user.identityPublicKey,
       keyAgreementPublicKey: user.keyAgreementPublicKey,
       signature: user.keyAgreementPublicKeySignature,
@@ -825,6 +847,8 @@ class AppState extends ChangeNotifier {
       );
     }
     final valid = await _cloudCrypto.verifyKeyAgreementSignature(
+      accountId: contact.userId,
+      serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
       identityPublicKey: contact.signingPublicKey!,
       keyAgreementPublicKey: contact.identityPublicKey,
       signature: contact.keyAgreementPublicKeySignature!,

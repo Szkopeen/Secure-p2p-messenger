@@ -752,9 +752,9 @@ class _IdentityPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final publicKey = appState.ownPublicKey ?? '';
-    final initial = (appState.ownUserId ?? '?').isEmpty
-        ? '?'
-        : (appState.ownUserId ?? '?').substring(0, 1).toUpperCase();
+    final displayName = appState.ownDisplayName ?? appState.ownUserId ?? '';
+    final initial =
+        displayName.isEmpty ? '?' : displayName.substring(0, 1).toUpperCase();
     return Material(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: Padding(
@@ -771,7 +771,7 @@ class _IdentityPanel extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(appState.ownUserId ?? '',
+                  Text(displayName,
                       style: Theme.of(context).textTheme.titleMedium),
                   SelectableText(
                     publicKey,

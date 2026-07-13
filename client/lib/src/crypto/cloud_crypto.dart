@@ -27,7 +27,7 @@ class CloudCrypto {
   static const vaultAad = 'secure-p2p-cloud-vault/v1';
   static const keyWrapAad = 'secure-p2p-cloud-keywrap/v1';
   static const messageProtocol = 'secure-p2p-cloud-message/v1';
-  static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v1';
+  static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v2';
 
   final AesGcm _aead = AesGcm.with256bits();
   final X25519 _x25519 = X25519();
@@ -51,7 +51,10 @@ class CloudCrypto {
     return b64(await key.extractBytes());
   }
 
-  Future<CloudVault> createVault() async {
+  Future<CloudVault> createVault({
+    String accountId = '',
+    String serverOrigin = '',
+  }) async {
     final keyPair = await _x25519.newKeyPair();
     final privateBytes = await keyPair.extractPrivateKeyBytes();
     final publicKey = await keyPair.extractPublicKey();
@@ -61,6 +64,8 @@ class CloudCrypto {
     final identityPublicKeyBase64 = b64(identityPublicKey.bytes);
     final keyAgreementPublicKeyBase64 = b64(publicKey.bytes);
     final signature = await _signKeyAgreementPublicKey(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
       identityPrivateKey: b64(identityPrivateBytes),
       identityPublicKey: identityPublicKeyBase64,
       keyAgreementPublicKey: keyAgreementPublicKeyBase64,
@@ -75,21 +80,38 @@ class CloudCrypto {
     );
   }
 
-  Future<CloudVault> ensureSignedIdentity(CloudVault vault) async {
+  Future<CloudVault> ensureSignedIdentity(
+    CloudVault vault, {
+    required String accountId,
+    required String serverOrigin,
+  }) async {
     if (vault.identityPrivateKey.isNotEmpty &&
         vault.identityPublicKey.isNotEmpty &&
         vault.keyAgreementPublicKeySignature.isNotEmpty) {
       final valid = await verifyKeyAgreementSignature(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
         identityPublicKey: vault.identityPublicKey,
         keyAgreementPublicKey: vault.keyAgreementPublicKey,
         signature: vault.keyAgreementPublicKeySignature,
       );
-      if (!valid) {
-        throw StateError(
-          'Podpis klucza szyfrowania w vaulcie jest niepoprawny.',
-        );
-      }
-      return vault;
+      if (valid) return vault;
+
+      final signature = await _signKeyAgreementPublicKey(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        identityPrivateKey: vault.identityPrivateKey,
+        identityPublicKey: vault.identityPublicKey,
+        keyAgreementPublicKey: vault.keyAgreementPublicKey,
+      );
+      return vault.copyWith(keyAgreementPublicKeySignature: signature);
+    }
+
+    if (vault.identityPublicKey.isNotEmpty &&
+        vault.identityPrivateKey.isEmpty) {
+      throw StateError(
+        'Vault zawiera publiczna tozsamosc, ale nie zawiera prywatnego klucza podpisu.',
+      );
     }
 
     final identityKeyPair = await _ed25519.newKeyPair();
@@ -98,6 +120,8 @@ class CloudCrypto {
     final identityPrivateKeyBase64 = b64(identityPrivateBytes);
     final identityPublicKeyBase64 = b64(identityPublicKey.bytes);
     final signature = await _signKeyAgreementPublicKey(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
       identityPrivateKey: identityPrivateKeyBase64,
       identityPublicKey: identityPublicKeyBase64,
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
@@ -110,6 +134,8 @@ class CloudCrypto {
   }
 
   Future<bool> verifyKeyAgreementSignature({
+    required String accountId,
+    required String serverOrigin,
     required String identityPublicKey,
     required String keyAgreementPublicKey,
     required String signature,
@@ -122,6 +148,8 @@ class CloudCrypto {
     try {
       return _ed25519.verify(
         _keyAgreementBindingBytes(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
           identityPublicKey: identityPublicKey,
           keyAgreementPublicKey: keyAgreementPublicKey,
         ),
@@ -139,12 +167,16 @@ class CloudCrypto {
   }
 
   Future<String> _signKeyAgreementPublicKey({
+    required String accountId,
+    required String serverOrigin,
     required String identityPrivateKey,
     required String identityPublicKey,
     required String keyAgreementPublicKey,
   }) async {
     final signature = await _ed25519.sign(
       _keyAgreementBindingBytes(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
         identityPublicKey: identityPublicKey,
         keyAgreementPublicKey: keyAgreementPublicKey,
       ),
@@ -161,12 +193,16 @@ class CloudCrypto {
   }
 
   Uint8List _keyAgreementBindingBytes({
+    required String accountId,
+    required String serverOrigin,
     required String identityPublicKey,
     required String keyAgreementPublicKey,
   }) {
     return canonicalJsonBytes({
       'v': 1,
       'protocol': identityBindingProtocol,
+      'accountId': accountId,
+      'serverOrigin': serverOrigin,
       'identityPublicKey': identityPublicKey,
       'keyAgreementPublicKey': keyAgreementPublicKey,
     });

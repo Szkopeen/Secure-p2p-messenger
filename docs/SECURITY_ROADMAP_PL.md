@@ -26,10 +26,14 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Dodano trwala tozsamosc Ed25519 w vaulcie.
 - Klucz X25519 uzywany do szyfrowania kluczy rozmow jest podpisywany przez
   Ed25519.
+- Podpis klucza X25519 obejmuje UUID konta oraz origin serwera, zeby serwer nie
+  mogl bez wykrycia przypisac poprawnego pakietu kluczy do innego konta albo
+  innej instancji.
 - Klient weryfikuje podpisane pakiety kluczy z serwera i blokuje niepoprawne
   albo zmienione tozsamosci.
 - Dodano TOFU/pinning podpisanej tozsamosci kontaktu.
-- Dodano safety number liczony z tozsamosci Ed25519 kontaktu.
+- Dodano safety number liczony z UUID obu kont i tozsamosci Ed25519 kontaktow w
+  kanonicznie uporzadkowany sposob.
 - Dodano podpisane aktualizacje: manifest release jest podpisywany Ed25519, a
   klient weryfikuje podpis kluczem publicznym wbudowanym przy buildzie.
 
