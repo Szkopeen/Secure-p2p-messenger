@@ -73,9 +73,6 @@ class _ChatScreenState extends State<ChatScreen> {
         _visibleMessages = messages;
         final contact = widget.contact;
         final group = widget.group;
-        final p2p = contact == null
-            ? false
-            : widget.appState.isP2pConnected(contact.userId);
         final online = contact == null
             ? false
             : widget.appState.isContactOnline(contact.userId);
@@ -109,9 +106,9 @@ class _ChatScreenState extends State<ChatScreen> {
                       Text(
                         contact == null
                             ? _groupStatus(group!)
-                            : widget.appState.cloudMode
-                                ? 'Cloud sync'
-                                : '${online ? 'Online' : 'Offline'} / ${p2p ? 'P2P' : 'Relay'}',
+                            : online
+                                ? 'Online / Cloud'
+                                : 'Offline / Cloud',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],

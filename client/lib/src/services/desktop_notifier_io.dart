@@ -21,7 +21,7 @@ class DesktopNotifier {
     try {
       if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
         await localNotifier.setup(
-          appName: 'Secure P2P',
+          appName: 'Secure Chat',
           shortcutPolicy: ShortcutPolicy.requireCreate,
         );
       }

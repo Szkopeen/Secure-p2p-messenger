@@ -6,7 +6,6 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   desktop_drop
   flutter_secure_storage_linux
-  flutter_webrtc
   local_notifier
   media_kit_libs_linux
   media_kit_video

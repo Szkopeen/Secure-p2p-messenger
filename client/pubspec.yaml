@@ -1,5 +1,5 @@
 name: secure_p2p_messenger
-description: Prywatny komunikator P2P/E2EE z relay/signaling serverem.
+description: Prywatny komunikator E2EE z szyfrowana historia na serwerze.
 publish_to: "none"
 version: 1.0.0+1
 
@@ -16,7 +16,6 @@ dependencies:
   desktop_drop: ^0.7.1
   file_picker: 8.3.7
   flutter_secure_storage: ^9.2.4
-  flutter_webrtc: ^0.12.7
   local_notifier: ^0.1.6
   package_info_plus: ^9.0.1
   path_provider: ^2.1.5
@@ -36,8 +35,6 @@ dev_dependencies:
 
 dependency_overrides:
   flutter_plugin_android_lifecycle: 2.0.22
-  flutter_webrtc:
-    path: vendor/flutter_webrtc_0_12_12_hotfix_1
 
 flutter:
   uses-material-design: true

@@ -9,7 +9,7 @@ Future<String> writeTempMediaFile({
   final directory = await getTemporaryDirectory();
   final safeName = fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]+'), '_');
   final path =
-      '${directory.path}${Platform.pathSeparator}secure_p2p_preview_$safeName';
+      '${directory.path}${Platform.pathSeparator}secure_chat_preview_$safeName';
   final file = File(path);
   await file.writeAsBytes(bytes, flush: true);
   return file.path;

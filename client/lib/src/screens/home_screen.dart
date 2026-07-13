@@ -6,7 +6,6 @@ import '../crypto/codec.dart';
 import '../models/cloud_account.dart';
 import '../models/contact.dart';
 import '../models/contact_invite.dart';
-import '../models/directory_entry.dart';
 import '../models/group.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
@@ -39,7 +38,7 @@ class HomeScreen extends StatelessWidget {
             title: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Secure P2P'),
+                const Text('Secure Chat'),
                 if (totalUnread > 0) ...[
                   const SizedBox(width: 12),
                   Badge.count(count: totalUnread),
@@ -54,12 +53,12 @@ class HomeScreen extends StatelessWidget {
               ),
               IconButton(
                 tooltip: 'Globalna lista',
-                onPressed: () => _openDirectory(context),
+                onPressed: () => _openCloudUsers(context),
                 icon: const Icon(Icons.public),
               ),
               IconButton(
                 tooltip: 'Polacz ponownie',
-                onPressed: () => appState.connectRelay(),
+                onPressed: () => appState.connectCloud(),
                 icon: const Icon(Icons.refresh),
               ),
               IconButton(
@@ -77,9 +76,7 @@ class HomeScreen extends StatelessWidget {
           ),
           floatingActionButton: FloatingActionButton(
             tooltip: 'Dodaj kontakt',
-            onPressed: () => appState.cloudMode
-                ? _openCloudUsers(context)
-                : _showAddContactDialog(context),
+            onPressed: () => _openCloudUsers(context),
             child: const Icon(Icons.person_add_alt_1),
           ),
           body: Column(
@@ -136,7 +133,6 @@ class HomeScreen extends StatelessWidget {
                                       : appState
                                           .messagesFor(contact.userId)
                                           .last,
-                                  appState.isP2pConnected(contact.userId),
                                 ),
                               ),
                           ],
@@ -157,89 +153,6 @@ class HomeScreen extends StatelessWidget {
         );
       },
     );
-  }
-
-  Future<void> _showAddContactDialog(BuildContext context) async {
-    final name = TextEditingController();
-    final userId = TextEditingController();
-    final publicKey = TextEditingController();
-    String? error;
-
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: const Text('Dodaj kontakt'),
-              content: SizedBox(
-                width: 520,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: name,
-                      decoration: const InputDecoration(labelText: 'Nazwa'),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: userId,
-                      decoration:
-                          const InputDecoration(labelText: 'Identyfikator'),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: publicKey,
-                      decoration: const InputDecoration(
-                          labelText: 'Klucz publiczny Ed25519'),
-                      minLines: 2,
-                      maxLines: 4,
-                    ),
-                    if (error != null) ...[
-                      const SizedBox(height: 8),
-                      Text(error!,
-                          style: TextStyle(
-                              color: Theme.of(context).colorScheme.error)),
-                    ],
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Anuluj'),
-                ),
-                FilledButton(
-                  onPressed: () async {
-                    try {
-                      await appState.addContact(
-                        Contact(
-                          userId: userId.text.trim(),
-                          displayName: name.text.trim().isEmpty
-                              ? userId.text.trim()
-                              : name.text.trim(),
-                          identityPublicKey: publicKey.text.trim(),
-                        ),
-                      );
-                      if (dialogContext.mounted) {
-                        Navigator.of(dialogContext).pop();
-                      }
-                    } catch (exception) {
-                      setState(() => error = exception.toString());
-                    }
-                  },
-                  child: const Text('Dodaj'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
-    name.dispose();
-    userId.dispose();
-    publicKey.dispose();
   }
 
   Future<void> _openCloudUsers(BuildContext context) async {
@@ -275,14 +188,6 @@ class HomeScreen extends StatelessWidget {
           },
         );
       },
-    );
-  }
-
-  void _openDirectory(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => _DirectoryScreen(appState: appState),
-      ),
     );
   }
 
@@ -389,8 +294,8 @@ class HomeScreen extends StatelessWidget {
     name.dispose();
   }
 
-  String _contactSubtitle(Contact contact, ChatMessage? last, bool p2p) {
-    if (last == null) return '${contact.userId} / ${p2p ? 'P2P' : 'Relay'}';
+  String _contactSubtitle(Contact contact, ChatMessage? last) {
+    if (last == null) return '${contact.userId} / Cloud';
     if (last.retracted) return 'Wiadomosc usunieta';
     final edited = last.editedAt == null ? '' : 'Edytowano: ';
     return switch (last.payload.type) {
@@ -458,125 +363,6 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _DirectoryScreen extends StatelessWidget {
-  const _DirectoryScreen({required this.appState});
-
-  final AppState appState;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: appState,
-      builder: (context, _) {
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Globalna lista'),
-            actions: [
-              IconButton(
-                tooltip: 'Odswiez',
-                onPressed: appState.loadingDirectory
-                    ? null
-                    : appState.refreshDirectory,
-                icon: appState.loadingDirectory
-                    ? const SizedBox.square(
-                        dimension: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh),
-              ),
-            ],
-          ),
-          body: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              SwitchListTile(
-                value: appState.directoryEnabled,
-                onChanged: (value) => appState.setDirectoryEnabled(value),
-                secondary: const Icon(Icons.public),
-                title: const Text('Pokazuj mnie w globalnej liscie'),
-                subtitle: const Text(
-                  'Widoczne beda tylko Twoj identyfikator, nazwa i klucz publiczny.',
-                ),
-              ),
-              if (appState.directoryStatus != null)
-                ListTile(
-                  leading: const Icon(Icons.info_outline),
-                  title: const Text('Status'),
-                  subtitle: Text(appState.directoryStatus!),
-                ),
-              const SizedBox(height: 8),
-              if (appState.directoryEntries.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(child: Text('Brak publicznych uzytkownikow.')),
-                )
-              else
-                for (final entry in appState.directoryEntries)
-                  _DirectoryEntryTile(appState: appState, entry: entry),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _DirectoryEntryTile extends StatelessWidget {
-  const _DirectoryEntryTile({
-    required this.appState,
-    required this.entry,
-  });
-
-  final AppState appState;
-  final DirectoryEntry entry;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      leading: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          const CircleAvatar(child: Icon(Icons.person_outline)),
-          Positioned(
-            right: -1,
-            bottom: -1,
-            child: Icon(
-              Icons.circle,
-              size: 12,
-              color: entry.online
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context).colorScheme.outline,
-            ),
-          ),
-        ],
-      ),
-      title: Text(entry.displayName),
-      subtitle:
-          Text('${entry.userId} / ${entry.online ? 'online' : 'offline'}'),
-      trailing: FilledButton.icon(
-        onPressed: () => _sendInvite(context),
-        icon: const Icon(Icons.person_add_alt_1),
-        label: const Text('Zapros'),
-      ),
-    );
-  }
-
-  Future<void> _sendInvite(BuildContext context) async {
-    try {
-      await appState.sendContactInvite(entry);
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Wyslano zaproszenie do ${entry.displayName}.')),
-      );
-    } catch (error) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
-    }
-  }
-}
-
 class _ContactTile extends StatelessWidget {
   const _ContactTile({
     required this.appState,
@@ -590,7 +376,6 @@ class _ContactTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p2p = appState.isP2pConnected(contact.userId);
     final online = appState.isContactOnline(contact.userId);
     final unread = appState.unreadCountFor(contact.userId);
     final initial = contact.displayName.isEmpty
@@ -616,8 +401,8 @@ class _ContactTile extends StatelessWidget {
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Icon(
-            p2p ? Icons.hub_outlined : Icons.cloud_queue,
-            color: p2p ? Colors.green.shade400 : null,
+            online ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+            color: online ? Theme.of(context).colorScheme.primary : null,
           ),
           PopupMenuButton<String>(
             tooltip: 'Opcje kontaktu',

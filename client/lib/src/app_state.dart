@@ -25,7 +25,6 @@ import 'models/session.dart';
 import 'models/update_info.dart';
 import 'models/user_profile.dart';
 import 'network/relay_client.dart';
-import 'p2p/webrtc_transport.dart';
 import 'platform/file_exporter.dart';
 import 'services/cloud_api_client.dart';
 import 'services/desktop_notifier.dart';
@@ -65,7 +64,6 @@ class AppState extends ChangeNotifier {
   final Map<String, PendingSession> _pendingSessions = {};
   final Map<String, String> _relayEnvelopeToMessage = {};
   final Map<String, String> _signalEnvelopeToContact = {};
-  final Map<String, bool> _p2pConnected = {};
   final Map<String, bool> _relayPresence = {};
   final Map<String, ChatMessage> _pendingDeviceSyncMessages = {};
   final Map<String, CloudConversation> _cloudConversations = {};
@@ -84,7 +82,6 @@ class AppState extends ChangeNotifier {
   RelayClient? _relay;
   StreamSubscription<RelayEvent>? _relaySubscription;
   Timer? _presenceTimer;
-  WebRtcTransport? _p2p;
   bool _relayConnected = false;
   bool _initializing = true;
   bool _retryingGroupInvites = false;
@@ -108,7 +105,7 @@ class AppState extends ChangeNotifier {
   bool get initializing => _initializing;
   bool get hasIdentity => _identity != null;
   bool get cloudMode => _cloudSession != null;
-  bool get hasAccount => hasIdentity || cloudMode;
+  bool get hasAccount => cloudMode;
   bool get relayConnected => _relayConnected;
   String? get status => _status;
   String? get ownUserId => _cloudSession?.username ?? _identity?.userId;
@@ -151,12 +148,9 @@ class AppState extends ChangeNotifier {
         .length;
   }
 
-  bool isP2pConnected(String contactId) => _p2pConnected[contactId] == true;
-
   bool isContactOnline(String contactId) {
     if (cloudMode) return true;
-    return _p2pConnected[contactId] == true ||
-        _relayPresence[contactId] == true;
+    return _relayPresence[contactId] == true;
   }
 
   static String? accountTransferPassphraseError(String passphrase) {
@@ -185,9 +179,9 @@ class AppState extends ChangeNotifier {
     try {
       await _loadPackageInfo();
       _cloudSession = await _store.loadCloudSession();
-      _identity = await _store.loadIdentity();
+      _identity = null;
       _ownProfile = await _store.loadOwnProfile();
-      _relaySettings = await _store.loadRelaySettings();
+      _relaySettings = null;
       _contacts
         ..clear()
         ..addAll(await _store.loadContacts());
@@ -205,9 +199,6 @@ class AppState extends ChangeNotifier {
 
       if (_cloudSession != null) {
         await connectCloud();
-        unawaited(checkForUpdate(silent: true));
-      } else if (_identity != null && _relaySettings != null) {
-        await connectRelay();
         unawaited(checkForUpdate(silent: true));
       }
     } catch (error) {
@@ -320,7 +311,6 @@ class AppState extends ChangeNotifier {
   ) async {
     await _relaySubscription?.cancel();
     await _relay?.dispose();
-    await _p2p?.dispose();
     await _cloudSubscription?.cancel();
     await _cloudClient?.dispose();
 
@@ -333,7 +323,6 @@ class AppState extends ChangeNotifier {
     _identity = null;
     _relaySettings = null;
     _relay = null;
-    _p2p = null;
     _contacts.clear();
     _groups.clear();
     _contactInvites.clear();
@@ -444,7 +433,7 @@ class AppState extends ChangeNotifier {
 
     final envelope = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
     if (envelope['type'] != 'secure-p2p-account-transfer') {
-      throw const FormatException('To nie jest pakiet konta Secure P2P.');
+      throw const FormatException('To nie jest pakiet konta Secure Chat.');
     }
     final salt = unb64(envelope['salt'] as String);
     final key = await _deriveAccountExportKey(normalizedPassphrase, salt);
@@ -497,7 +486,6 @@ class AppState extends ChangeNotifier {
 
     await _relaySubscription?.cancel();
     await _relay?.dispose();
-    await _p2p?.dispose();
     await _store.wipeLocalSecrets();
     await _messageArchive.delete();
 
@@ -518,7 +506,6 @@ class AppState extends ChangeNotifier {
     _pendingSessions.clear();
     _relayEnvelopeToMessage.clear();
     _signalEnvelopeToContact.clear();
-    _p2pConnected.clear();
     _relayPresence.clear();
     _pendingDeviceSyncMessages.clear();
     _deviceSyncTimer?.cancel();
@@ -547,8 +534,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> checkForUpdate({bool silent = false}) async {
-    final settings = _relaySettings;
-    if (settings == null) return;
+    final updateServerUrl =
+        _cloudSession?.serverUrl ?? _relaySettings?.serverUrl;
+    if (updateServerUrl == null) return;
     final platform = _updatePlatform();
     if (platform == null) {
       _updateStatus = 'Aktualizacje nie sa wspierane na tej platformie.';
@@ -562,7 +550,7 @@ class AppState extends ChangeNotifier {
 
     try {
       await _ensurePackageInfoLoaded();
-      final manifestUri = _updateManifestUri(settings);
+      final manifestUri = _updateManifestUri(updateServerUrl);
       final response = await _readJson(manifestUri);
       final latest = (response['latest'] as Map).cast<String, dynamic>();
       final artifacts =
@@ -603,7 +591,7 @@ class AppState extends ChangeNotifier {
         artifact: UpdateArtifact(
           platform: platform,
           fileName: fileName,
-          url: _artifactUri(settings, artifact, fileName),
+          url: _artifactUri(updateServerUrl, artifact, fileName),
           sha256: artifact['sha256']?.toString(),
           size: _asNullableInt(artifact['size']),
         ),
@@ -683,26 +671,12 @@ class AppState extends ChangeNotifier {
 
     await _relaySubscription?.cancel();
     await _relay?.disconnect();
-    await _p2p?.dispose();
 
     _relayConnected = false;
-    _p2pConnected.clear();
     _relayPresence.clear();
     _presenceTimer?.cancel();
     _sentDeviceSyncSnapshotThisRun = false;
     _relay = RelayClient(settings: settings, identity: identity);
-    _p2p = WebRtcTransport(
-      localUserId: identity.userId,
-      sendSignal: (to, signalType, payload) {
-        _relay?.sendSignal(to: to, signalType: signalType, payload: payload);
-      },
-      onSecurePacket: (from, packet) =>
-          _handleEncryptedPacket(from, packet, transport: 'p2p'),
-      onPeerStateChanged: (peerId, connected) {
-        _p2pConnected[peerId] = connected;
-        notifyListeners();
-      },
-    );
 
     _relaySubscription = _relay!.events.listen(
       (event) => unawaited(_handleRelayEvent(event)),
@@ -1156,7 +1130,6 @@ class AppState extends ChangeNotifier {
     _pendingSessions.remove(contact.userId);
     _relayEnvelopeToMessage.removeWhere((_, to) => to == contact.userId);
     _signalEnvelopeToContact.removeWhere((_, to) => to == contact.userId);
-    _p2pConnected.remove(contact.userId);
     _relayPresence.remove(contact.userId);
     _pendingInviteHandshakeContacts.remove(contact.userId);
     _messages.remove(contact.userId);
@@ -1952,7 +1925,6 @@ class AppState extends ChangeNotifier {
     await _relay?.dispose();
     await _cloudSubscription?.cancel();
     await _cloudClient?.dispose();
-    await _p2p?.dispose();
     await _store.wipeLocalSecrets();
     _identity = null;
     _cloudSession = null;
@@ -1961,7 +1933,6 @@ class AppState extends ChangeNotifier {
     _ownProfile = null;
     _relaySettings = null;
     _relay = null;
-    _p2p = null;
     _contacts.clear();
     _contactInvites.clear();
     _groups.clear();
@@ -1971,7 +1942,6 @@ class AppState extends ChangeNotifier {
     _pendingSessions.clear();
     _relayEnvelopeToMessage.clear();
     _signalEnvelopeToContact.clear();
-    _p2pConnected.clear();
     _relayPresence.clear();
     _pendingDeviceSyncMessages.clear();
     _cloudConversations.clear();
@@ -2026,17 +1996,6 @@ class AppState extends ChangeNotifier {
     String? visibleMessageId,
   }) async {
     final relay = _requireRelay();
-    final sentP2p =
-        await _p2p?.sendEncryptedPacket(contact.userId, packet.toJson()) ??
-            false;
-    if (sentP2p) {
-      if (visibleMessageId != null) {
-        _updateMessage(contact.userId, visibleMessageId, MessageStatus.sent,
-            transport: 'p2p');
-      }
-      return;
-    }
-
     final relayEnvelopeId = relay.sendRelay(
       to: contact.userId,
       payload: packet.toJson(),
@@ -2499,7 +2458,6 @@ class AppState extends ChangeNotifier {
         );
         _signalEnvelopeToContact[signalId] = contact.userId;
         _addSystemMessage(contact.userId, 'Utworzono nowa sesje E2EE.');
-        await _startP2pIfNeeded(contact);
         unawaited(_retryPendingGroupInvites());
         break;
       case 'crypto-handshake-accept':
@@ -2517,13 +2475,7 @@ class AppState extends ChangeNotifier {
         await _saveSessions();
         pending.completer.complete(session);
         _addSystemMessage(contact.userId, 'Sesja E2EE jest gotowa.');
-        await _startP2pIfNeeded(contact);
         unawaited(_retryPendingGroupInvites());
-        break;
-      case 'webrtc-offer':
-      case 'webrtc-answer':
-      case 'webrtc-candidate':
-        await _p2p?.handleSignal(event.from, event.signalType!, event.payload);
         break;
     }
   }
@@ -2924,13 +2876,6 @@ class AppState extends ChangeNotifier {
         ),
       ),
     );
-  }
-
-  Future<void> _startP2pIfNeeded(Contact contact) async {
-    final identity = _identity;
-    if (identity == null || _p2p == null) return;
-    final shouldInitiate = identity.userId.compareTo(contact.userId) < 0;
-    await _p2p!.ensureStarted(contact.userId, initiator: shouldInitiate);
   }
 
   bool _addMessage(ChatMessage message) {
@@ -3676,10 +3621,15 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  Uri _updateManifestUri(RelaySettings settings) {
-    final relayUri = Uri.parse(settings.serverUrl);
-    final scheme = relayUri.scheme == 'wss' ? 'https' : 'http';
-    return relayUri.replace(
+  Uri _updateManifestUri(String serverUrl) {
+    final serverUri = Uri.parse(serverUrl);
+    final scheme = switch (serverUri.scheme) {
+      'wss' => 'https',
+      'ws' => 'http',
+      '' => 'https',
+      _ => serverUri.scheme,
+    };
+    return serverUri.replace(
       scheme: scheme,
       path: '/updates/manifest.json',
       query: null,
@@ -3688,7 +3638,7 @@ class AppState extends ChangeNotifier {
   }
 
   Uri _artifactUri(
-    RelaySettings settings,
+    String serverUrl,
     Map<String, dynamic> artifact,
     String fileName,
   ) {
@@ -3698,7 +3648,7 @@ class AppState extends ChangeNotifier {
       if (uri.hasScheme) return uri;
     }
 
-    final manifestUri = _updateManifestUri(settings);
+    final manifestUri = _updateManifestUri(serverUrl);
     return manifestUri.replace(
       pathSegments: ['updates', 'files', fileName],
       query: null,
@@ -3921,7 +3871,6 @@ class AppState extends ChangeNotifier {
     unawaited(_relay?.dispose());
     unawaited(_cloudSubscription?.cancel());
     unawaited(_cloudClient?.dispose());
-    unawaited(_p2p?.dispose());
     super.dispose();
   }
 }

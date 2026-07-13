@@ -53,7 +53,7 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Secure P2P',
+      title: 'Secure Chat',
       themeMode: ThemeMode.dark,
       darkTheme: ThemeData(
         colorScheme: darkScheme,
@@ -96,8 +96,7 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
               body: Center(child: CircularProgressIndicator()),
             );
           }
-          if (!appState.hasAccount ||
-              (!appState.cloudMode && appState.relaySettings == null)) {
+          if (!appState.hasAccount) {
             return SetupScreen(appState: appState);
           }
           return HomeScreen(appState: appState);
