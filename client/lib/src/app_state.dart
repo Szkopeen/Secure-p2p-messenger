@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import 'crypto/codec.dart';
 import 'crypto/cloud_crypto.dart';
+import 'crypto/cloud_origin.dart';
 import 'crypto/crypto_service.dart';
 import 'crypto/safety_number.dart';
 import 'models/cloud_account.dart';
@@ -386,47 +387,11 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  String _normalizeCloudServerUrl(String value) {
-    final trimmed = value.trim();
-    final normalized = switch (trimmed) {
-      final text when text.startsWith('ws://') =>
-        text.replaceFirst('ws://', 'http://'),
-      final text when text.startsWith('wss://') =>
-        text.replaceFirst('wss://', 'https://'),
-      final text
-          when text.startsWith('http://') || text.startsWith('https://') =>
-        text,
-      final text => 'https://$text',
-    };
-    final uri = Uri.parse(normalized);
-    if (uri.scheme == 'http' && !_isLocalDevelopmentHost(uri.host)) {
-      throw ArgumentError(
-        'Poza localhostem aplikacja wymaga HTTPS. Uzyj https:// albo domeny z TLS.',
-      );
-    }
-    if (uri.scheme != 'https' && uri.scheme != 'http') {
-      throw ArgumentError('Adres serwera musi zaczynac sie od https://.');
-    }
-    return normalized;
-  }
+  String _normalizeCloudServerUrl(String value) =>
+      normalizeCloudServerUrl(value);
 
-  String _cloudSignatureOrigin(String serverUrl) {
-    final uri = Uri.parse(_normalizeCloudServerUrl(serverUrl));
-    final scheme = uri.scheme.toLowerCase();
-    final host = uri.host.toLowerCase();
-    final hasDefaultPort = (scheme == 'https' && uri.port == 443) ||
-        (scheme == 'http' && uri.port == 80);
-    final port = uri.hasPort && !hasDefaultPort ? ':${uri.port}' : '';
-    return '$scheme://$host$port';
-  }
-
-  bool _isLocalDevelopmentHost(String host) {
-    final value = host.toLowerCase();
-    return value == 'localhost' ||
-        value == '127.0.0.1' ||
-        value == '::1' ||
-        value.endsWith('.localhost');
-  }
+  String _cloudSignatureOrigin(String serverUrl) =>
+      canonicalCloudOrigin(serverUrl);
 
   Future<void> exportAccountPackage(String passphrase) async {
     final identity = _requireIdentity();

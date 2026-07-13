@@ -29,11 +29,16 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Podpis klucza X25519 obejmuje UUID konta oraz origin serwera, zeby serwer nie
   mogl bez wykrycia przypisac poprawnego pakietu kluczy do innego konta albo
   innej instancji.
+- Origin serwera jest kanonizowany przed podpisem: schemat i host malymi
+  literami, bez sciezki, query, fragmentu i bez domyslnego portu.
 - Klient weryfikuje podpisane pakiety kluczy z serwera i blokuje niepoprawne
   albo zmienione tozsamosci.
 - Dodano TOFU/pinning podpisanej tozsamosci kontaktu.
 - Dodano safety number liczony z UUID obu kont i tozsamosci Ed25519 kontaktow w
   kanonicznie uporzadkowany sposob.
+- Dodano testy negatywne dla podmiany klucza X25519, podmiany klucza Ed25519,
+  innego UUID, innego originu/portu, uszkodzonego Base64 i starego formatu
+  podpisu v1.
 - Dodano podpisane aktualizacje: manifest release jest podpisywany Ed25519, a
   klient weryfikuje podpis kluczem publicznym wbudowanym przy buildzie.
 
