@@ -150,6 +150,8 @@ export class V2Store {
       username: user.username,
       displayName: user.displayName || user.username,
       keyAgreementPublicKey: user.keyAgreementPublicKey,
+      identityPublicKey: user.identityPublicKey || '',
+      keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
       updatedAt: user.updatedAt
     };
   }
@@ -251,6 +253,12 @@ export async function handleV2Http(store, req, res, url) {
       if (typeof body.keyAgreementPublicKey !== 'string' || body.keyAgreementPublicKey.length < 16) {
         return sendJson(res, 400, { ok: false, error: 'Brak publicznego klucza szyfrowania.' });
       }
+      if (typeof body.identityPublicKey !== 'string' || body.identityPublicKey.length < 16) {
+        return sendJson(res, 400, { ok: false, error: 'Brak publicznego klucza tozsamosci.' });
+      }
+      if (typeof body.keyAgreementPublicKeySignature !== 'string' || body.keyAgreementPublicKeySignature.length < 16) {
+        return sendJson(res, 400, { ok: false, error: 'Brak podpisu klucza szyfrowania.' });
+      }
 
       const userId = randomId();
       const user = {
@@ -262,6 +270,8 @@ export async function handleV2Http(store, req, res, url) {
           ? body.vaultSalt
           : crypto.randomBytes(16).toString('base64url'),
         keyAgreementPublicKey: body.keyAgreementPublicKey,
+        identityPublicKey: body.identityPublicKey,
+        keyAgreementPublicKeySignature: body.keyAgreementPublicKeySignature,
         encryptedVault: isObject(body.encryptedVault) ? body.encryptedVault : null,
         devices: {},
         createdAt: nowIso(),
@@ -313,6 +323,25 @@ export async function handleV2Http(store, req, res, url) {
         .map((user) => store.publicUser(user))
         .sort((a, b) => a.displayName.localeCompare(b.displayName));
       return sendJson(res, 200, { ok: true, users });
+    }
+
+    if (method === 'PUT' && url.pathname === '/v2/keys') {
+      const body = await readBody(req);
+      if (typeof body.keyAgreementPublicKey !== 'string' || body.keyAgreementPublicKey.length < 16) {
+        return sendJson(res, 400, { ok: false, error: 'Brak publicznego klucza szyfrowania.' });
+      }
+      if (typeof body.identityPublicKey !== 'string' || body.identityPublicKey.length < 16) {
+        return sendJson(res, 400, { ok: false, error: 'Brak publicznego klucza tozsamosci.' });
+      }
+      if (typeof body.keyAgreementPublicKeySignature !== 'string' || body.keyAgreementPublicKeySignature.length < 16) {
+        return sendJson(res, 400, { ok: false, error: 'Brak podpisu klucza szyfrowania.' });
+      }
+      auth.user.keyAgreementPublicKey = body.keyAgreementPublicKey;
+      auth.user.identityPublicKey = body.identityPublicKey;
+      auth.user.keyAgreementPublicKeySignature = body.keyAgreementPublicKeySignature;
+      auth.user.updatedAt = nowIso();
+      store.persistUsers();
+      return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user) });
     }
 
     if (method === 'PUT' && url.pathname === '/v2/vault') {

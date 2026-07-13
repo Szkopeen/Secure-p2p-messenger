@@ -26,6 +26,7 @@ import 'models/update_info.dart';
 import 'models/user_profile.dart';
 import 'network/relay_client.dart';
 import 'platform/file_exporter.dart';
+import 'security/update_signature_verifier.dart';
 import 'services/cloud_api_client.dart';
 import 'services/desktop_notifier.dart';
 import 'storage/message_archive.dart';
@@ -50,6 +51,8 @@ class AppState extends ChangeNotifier {
   final SecureStore _store;
   final CryptoService _crypto;
   final CloudCrypto _cloudCrypto = CloudCrypto();
+  final UpdateSignatureVerifier _updateSignatureVerifier =
+      const UpdateSignatureVerifier();
   late final MessageArchive _messageArchive;
   final Uuid _uuid = const Uuid();
   final AesGcm _accountExportAead = AesGcm.with256bits();
@@ -110,7 +113,7 @@ class AppState extends ChangeNotifier {
   String? get status => _status;
   String? get ownUserId => _cloudSession?.username ?? _identity?.userId;
   String? get ownPublicKey =>
-      _cloudVault?.keyAgreementPublicKey ??
+      _cloudVault?.identityPublicKey ??
       (_identity == null ? null : b64(_identity!.publicKey.bytes));
   UserProfile? get ownProfile => _ownProfile;
   RelaySettings? get relaySettings => _relaySettings;
@@ -175,6 +178,28 @@ class AppState extends ChangeNotifier {
             : userId);
   }
 
+  String safetyNumberFor(Contact contact) {
+    final ownKey = ownPublicKey;
+    final contactKey = contact.signingPublicKey?.isNotEmpty == true
+        ? contact.signingPublicKey!
+        : contact.identityPublicKey;
+    if (ownKey == null || ownKey.isEmpty || contactKey.isEmpty) {
+      return '';
+    }
+    final material = [
+      ownUserId ?? '',
+      ownKey,
+      contact.userId,
+      contactKey,
+    ]..sort();
+    final digest =
+        crypto_hash.sha256.convert(utf8Bytes(material.join('|'))).toString();
+    return RegExp('.{1,5}')
+        .allMatches(digest.substring(0, 40))
+        .map((match) => match.group(0)!)
+        .join(' ');
+  }
+
   Future<void> initialize() async {
     try {
       await _loadPackageInfo();
@@ -233,6 +258,7 @@ class AppState extends ChangeNotifier {
     required String serverUrl,
     required String username,
     required String password,
+    required String vaultSecret,
   }) async {
     final normalizedServer = _normalizeCloudServerUrl(serverUrl);
     final normalizedUsername = username.trim().toLowerCase();
@@ -242,10 +268,13 @@ class AppState extends ChangeNotifier {
     if (password.length < 8) {
       throw ArgumentError('Haslo musi miec minimum 8 znakow.');
     }
+    if (vaultSecret.length < 16) {
+      throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
+    }
 
     final vaultSalt = b64(secureRandomBytes(16));
     final vaultKey = await _cloudCrypto.deriveVaultKey(
-      password: password,
+      vaultSecret: vaultSecret,
       salt: vaultSalt,
     );
     final vault = await _cloudCrypto.createVault();
@@ -258,6 +287,8 @@ class AppState extends ChangeNotifier {
       deviceId: deviceId,
       deviceName: Platform.localHostname,
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
+      identityPublicKey: vault.identityPublicKey,
+      keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
       vaultSalt: vaultSalt,
       vaultKey: vaultKey,
       encryptedVault: encryptedVault,
@@ -271,8 +302,12 @@ class AppState extends ChangeNotifier {
     required String serverUrl,
     required String username,
     required String password,
+    required String vaultSecret,
   }) async {
     final normalizedServer = _normalizeCloudServerUrl(serverUrl);
+    if (vaultSecret.length < 16) {
+      throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
+    }
     final deviceId = _uuid.v4();
     final probe = CloudApiClient(serverUrl: normalizedServer);
     final loginProbe = await probe.login(
@@ -283,7 +318,7 @@ class AppState extends ChangeNotifier {
       vaultKey: '',
     );
     final vaultKey = await _cloudCrypto.deriveVaultKey(
-      password: password,
+      vaultSecret: vaultSecret,
       salt: loginProbe.session.vaultSalt,
     );
     final session = CloudSession(
@@ -300,8 +335,12 @@ class AppState extends ChangeNotifier {
     if (encryptedVault == null) {
       throw StateError('Konto nie ma vaulta z kluczami.');
     }
-    final vault = await _cloudCrypto.decryptVault(encryptedVault, vaultKey);
+    final vault = await _cloudCrypto.ensureSignedIdentity(
+      await _cloudCrypto.decryptVault(encryptedVault, vaultKey),
+    );
     await _activateCloudSession(session, vault);
+    await _saveCloudVault();
+    await _publishCloudKeyBundle();
     await connectCloud();
   }
 
@@ -341,16 +380,34 @@ class AppState extends ChangeNotifier {
 
   String _normalizeCloudServerUrl(String value) {
     final trimmed = value.trim();
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-      return trimmed;
+    final normalized = switch (trimmed) {
+      final text when text.startsWith('ws://') =>
+        text.replaceFirst('ws://', 'http://'),
+      final text when text.startsWith('wss://') =>
+        text.replaceFirst('wss://', 'https://'),
+      final text
+          when text.startsWith('http://') || text.startsWith('https://') =>
+        text,
+      final text => 'https://$text',
+    };
+    final uri = Uri.parse(normalized);
+    if (uri.scheme == 'http' && !_isLocalDevelopmentHost(uri.host)) {
+      throw ArgumentError(
+        'Poza localhostem aplikacja wymaga HTTPS. Uzyj https:// albo domeny z TLS.',
+      );
     }
-    if (trimmed.startsWith('ws://')) {
-      return trimmed.replaceFirst('ws://', 'http://');
+    if (uri.scheme != 'https' && uri.scheme != 'http') {
+      throw ArgumentError('Adres serwera musi zaczynac sie od https://.');
     }
-    if (trimmed.startsWith('wss://')) {
-      return trimmed.replaceFirst('wss://', 'https://');
-    }
-    return 'https://$trimmed';
+    return normalized;
+  }
+
+  bool _isLocalDevelopmentHost(String host) {
+    final value = host.toLowerCase();
+    return value == 'localhost' ||
+        value == '127.0.0.1' ||
+        value == '::1' ||
+        value.endsWith('.localhost');
   }
 
   Future<void> exportAccountPackage(String passphrase) async {
@@ -552,6 +609,7 @@ class AppState extends ChangeNotifier {
       await _ensurePackageInfoLoaded();
       final manifestUri = _updateManifestUri(updateServerUrl);
       final response = await _readJson(manifestUri);
+      await _updateSignatureVerifier.verifyManifest(response);
       final latest = (response['latest'] as Map).cast<String, dynamic>();
       final artifacts =
           (latest['artifacts'] as Map?)?.cast<String, dynamic>() ?? const {};
@@ -699,8 +757,11 @@ class AppState extends ChangeNotifier {
 
     final encryptedVault = await _cloudClient!.vault();
     if (encryptedVault != null) {
-      _cloudVault =
-          await _cloudCrypto.decryptVault(encryptedVault, session.vaultKey);
+      _cloudVault = await _cloudCrypto.ensureSignedIdentity(
+        await _cloudCrypto.decryptVault(encryptedVault, session.vaultKey),
+      );
+      await _saveCloudVault();
+      await _publishCloudKeyBundle();
     }
     await refreshCloudUsers();
     await _loadCloudConversations();
@@ -721,6 +782,84 @@ class AppState extends ChangeNotifier {
       ..clear()
       ..addAll(users);
     notifyListeners();
+  }
+
+  Contact _contactFromCloudUser(CloudPublicUser user) {
+    return Contact(
+      userId: user.userId,
+      displayName: user.displayName,
+      identityPublicKey: user.keyAgreementPublicKey,
+      signingPublicKey: user.identityPublicKey,
+      keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature,
+    );
+  }
+
+  bool _contactHasSignedIdentity(Contact contact) {
+    return contact.signingPublicKey?.isNotEmpty == true &&
+        contact.keyAgreementPublicKeySignature?.isNotEmpty == true;
+  }
+
+  Future<void> _assertCloudUserKeyBundle(CloudPublicUser user) async {
+    if (user.identityPublicKey.isEmpty ||
+        user.keyAgreementPublicKeySignature.isEmpty) {
+      throw StateError(
+        'Uzytkownik ${user.displayName} nie ma jeszcze podpisanej tozsamosci. Popros go o aktualizacje aplikacji i ponowne logowanie.',
+      );
+    }
+    final valid = await _cloudCrypto.verifyKeyAgreementSignature(
+      identityPublicKey: user.identityPublicKey,
+      keyAgreementPublicKey: user.keyAgreementPublicKey,
+      signature: user.keyAgreementPublicKeySignature,
+    );
+    if (!valid) {
+      throw StateError(
+        'Podpis klucza uzytkownika ${user.displayName} jest niepoprawny. Nie rozpoczynam rozmowy.',
+      );
+    }
+  }
+
+  Future<void> _assertContactKeyBundle(Contact contact) async {
+    if (!_contactHasSignedIdentity(contact)) {
+      throw StateError(
+        'Kontakt ${contact.displayName} nie ma podpisanej tozsamosci. Dodaj go ponownie z listy uzytkownikow po aktualizacji.',
+      );
+    }
+    final valid = await _cloudCrypto.verifyKeyAgreementSignature(
+      identityPublicKey: contact.signingPublicKey!,
+      keyAgreementPublicKey: contact.identityPublicKey,
+      signature: contact.keyAgreementPublicKeySignature!,
+    );
+    if (!valid) {
+      throw StateError(
+        'Podpis klucza kontaktu ${contact.displayName} jest niepoprawny.',
+      );
+    }
+  }
+
+  Future<void> _mergeVerifiedCloudUserIntoContact(
+    Contact existing,
+    CloudPublicUser peer,
+  ) async {
+    await _assertCloudUserKeyBundle(peer);
+    if (existing.signingPublicKey?.isNotEmpty != true &&
+        existing.identityPublicKey == peer.keyAgreementPublicKey) {
+      final index = _contacts.indexWhere((item) => item.userId == peer.userId);
+      if (index >= 0) {
+        _contacts[index] = existing.copyWith(
+          signingPublicKey: peer.identityPublicKey,
+          keyAgreementPublicKeySignature: peer.keyAgreementPublicKeySignature,
+        );
+        await _store.saveContacts(_contacts);
+      }
+      return;
+    }
+
+    if (existing.signingPublicKey != peer.identityPublicKey ||
+        existing.identityPublicKey != peer.keyAgreementPublicKey) {
+      throw StateError(
+        'Ostrzezenie: serwer zwrocil inna podpisana tozsamosc dla ${existing.displayName}. Rozmowa zostala zablokowana do recznej weryfikacji.',
+      );
+    }
   }
 
   Future<void> _loadCloudConversations() async {
@@ -757,19 +896,27 @@ class AppState extends ChangeNotifier {
         break;
       }
     }
-    final existing = _contactById(peerId);
-    if (existing == null && peer != null) {
-      _contacts.add(
-        Contact(
-          userId: peer.userId,
-          displayName: peer.displayName,
-          identityPublicKey: peer.keyAgreementPublicKey,
-        ),
-      );
-      _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
-      await _store.saveContacts(_contacts);
+    try {
+      final existing = _contactById(peerId);
+      if (existing == null && peer != null) {
+        await _assertCloudUserKeyBundle(peer);
+        _contacts.add(
+          _contactFromCloudUser(peer),
+        );
+        _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+        await _store.saveContacts(_contacts);
+      } else if (existing != null && peer != null) {
+        await _mergeVerifiedCloudUserIntoContact(existing, peer);
+      }
+    } catch (error) {
+      _setStatus(error.toString());
+      return;
     }
-    await _ensureCloudConversationKey(conversation);
+    try {
+      await _ensureCloudConversationKey(conversation);
+    } catch (error) {
+      _setStatus(error.toString());
+    }
   }
 
   Future<void> _loadCloudMessages(CloudConversation conversation) async {
@@ -819,6 +966,17 @@ class AppState extends ChangeNotifier {
     await client.saveVault(encryptedVault);
   }
 
+  Future<void> _publishCloudKeyBundle() async {
+    final client = _cloudClient;
+    final vault = _cloudVault;
+    if (client == null || vault == null) return;
+    await client.updateKeyBundle(
+      keyAgreementPublicKey: vault.keyAgreementPublicKey,
+      identityPublicKey: vault.identityPublicKey,
+      keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
+    );
+  }
+
   Future<String?> _ensureCloudConversationKey(
     CloudConversation conversation,
   ) async {
@@ -829,10 +987,23 @@ class AppState extends ChangeNotifier {
     if (existing != null) return existing;
     final envelope = conversation.memberKeys[session.userId];
     if (envelope is! Map) return null;
+    final envelopeJson = envelope.cast<String, dynamic>();
+    final senderUserId = envelopeJson['senderUserId']?.toString() ?? '';
+    final senderPublicKey = envelopeJson['senderPublicKey']?.toString() ?? '';
+    if (senderUserId.isNotEmpty && senderUserId != session.userId) {
+      final contact = _contactById(senderUserId);
+      if (contact != null &&
+          (contact.identityPublicKey != senderPublicKey ||
+              !_contactHasSignedIdentity(contact))) {
+        throw StateError(
+          'Klucz kontaktu ${contact.displayName} nie zgadza sie z zapisana, podpisana tozsamoscia. Zweryfikuj safety number przed rozmowa.',
+        );
+      }
+    }
     final key = await _cloudCrypto.unwrapConversationKey(
       vault: vault,
       localUserId: session.userId,
-      envelope: envelope.cast<String, dynamic>(),
+      envelope: envelopeJson,
     );
     final keys = Map<String, String>.of(vault.conversationKeys);
     keys[conversation.conversationId] = key;
@@ -974,6 +1145,11 @@ class AppState extends ChangeNotifier {
         userId: contact.userId,
         displayName: contact.displayName,
         identityPublicKey: contact.identityPublicKey,
+        signingPublicKey:
+            contact.signingPublicKey ?? existing?.signingPublicKey,
+        keyAgreementPublicKeySignature:
+            contact.keyAgreementPublicKeySignature ??
+                existing?.keyAgreementPublicKeySignature,
         avatarMimeType: existing?.avatarMimeType ?? contact.avatarMimeType,
         avatarBytesBase64:
             existing?.avatarBytesBase64 ?? contact.avatarBytesBase64,
@@ -991,12 +1167,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> startCloudConversation(CloudPublicUser user) async {
+    await _assertCloudUserKeyBundle(user);
     await _startCloudDirectContact(
-      Contact(
-        userId: user.userId,
-        displayName: user.displayName,
-        identityPublicKey: user.keyAgreementPublicKey,
-      ),
+      _contactFromCloudUser(user),
     );
   }
 
@@ -1013,10 +1186,30 @@ class AppState extends ChangeNotifier {
 
     final existing = _contactById(contact.userId);
     if (existing == null) {
+      await _assertContactKeyBundle(contact);
       _contacts.add(contact);
       _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
       await _store.saveContacts(_contacts);
+    } else if (existing.signingPublicKey?.isNotEmpty != true &&
+        existing.identityPublicKey == contact.identityPublicKey &&
+        _contactHasSignedIdentity(contact)) {
+      final index =
+          _contacts.indexWhere((item) => item.userId == contact.userId);
+      if (index >= 0) {
+        _contacts[index] = existing.copyWith(
+          signingPublicKey: contact.signingPublicKey,
+          keyAgreementPublicKeySignature:
+              contact.keyAgreementPublicKeySignature,
+        );
+        await _store.saveContacts(_contacts);
+      }
+    } else if (existing.identityPublicKey != contact.identityPublicKey ||
+        existing.signingPublicKey != contact.signingPublicKey) {
+      throw StateError(
+        'Podpisana tozsamosc kontaktu ${existing.displayName} zmienila sie. Nie wysylam wiadomosci przed reczna weryfikacja.',
+      );
     }
+    await _assertContactKeyBundle(_contactById(contact.userId) ?? contact);
 
     final existingConversationId = _cloudContactToConversation[contact.userId];
     if (existingConversationId != null) {
@@ -3429,6 +3622,11 @@ class AppState extends ChangeNotifier {
 
       final existing = _contacts[index];
       if (existing.identityPublicKey != contact.identityPublicKey) continue;
+      if (existing.signingPublicKey?.isNotEmpty == true &&
+          contact.signingPublicKey?.isNotEmpty == true &&
+          existing.signingPublicKey != contact.signingPublicKey) {
+        continue;
+      }
       final incomingProfileDate = contact.profileUpdatedAt;
       final currentProfileDate = existing.profileUpdatedAt;
       final useIncomingProfile = incomingProfileDate != null &&
@@ -3440,6 +3638,13 @@ class AppState extends ChangeNotifier {
             ? contact.displayName
             : existing.displayName,
         identityPublicKey: existing.identityPublicKey,
+        signingPublicKey: existing.signingPublicKey?.isNotEmpty == true
+            ? existing.signingPublicKey
+            : contact.signingPublicKey,
+        keyAgreementPublicKeySignature:
+            existing.keyAgreementPublicKeySignature?.isNotEmpty == true
+                ? existing.keyAgreementPublicKeySignature
+                : contact.keyAgreementPublicKeySignature,
         avatarMimeType: useIncomingProfile
             ? contact.avatarMimeType
             : existing.avatarMimeType,
@@ -3788,6 +3993,8 @@ class AppState extends ChangeNotifier {
       userId: contact.userId,
       displayName: contact.displayName,
       identityPublicKey: contact.identityPublicKey,
+      signingPublicKey: contact.signingPublicKey,
+      keyAgreementPublicKeySignature: contact.keyAgreementPublicKeySignature,
       avatarMimeType: profile.avatarMimeType,
       avatarBytesBase64: profile.avatarBytesBase64,
       profileUpdatedAt: incomingUpdatedAt ?? DateTime.now().toUtc(),

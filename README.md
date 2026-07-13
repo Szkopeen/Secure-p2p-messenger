@@ -16,16 +16,20 @@ usuniety z klienta, zeby aplikacja byla lzejsza i prostsza do testowania.
   Raspberry Pi / Ubuntu.
 - `docs/AKTUALIZACJE_PL.md` - publikowanie nowych wersji aplikacji na serwerze.
 - `docs/FINALNE_BUILDY_PL.md` - komendy do tworzenia paczek aplikacji.
+- `docs/SECURITY_ROADMAP_PL.md` - aktualny model zaufania, znane ryzyka i
+  roadmapa dojscia do mocniejszego E2EE.
 
 ## Aktualny model dzialania
 
 1. Uzytkownik tworzy konto albo loguje sie na istniejace konto.
 2. Urzadzenie laczy sie z serwerem przez HTTPS/WSS.
-3. Klucze rozmow i dane prywatne sa trzymane lokalnie oraz w szyfrowanym
-   vaulcie.
+3. Haslo konta sluzy do logowania, a osobny sekret vaultu sluzy lokalnie do
+   odszyfrowania kluczy. Sekret vaultu nie jest wysylany do API.
 4. Wiadomosci i pliki sa szyfrowane po stronie aplikacji przed wyslaniem.
 5. Serwer przechowuje zaszyfrowane dane, ale nie powinien miec technicznej
    mozliwosci odczytania tresci rozmow.
+6. Aktualizacje aplikacji sa akceptowane tylko wtedy, gdy manifest ma poprawny
+   podpis Ed25519 weryfikowany kluczem publicznym wbudowanym w klienta.
 
 Wazne: serwer nadal widzi metadane techniczne, np. konto nadawcy, konto
 odbiorcy, czas, rozmiar pakietu i adres IP. To nie jest system anonimowy.
@@ -33,9 +37,11 @@ odbiorcy, czas, rozmiar pakietu i adres IP. To nie jest system anonimowy.
 ## Funkcje do testowania
 
 - Rejestracja konta i logowanie.
+- Rejestracja z osobnym haslem konta i sekretem vaultu.
 - Logowanie tego samego konta na drugim urzadzeniu.
 - Lista uzytkownikow z serwera.
 - Dodawanie kontaktow z listy.
+- Porownanie safety number z kontaktem poza serwerem.
 - Rozmowy 1:1.
 - Wiadomosci tekstowe, wieloliniowe i odpowiedzi.
 - Pliki, obrazy, audio i wideo.
@@ -48,6 +54,11 @@ odbiorcy, czas, rozmiar pakietu i adres IP. To nie jest system anonimowy.
 
 - Aktywny P2P/WebRTC jest usuniety.
 - Web build nie jest zakresem projektu.
+- Pierwsze dodanie kontaktu nadal ufa tozsamosci z serwera, dopoki uzytkownicy
+  nie porownaja safety number poza serwerem. Po dodaniu aplikacja blokuje
+  cicha podmiane zapisanej tozsamosci.
+- To nadal nie jest komunikator odporny na aktywnie zlosliwy lub przejety
+  serwer. Szczegoly sa w `docs/SECURITY_ROADMAP_PL.md`.
 - Grupy sa po migracji architektury do ponownego testu i moga wymagac dalszej
   stabilizacji przed testami z wieksza liczba osob.
 - Nazwa techniczna paczki Flutter nadal brzmi `secure_p2p_messenger`, ale
@@ -95,7 +106,7 @@ flutter pub get
 Windows:
 
 ```powershell
-flutter build windows --release
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 ```
 
 Gotowy folder:
@@ -107,7 +118,7 @@ client\build\windows\x64\runner\Release
 Android:
 
 ```powershell
-flutter build apk --release
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 ```
 
 Gotowy plik:
@@ -120,7 +131,7 @@ Linux x64:
 
 ```bash
 cd client
-flutter build linux --release
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 ```
 
 Gotowy folder:
@@ -133,11 +144,13 @@ client/build/linux/x64/release/bundle
 
 1. Uruchom aplikacje.
 2. Wpisz adres serwera, np. `https://chat.szkpn.pl`.
-3. Utworz konto albo zaloguj sie.
+3. Utworz konto albo zaloguj sie. Dla nowych kont uzyj innego hasla konta i
+   innego sekretu vaultu.
 4. Otworz liste uzytkownikow.
 5. Dodaj drugie konto do kontaktow.
-6. Wyslij wiadomosc testowa i plik.
-7. Zamknij aplikacje, uruchom ponownie i sprawdz, czy historia zostala.
+6. W menu kontaktu otworz `Kod bezpieczenstwa` i porownaj go z druga osoba.
+7. Wyslij wiadomosc testowa i plik.
+8. Zamknij aplikacje, uruchom ponownie i sprawdz, czy historia zostala.
 
 ## Aktualizacje aplikacji
 
@@ -156,10 +169,22 @@ Pliki aktualizacji:
 Aplikacja sprawdza manifest przy starcie i w ekranie ustawien. Publikowanie
 nowej wersji opisuje `docs/AKTUALIZACJE_PL.md`.
 
+Manifest musi miec podpis Ed25519. Prywatny klucz release trzymaj poza repo i
+poza serwerem produkcyjnym. Publiczny klucz trzeba podac przy buildzie klienta
+przez `--dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=...`.
+
 ## Bezpieczenstwo
 
 - Tresc rozmow i plikow jest szyfrowana po stronie klienta.
-- Haslo nie powinno byc wysylane ani zapisywane jako tekst jawny.
+- Haslo konta i sekret vaultu sa rozdzielone. Sekret vaultu nie jest wysylany
+  na serwer.
+- Aplikacja wymaga HTTPS/WSS poza localhostem.
+- Kazde konto ma lokalna tozsamosc Ed25519, a klucz X25519 do szyfrowania
+  kluczy rozmow jest nia podpisany.
+- Podpisane tozsamosci kontaktow sa przypinane lokalnie po dodaniu kontaktu.
+  Zmiana tozsamosci wymaga recznej weryfikacji.
+- Manifest aktualizacji jest podpisywany Ed25519, a klient blokuje update bez
+  poprawnego podpisu.
 - Serwer przechowuje dane potrzebne do synchronizacji i dostarczenia wiadomosci.
 - Kopie zapasowe `data-v2` sa wrazliwe, bo zawieraja zaszyfrowane dane kont.
 - Przed uzyciem w srodowisku wysokiego ryzyka potrzebny jest niezalezny audyt.

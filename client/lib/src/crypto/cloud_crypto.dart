@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:cryptography/cryptography.dart';
@@ -26,14 +27,16 @@ class CloudCrypto {
   static const vaultAad = 'secure-p2p-cloud-vault/v1';
   static const keyWrapAad = 'secure-p2p-cloud-keywrap/v1';
   static const messageProtocol = 'secure-p2p-cloud-message/v1';
+  static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v1';
 
   final AesGcm _aead = AesGcm.with256bits();
   final X25519 _x25519 = X25519();
+  final Ed25519 _ed25519 = Ed25519();
   final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   final Uuid _uuid = const Uuid();
 
   Future<String> deriveVaultKey({
-    required String password,
+    required String vaultSecret,
     required String salt,
   }) async {
     final kdf = Pbkdf2(
@@ -42,7 +45,7 @@ class CloudCrypto {
       bits: 256,
     );
     final key = await kdf.deriveKey(
-      secretKey: SecretKey(utf8Bytes(password)),
+      secretKey: SecretKey(utf8Bytes(vaultSecret)),
       nonce: unb64(salt),
     );
     return b64(await key.extractBytes());
@@ -52,11 +55,121 @@ class CloudCrypto {
     final keyPair = await _x25519.newKeyPair();
     final privateBytes = await keyPair.extractPrivateKeyBytes();
     final publicKey = await keyPair.extractPublicKey();
+    final identityKeyPair = await _ed25519.newKeyPair();
+    final identityPrivateBytes = await identityKeyPair.extractPrivateKeyBytes();
+    final identityPublicKey = await identityKeyPair.extractPublicKey();
+    final identityPublicKeyBase64 = b64(identityPublicKey.bytes);
+    final keyAgreementPublicKeyBase64 = b64(publicKey.bytes);
+    final signature = await _signKeyAgreementPublicKey(
+      identityPrivateKey: b64(identityPrivateBytes),
+      identityPublicKey: identityPublicKeyBase64,
+      keyAgreementPublicKey: keyAgreementPublicKeyBase64,
+    );
     return CloudVault(
       keyAgreementPrivateKey: b64(privateBytes),
-      keyAgreementPublicKey: b64(publicKey.bytes),
+      keyAgreementPublicKey: keyAgreementPublicKeyBase64,
+      identityPrivateKey: b64(identityPrivateBytes),
+      identityPublicKey: identityPublicKeyBase64,
+      keyAgreementPublicKeySignature: signature,
       conversationKeys: const {},
     );
+  }
+
+  Future<CloudVault> ensureSignedIdentity(CloudVault vault) async {
+    if (vault.identityPrivateKey.isNotEmpty &&
+        vault.identityPublicKey.isNotEmpty &&
+        vault.keyAgreementPublicKeySignature.isNotEmpty) {
+      final valid = await verifyKeyAgreementSignature(
+        identityPublicKey: vault.identityPublicKey,
+        keyAgreementPublicKey: vault.keyAgreementPublicKey,
+        signature: vault.keyAgreementPublicKeySignature,
+      );
+      if (!valid) {
+        throw StateError(
+          'Podpis klucza szyfrowania w vaulcie jest niepoprawny.',
+        );
+      }
+      return vault;
+    }
+
+    final identityKeyPair = await _ed25519.newKeyPair();
+    final identityPrivateBytes = await identityKeyPair.extractPrivateKeyBytes();
+    final identityPublicKey = await identityKeyPair.extractPublicKey();
+    final identityPrivateKeyBase64 = b64(identityPrivateBytes);
+    final identityPublicKeyBase64 = b64(identityPublicKey.bytes);
+    final signature = await _signKeyAgreementPublicKey(
+      identityPrivateKey: identityPrivateKeyBase64,
+      identityPublicKey: identityPublicKeyBase64,
+      keyAgreementPublicKey: vault.keyAgreementPublicKey,
+    );
+    return vault.copyWith(
+      identityPrivateKey: identityPrivateKeyBase64,
+      identityPublicKey: identityPublicKeyBase64,
+      keyAgreementPublicKeySignature: signature,
+    );
+  }
+
+  Future<bool> verifyKeyAgreementSignature({
+    required String identityPublicKey,
+    required String keyAgreementPublicKey,
+    required String signature,
+  }) async {
+    if (identityPublicKey.isEmpty ||
+        keyAgreementPublicKey.isEmpty ||
+        signature.isEmpty) {
+      return false;
+    }
+    try {
+      return _ed25519.verify(
+        _keyAgreementBindingBytes(
+          identityPublicKey: identityPublicKey,
+          keyAgreementPublicKey: keyAgreementPublicKey,
+        ),
+        signature: Signature(
+          unb64(signature),
+          publicKey: SimplePublicKey(
+            unb64(identityPublicKey),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String> _signKeyAgreementPublicKey({
+    required String identityPrivateKey,
+    required String identityPublicKey,
+    required String keyAgreementPublicKey,
+  }) async {
+    final signature = await _ed25519.sign(
+      _keyAgreementBindingBytes(
+        identityPublicKey: identityPublicKey,
+        keyAgreementPublicKey: keyAgreementPublicKey,
+      ),
+      keyPair: SimpleKeyPairData(
+        unb64(identityPrivateKey),
+        publicKey: SimplePublicKey(
+          unb64(identityPublicKey),
+          type: KeyPairType.ed25519,
+        ),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    return b64(signature.bytes);
+  }
+
+  Uint8List _keyAgreementBindingBytes({
+    required String identityPublicKey,
+    required String keyAgreementPublicKey,
+  }) {
+    return canonicalJsonBytes({
+      'v': 1,
+      'protocol': identityBindingProtocol,
+      'identityPublicKey': identityPublicKey,
+      'keyAgreementPublicKey': keyAgreementPublicKey,
+    });
   }
 
   Future<Map<String, dynamic>> encryptVault(

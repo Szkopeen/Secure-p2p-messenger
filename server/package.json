@@ -12,6 +12,7 @@
     "dev": "node --watch src/server.js",
     "check": "node --check src/server.js",
     "admin:users": "node scripts/admin-users.js",
+    "generate-update-key": "node scripts/generate-update-signing-key.js",
     "publish-update": "node scripts/publish-update.js"
   },
   "dependencies": {

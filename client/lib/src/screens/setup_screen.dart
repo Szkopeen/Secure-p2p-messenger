@@ -17,6 +17,7 @@ class _SetupScreenState extends State<SetupScreen> {
   final _cloudServerUrl = TextEditingController(text: 'https://chat.szkpn.pl');
   final _cloudUsername = TextEditingController();
   final _cloudPassword = TextEditingController();
+  final _cloudVaultSecret = TextEditingController();
   bool _saving = false;
   String? _error;
 
@@ -25,6 +26,7 @@ class _SetupScreenState extends State<SetupScreen> {
     _cloudServerUrl.dispose();
     _cloudUsername.dispose();
     _cloudPassword.dispose();
+    _cloudVaultSecret.dispose();
     super.dispose();
   }
 
@@ -72,13 +74,29 @@ class _SetupScreenState extends State<SetupScreen> {
                   TextFormField(
                     controller: _cloudPassword,
                     decoration: const InputDecoration(
-                      labelText: 'Haslo',
+                      labelText: 'Haslo konta',
                       prefixIcon: Icon(Icons.password_outlined),
                     ),
                     obscureText: true,
                     validator: (value) {
                       if ((value ?? '').length < 8) {
                         return 'Minimum 8 znakow';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _cloudVaultSecret,
+                    decoration: const InputDecoration(
+                      labelText: 'Sekret vaultu',
+                      helperText: 'Nie jest wysylany na serwer. Chroni klucze.',
+                      prefixIcon: Icon(Icons.enhanced_encryption_outlined),
+                    ),
+                    obscureText: true,
+                    validator: (value) {
+                      if ((value ?? '').length < 16) {
+                        return 'Minimum 16 znakow';
                       }
                       return null;
                     },
@@ -131,6 +149,7 @@ class _SetupScreenState extends State<SetupScreen> {
         serverUrl: _cloudServerUrl.text,
         username: _cloudUsername.text,
         password: _cloudPassword.text,
+        vaultSecret: _cloudVaultSecret.text,
       );
     } catch (error) {
       setState(() => _error = error.toString());
@@ -150,6 +169,7 @@ class _SetupScreenState extends State<SetupScreen> {
         serverUrl: _cloudServerUrl.text,
         username: _cloudUsername.text,
         password: _cloudPassword.text,
+        vaultSecret: _cloudVaultSecret.text,
       );
     } catch (error) {
       setState(() => _error = error.toString());

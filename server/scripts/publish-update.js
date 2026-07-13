@@ -1,11 +1,29 @@
 #!/usr/bin/env node
-import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
 const platforms = ['windows', 'linux', 'android'];
+
+function loadDotEnv(file = '.env') {
+  const envPath = path.resolve(file);
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const separator = trimmed.indexOf('=');
+    if (separator <= 0) continue;
+    const key = trimmed.slice(0, separator).trim();
+    let value = trimmed.slice(separator + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] ||= value;
+  }
+}
 
 function usage() {
   return `
@@ -21,6 +39,7 @@ Opcje:
   --notes        Opis zmian. Mozesz podac kilka razy.
   --manifest     Sciezka manifestu. Domyslnie UPDATE_MANIFEST_FILE albo ./updates/manifest.json.
   --files-dir    Katalog plikow. Domyslnie UPDATE_FILES_DIR albo ./updates/files.
+  --signing-key  Prywatny klucz Ed25519 PEM. Domyslnie UPDATE_SIGNING_KEY_FILE.
 `.trim();
 }
 
@@ -81,7 +100,34 @@ function copyArtifact(filesDir, sourcePath) {
   };
 }
 
+function canonicalJson(value) {
+  if (value === null || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  throw new Error(`Nieobslugiwany typ JSON: ${typeof value}`);
+}
+
+function signManifestLatest(latest, signingKeyFile) {
+  const keyPath = path.resolve(signingKeyFile);
+  if (!fs.existsSync(keyPath)) {
+    throw new Error(`Brak prywatnego klucza podpisu: ${keyPath}`);
+  }
+  const privateKey = crypto.createPrivateKey(fs.readFileSync(keyPath, 'utf8'));
+  const payload = Buffer.from(canonicalJson({
+    protocol: 'secure-chat-update-manifest/v1',
+    latest
+  }), 'utf8');
+  return crypto.sign(null, payload, privateKey).toString('base64url');
+}
+
 function main() {
+  loadDotEnv();
   const args = readArgs(process.argv.slice(2));
   const version = requireText(args, 'version');
   const buildNumber = Number.parseInt(requireText(args, 'build'), 10);
@@ -95,6 +141,10 @@ function main() {
   const filesDir = path.resolve(
     args['files-dir'] || process.env.UPDATE_FILES_DIR || './updates/files'
   );
+  const signingKeyFile = args['signing-key'] || process.env.UPDATE_SIGNING_KEY_FILE;
+  if (!signingKeyFile) {
+    throw new Error('Brak --signing-key albo UPDATE_SIGNING_KEY_FILE. Nie publikuje niepodpisanego manifestu.');
+  }
 
   const artifacts = {};
   for (const platform of platforms) {
@@ -106,14 +156,20 @@ function main() {
     throw new Error('Podaj przynajmniej jedna paczke: --windows, --linux albo --android.');
   }
 
+  const latest = {
+    version,
+    buildNumber,
+    releasedAt: new Date().toISOString(),
+    notes: args.notes.length > 0 ? args.notes : ['Nowa wersja aplikacji.'],
+    artifacts
+  };
   const manifest = {
-    v: 1,
-    latest: {
-      version,
-      buildNumber,
-      releasedAt: new Date().toISOString(),
-      notes: args.notes.length > 0 ? args.notes : ['Nowa wersja aplikacji.'],
-      artifacts
+    v: 2,
+    latest,
+    signature: {
+      protocol: 'secure-chat-update-manifest/v1',
+      algorithm: 'Ed25519',
+      signature: signManifestLatest(latest, signingKeyFile)
     }
   };
 

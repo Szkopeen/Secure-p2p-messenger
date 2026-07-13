@@ -407,11 +407,24 @@ class _ContactTile extends StatelessWidget {
           PopupMenuButton<String>(
             tooltip: 'Opcje kontaktu',
             onSelected: (value) {
-              if (value == 'remove') {
+              if (value == 'safety') {
+                _showSafetyNumber(context);
+              } else if (value == 'remove') {
                 _confirmRemoveContact(context);
               }
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'safety',
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.verified_user_outlined, size: 18),
+                    SizedBox(width: 10),
+                    Text('Kod bezpieczenstwa'),
+                  ],
+                ),
+              ),
               PopupMenuItem(
                 value: 'remove',
                 child: Row(
@@ -432,6 +445,39 @@ class _ContactTile extends StatelessWidget {
           MaterialPageRoute(
             builder: (_) => ChatScreen(appState: appState, contact: contact),
           ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showSafetyNumber(BuildContext context) async {
+    final safetyNumber = appState.safetyNumberFor(contact);
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Kod: ${contact.displayName}'),
+          content: SelectableText(
+            safetyNumber.isEmpty
+                ? 'Brak klucza do porownania.'
+                : '$safetyNumber\n\nPorownaj ten kod z rozmowca poza tym serwerem. Jesli kod sie rozni, nie wysylaj poufnych wiadomosci.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Zamknij'),
+            ),
+            FilledButton.icon(
+              onPressed: safetyNumber.isEmpty
+                  ? null
+                  : () {
+                      Clipboard.setData(ClipboardData(text: safetyNumber));
+                      Navigator.of(context).pop();
+                    },
+              icon: const Icon(Icons.copy),
+              label: const Text('Kopiuj'),
+            ),
+          ],
         );
       },
     );

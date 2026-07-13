@@ -53,12 +53,16 @@ class CloudPublicUser {
     required this.username,
     required this.displayName,
     required this.keyAgreementPublicKey,
+    required this.identityPublicKey,
+    required this.keyAgreementPublicKeySignature,
   });
 
   final String userId;
   final String username;
   final String displayName;
   final String keyAgreementPublicKey;
+  final String identityPublicKey;
+  final String keyAgreementPublicKeySignature;
 
   factory CloudPublicUser.fromJson(Map<String, dynamic> json) {
     return CloudPublicUser(
@@ -67,6 +71,9 @@ class CloudPublicUser {
       displayName:
           json['displayName'] as String? ?? requiredString(json, 'username'),
       keyAgreementPublicKey: requiredString(json, 'keyAgreementPublicKey'),
+      identityPublicKey: json['identityPublicKey'] as String? ?? '',
+      keyAgreementPublicKeySignature:
+          json['keyAgreementPublicKeySignature'] as String? ?? '',
     );
   }
 }
@@ -137,17 +144,26 @@ class CloudVault {
   const CloudVault({
     required this.keyAgreementPrivateKey,
     required this.keyAgreementPublicKey,
+    required this.identityPrivateKey,
+    required this.identityPublicKey,
+    required this.keyAgreementPublicKeySignature,
     required this.conversationKeys,
   });
 
   final String keyAgreementPrivateKey;
   final String keyAgreementPublicKey;
+  final String identityPrivateKey;
+  final String identityPublicKey;
+  final String keyAgreementPublicKeySignature;
   final Map<String, String> conversationKeys;
 
   Map<String, dynamic> toJson() => {
         'v': 1,
         'keyAgreementPrivateKey': keyAgreementPrivateKey,
         'keyAgreementPublicKey': keyAgreementPublicKey,
+        'identityPrivateKey': identityPrivateKey,
+        'identityPublicKey': identityPublicKey,
+        'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
         'conversationKeys': conversationKeys,
       };
 
@@ -155,6 +171,10 @@ class CloudVault {
     return CloudVault(
       keyAgreementPrivateKey: requiredString(json, 'keyAgreementPrivateKey'),
       keyAgreementPublicKey: requiredString(json, 'keyAgreementPublicKey'),
+      identityPrivateKey: json['identityPrivateKey'] as String? ?? '',
+      identityPublicKey: json['identityPublicKey'] as String? ?? '',
+      keyAgreementPublicKeySignature:
+          json['keyAgreementPublicKeySignature'] as String? ?? '',
       conversationKeys: ((json['conversationKeys'] as Map?) ?? const {})
           .map((key, value) => MapEntry(key.toString(), value.toString())),
     );
@@ -163,6 +183,9 @@ class CloudVault {
   CloudVault copyWith({
     String? keyAgreementPrivateKey,
     String? keyAgreementPublicKey,
+    String? identityPrivateKey,
+    String? identityPublicKey,
+    String? keyAgreementPublicKeySignature,
     Map<String, String>? conversationKeys,
   }) {
     return CloudVault(
@@ -170,6 +193,10 @@ class CloudVault {
           keyAgreementPrivateKey ?? this.keyAgreementPrivateKey,
       keyAgreementPublicKey:
           keyAgreementPublicKey ?? this.keyAgreementPublicKey,
+      identityPrivateKey: identityPrivateKey ?? this.identityPrivateKey,
+      identityPublicKey: identityPublicKey ?? this.identityPublicKey,
+      keyAgreementPublicKeySignature:
+          keyAgreementPublicKeySignature ?? this.keyAgreementPublicKeySignature,
       conversationKeys: conversationKeys ?? this.conversationKeys,
     );
   }

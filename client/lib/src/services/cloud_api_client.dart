@@ -67,6 +67,7 @@ class CloudApiClient {
       _ => throw ArgumentError(
           'Adres serwera musi zaczynac sie od https:// albo http://.'),
     };
+    _assertSafeTransport(scheme, base.host);
     return base.replace(
       scheme: scheme,
       path: path,
@@ -84,6 +85,7 @@ class CloudApiClient {
       _ => throw ArgumentError(
           'Adres serwera musi zaczynac sie od https:// albo http://.'),
     };
+    _assertSafeTransport(scheme, base.host);
     return base.replace(
       scheme: scheme,
       path: '/v2/ws',
@@ -98,6 +100,8 @@ class CloudApiClient {
     required String deviceId,
     required String deviceName,
     required String keyAgreementPublicKey,
+    required String identityPublicKey,
+    required String keyAgreementPublicKeySignature,
     required String vaultSalt,
     required String vaultKey,
     required Map<String, dynamic> encryptedVault,
@@ -108,6 +112,8 @@ class CloudApiClient {
       'deviceId': deviceId,
       'deviceName': deviceName,
       'keyAgreementPublicKey': keyAgreementPublicKey,
+      'identityPublicKey': identityPublicKey,
+      'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
       'vaultSalt': vaultSalt,
       'encryptedVault': encryptedVault,
     });
@@ -148,6 +154,18 @@ class CloudApiClient {
 
   Future<void> saveVault(Map<String, dynamic> encryptedVault) async {
     await _put('/v2/vault', {'encryptedVault': encryptedVault});
+  }
+
+  Future<void> updateKeyBundle({
+    required String keyAgreementPublicKey,
+    required String identityPublicKey,
+    required String keyAgreementPublicKeySignature,
+  }) async {
+    await _put('/v2/keys', {
+      'keyAgreementPublicKey': keyAgreementPublicKey,
+      'identityPublicKey': identityPublicKey,
+      'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
+    });
   }
 
   Future<List<CloudConversation>> conversations() async {
@@ -327,5 +345,21 @@ class CloudApiClient {
       session: session,
       encryptedVault: vault is Map ? vault.cast<String, dynamic>() : null,
     );
+  }
+
+  void _assertSafeTransport(String scheme, String host) {
+    final secure = scheme == 'https' || scheme == 'wss';
+    if (secure || _isLocalDevelopmentHost(host)) return;
+    throw ArgumentError(
+      'Poza localhostem polaczenie z serwerem musi uzywac HTTPS/WSS.',
+    );
+  }
+
+  bool _isLocalDevelopmentHost(String host) {
+    final value = host.toLowerCase();
+    return value == 'localhost' ||
+        value == '127.0.0.1' ||
+        value == '::1' ||
+        value.endsWith('.localhost');
   }
 }

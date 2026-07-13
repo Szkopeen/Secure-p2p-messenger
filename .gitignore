@@ -1,6 +1,8 @@
 # Sekrety
 .env
 server/.env
+server/secrets/
+*.pem
 
 # Node
 node_modules/

@@ -7,6 +7,33 @@ Relay udostepnia najnowsza wersje aplikacji przez HTTPS:
 
 Aplikacja sprawdza manifest automatycznie po starcie. Ten sam test mozna uruchomic recznie w `Ustawienia -> Aktualizacje`.
 
+Od tej wersji manifest aktualizacji musi byc podpisany Ed25519. Serwer moze
+hostowac manifest i pliki, ale klient zaakceptuje tylko manifest podpisany
+kluczem prywatnym, ktorego nie ma na serwerze.
+
+## 0. Wygeneruj klucz podpisywania release
+
+Zrob to raz, na zaufanym komputerze. Prywatnego klucza nie wrzucaj na GitHub.
+
+```powershell
+cd "C:\Users\ulkhh\Documents\New project\server"
+npm run generate-update-key -- --out .\secrets\update-signing-key.pem
+```
+
+Polecenie wypisze publiczny klucz do builda klienta:
+
+```text
+--dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=...
+```
+
+Prywatny klucz:
+
+```text
+server\secrets\update-signing-key.pem
+```
+
+Folder `server/secrets/` jest ignorowany przez Git.
+
 ## 1. Zbuduj paczki
 
 Najpierw zwieksz wersje w `client/pubspec.yaml`, np.:
@@ -23,7 +50,7 @@ Windows:
 cd "C:\Users\ulkhh\Documents\New project\client"
 flutter clean
 flutter pub get
-flutter build windows --release
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 Compress-Archive -Path ".\build\windows\x64\runner\Release\*" -DestinationPath "$env:USERPROFILE\Desktop\secure-p2p-windows.zip" -Force
 ```
 
@@ -31,7 +58,7 @@ Android:
 
 ```powershell
 cd "C:\Users\ulkhh\Documents\New project\client"
-flutter build apk --release
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 Copy-Item ".\build\app\outputs\flutter-apk\app-release.apk" "$env:USERPROFILE\Desktop\secure-p2p-android.apk" -Force
 ```
 
@@ -40,7 +67,7 @@ Linux buduje sie na Linuxie:
 ```bash
 cd ~/secure-p2p/client
 flutter pub get
-flutter build linux --release
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 cd build/linux/x64/release
 zip -r ~/secure-p2p-linux.zip bundle
 ```
@@ -62,14 +89,14 @@ Na Raspberry Pi:
 
 ```bash
 cd /opt/secure-p2p/app/server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --android ~/secure-p2p-android.apk --notes "Aktualizacja komunikatora"
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --notes "Aktualizacja komunikatora"
 ```
 
 Jesli masz tez paczke Linux:
 
 ```bash
 cd /opt/secure-p2p/app/server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --notes "Aktualizacja komunikatora"
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --notes "Aktualizacja komunikatora"
 ```
 
 `--build` musi byc wiekszy niz numer builda w aplikacji. Jesli aplikacja ma `version: 1.0.0+1`, kolejna publikacja powinna miec np. `--version 1.0.1 --build 2`.
@@ -84,4 +111,9 @@ W aplikacji wejdz w `Ustawienia -> Aktualizacje` i kliknij odswiezanie.
 
 ## 5. Co robi przycisk w aplikacji
 
-Przycisk pobiera paczke z relay i sprawdza jej SHA-256 z manifestu. Windows i Linux probuja od razu otworzyc folder z pobranym plikiem. Android pobiera APK do katalogu aplikacji; system moze poprosic o zgode na instalowanie aplikacji spoza sklepu.
+Przycisk najpierw sprawdza podpis manifestu Ed25519. Jesli podpis jest
+niepoprawny albo go brakuje, aplikacja blokuje aktualizacje. Dopiero potem
+pobiera paczke z relay i sprawdza jej SHA-256 z manifestu. Windows i Linux
+probuja od razu otworzyc folder z pobranym plikiem. Android pobiera APK do
+katalogu aplikacji; system moze poprosic o zgode na instalowanie aplikacji
+spoza sklepu.
