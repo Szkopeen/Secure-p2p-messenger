@@ -31,6 +31,8 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   innej instancji.
 - Origin serwera jest kanonizowany przed podpisem: schemat i host malymi
   literami, bez sciezki, query, fragmentu i bez domyslnego portu.
+- Normalizacja originu odrzuca userinfo i obce schematy, zachowuje porty
+  niestandardowe, stabilizuje IPv6 oraz normalizuje hosty IDN do ASCII/Punycode.
 - Klient weryfikuje podpisane pakiety kluczy z serwera i blokuje niepoprawne
   albo zmienione tozsamosci.
 - Dodano TOFU/pinning podpisanej tozsamosci kontaktu.
@@ -39,6 +41,12 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Dodano testy negatywne dla podmiany klucza X25519, podmiany klucza Ed25519,
   innego UUID, innego originu/portu, uszkodzonego Base64 i starego formatu
   podpisu v1.
+- Dodano podpisana rotacje tozsamosci Ed25519: nowy klucz tozsamosci jest
+  podpisywany dotychczasowym kluczem, a klient akceptuje zmiane kontaktu tylko
+  wtedy, gdy dowod rotacji pasuje do przypietego starego klucza.
+- Dowod rotacji zawiera monotoniczny `rotationEpoch`, hash poprzedniego dowodu
+  rotacji oraz podpis nowym kluczem, ktory potwierdza posiadanie nowego klucza
+  prywatnego w chwili rotacji.
 - Dodano podpisane aktualizacje: manifest release jest podpisywany Ed25519, a
   klient weryfikuje podpis kluczem publicznym wbudowanym przy buildzie.
 
@@ -54,11 +62,15 @@ sekretem.
 2. Pierwsze dodanie kontaktu nadal ufa tozsamosci dostarczonej przez serwer,
    dopoki uzytkownicy nie porownaja safety number poza serwerem.
 3. Brak publicznego key transparency logu.
-4. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
+4. Bez key transparency zlosliwy serwer nadal moze probowac rozdzielic rozne
+   pierwsze galezie rotacji miedzy grupy kontaktow, zanim zobacza one wspolny
+   lancuch.
+5. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
+6. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
-5. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
+7. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
-6. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
+8. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
    prototypu, ale nie dla duzej uslugi.
 
 ## Priorytet 1: prawdziwsze E2EE wzgledem serwera

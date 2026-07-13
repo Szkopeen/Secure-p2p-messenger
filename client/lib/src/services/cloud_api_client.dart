@@ -160,11 +160,14 @@ class CloudApiClient {
     required String keyAgreementPublicKey,
     required String identityPublicKey,
     required String keyAgreementPublicKeySignature,
+    Map<String, dynamic>? identityRotationProof,
   }) async {
     await _put('/v2/keys', {
       'keyAgreementPublicKey': keyAgreementPublicKey,
       'identityPublicKey': identityPublicKey,
       'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
+      if (identityRotationProof != null)
+        'identityRotationProof': identityRotationProof,
     });
   }
 

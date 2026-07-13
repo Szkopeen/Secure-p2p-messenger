@@ -19,6 +19,25 @@ function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isValidIdentityRotationProof(value) {
+  return isObject(value) &&
+    Number.isInteger(value.rotationEpoch) &&
+    value.rotationEpoch >= 1 &&
+    typeof value.previousRotationHash === 'string' &&
+    typeof value.oldIdentityPublicKey === 'string' &&
+    value.oldIdentityPublicKey.length >= 16 &&
+    typeof value.newIdentityPublicKey === 'string' &&
+    value.newIdentityPublicKey.length >= 16 &&
+    typeof value.newKeyAgreementPublicKey === 'string' &&
+    value.newKeyAgreementPublicKey.length >= 16 &&
+    typeof value.signature === 'string' &&
+    value.signature.length >= 16 &&
+    typeof value.newIdentityConfirmationSignature === 'string' &&
+    value.newIdentityConfirmationSignature.length >= 16 &&
+    typeof value.rotatedAt === 'string' &&
+    value.rotatedAt.length >= 16;
+}
+
 function safeUsername(value) {
   return typeof value === 'string' && SAFE_ID.test(value);
 }
@@ -152,6 +171,7 @@ export class V2Store {
       keyAgreementPublicKey: user.keyAgreementPublicKey,
       identityPublicKey: user.identityPublicKey || '',
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
+      identityRotationProof: user.identityRotationProof || null,
       updatedAt: user.updatedAt
     };
   }
@@ -272,6 +292,7 @@ export async function handleV2Http(store, req, res, url) {
         keyAgreementPublicKey: body.keyAgreementPublicKey,
         identityPublicKey: body.identityPublicKey,
         keyAgreementPublicKeySignature: body.keyAgreementPublicKeySignature,
+        identityRotationProof: isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null,
         encryptedVault: isObject(body.encryptedVault) ? body.encryptedVault : null,
         devices: {},
         createdAt: nowIso(),
@@ -336,9 +357,13 @@ export async function handleV2Http(store, req, res, url) {
       if (typeof body.keyAgreementPublicKeySignature !== 'string' || body.keyAgreementPublicKeySignature.length < 16) {
         return sendJson(res, 400, { ok: false, error: 'Brak podpisu klucza szyfrowania.' });
       }
+      if (body.identityRotationProof !== undefined && body.identityRotationProof !== null && !isValidIdentityRotationProof(body.identityRotationProof)) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny dowod rotacji tozsamosci.' });
+      }
       auth.user.keyAgreementPublicKey = body.keyAgreementPublicKey;
       auth.user.identityPublicKey = body.identityPublicKey;
       auth.user.keyAgreementPublicKeySignature = body.keyAgreementPublicKeySignature;
+      auth.user.identityRotationProof = isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null;
       auth.user.updatedAt = nowIso();
       store.persistUsers();
       return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user) });

@@ -49,11 +49,43 @@ void main() {
         'https://chat.szkpn.pl:8443',
       );
       expect(
+        canonicalCloudOrigin('https://chat.szkpn.pl.'),
+        serverOrigin,
+      );
+      expect(
+        canonicalCloudOrigin('https://chat.szkpn.pl:443'),
+        serverOrigin,
+      );
+      expect(
+        canonicalCloudOrigin('https://chat.szkpn.pl:444'),
+        'https://chat.szkpn.pl:444',
+      );
+      expect(
         canonicalCloudOrigin('http://localhost:8080/api'),
         'http://localhost:8080',
       );
       expect(
+        canonicalCloudOrigin('https://[2001:db8::1]:443/'),
+        'https://[2001:db8::1]',
+      );
+      expect(
+        canonicalCloudOrigin('https://b\u00fccher.example/'),
+        'https://xn--bcher-kva.example',
+      );
+      expect(
         () => canonicalCloudOrigin('http://chat.szkpn.pl'),
+        throwsArgumentError,
+      );
+      expect(
+        () => canonicalCloudOrigin('https://user:password@chat.szkpn.pl'),
+        throwsArgumentError,
+      );
+      expect(
+        () => canonicalCloudOrigin('/relative/path'),
+        throwsArgumentError,
+      );
+      expect(
+        () => canonicalCloudOrigin('ftp://chat.szkpn.pl'),
         throwsArgumentError,
       );
     });
@@ -219,6 +251,182 @@ void main() {
           identityPublicKey: vault.identityPublicKey,
           keyAgreementPublicKey: vault.keyAgreementPublicKey,
           signature: legacySignature,
+        ),
+        isFalse,
+      );
+    });
+
+    test('rotacja tozsamosci jest podpisana starym kluczem', () async {
+      final crypto = CloudCrypto();
+      final oldVault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final rotation = await crypto.rotateIdentity(
+        vault: oldVault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+
+      expect(
+          rotation.vault.identityPublicKey, isNot(oldVault.identityPublicKey));
+      expect(
+        rotation.vault.keyAgreementPublicKey,
+        oldVault.keyAgreementPublicKey,
+      );
+      expect(
+        await crypto.verifyKeyAgreementSignature(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: rotation.vault.identityPublicKey,
+          keyAgreementPublicKey: rotation.vault.keyAgreementPublicKey,
+          signature: rotation.vault.keyAgreementPublicKeySignature,
+        ),
+        isTrue,
+      );
+      expect(
+        await crypto.verifyIdentityRotationProof(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          proof: rotation.proof,
+        ),
+        isTrue,
+      );
+      expect(
+        await crypto.verifyIdentityRotationProof(
+          accountId: 'uuid-bob',
+          serverOrigin: serverOrigin,
+          proof: rotation.proof,
+        ),
+        isFalse,
+      );
+      expect(
+        await crypto.verifyIdentityRotationProof(
+          accountId: accountId,
+          serverOrigin: 'https://chat.szkpn.pl:8443',
+          proof: rotation.proof,
+        ),
+        isFalse,
+      );
+    });
+
+    test('rotacja odrzuca podmienione pola dowodu', () async {
+      final crypto = CloudCrypto();
+      final oldVault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final rotation = await crypto.rotateIdentity(
+        vault: oldVault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final otherVault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final tamperedProof = IdentityRotationProof(
+        rotationEpoch: rotation.proof.rotationEpoch,
+        previousRotationHash: rotation.proof.previousRotationHash,
+        oldIdentityPublicKey: rotation.proof.oldIdentityPublicKey,
+        newIdentityPublicKey: rotation.proof.newIdentityPublicKey,
+        newKeyAgreementPublicKey: otherVault.keyAgreementPublicKey,
+        signature: rotation.proof.signature,
+        newIdentityConfirmationSignature:
+            rotation.proof.newIdentityConfirmationSignature,
+        rotatedAt: rotation.proof.rotatedAt,
+      );
+
+      expect(
+        await crypto.verifyIdentityRotationProof(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          proof: tamperedProof,
+        ),
+        isFalse,
+      );
+    });
+
+    test('rotacja tworzy monotoniczny lancuch epoch i hashy', () async {
+      final crypto = CloudCrypto();
+      final initialVault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final first = await crypto.rotateIdentity(
+        vault: initialVault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final second = await crypto.rotateIdentity(
+        vault: first.vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+
+      expect(first.proof.rotationEpoch, 1);
+      expect(first.proof.previousRotationHash, isEmpty);
+      expect(second.proof.rotationEpoch, 2);
+      expect(second.proof.previousRotationHash, first.proof.rotationHash);
+      expect(
+        crypto.isNextIdentityRotation(
+          previousProof: null,
+          nextProof: first.proof,
+        ),
+        isTrue,
+      );
+      expect(
+        crypto.isNextIdentityRotation(
+          previousProof: first.proof,
+          nextProof: second.proof,
+        ),
+        isTrue,
+      );
+      expect(
+        crypto.isNextIdentityRotation(
+          previousProof: first.proof,
+          nextProof: first.proof,
+        ),
+        isFalse,
+      );
+      expect(
+        crypto.isNextIdentityRotation(
+          previousProof: null,
+          nextProof: second.proof,
+        ),
+        isFalse,
+      );
+    });
+
+    test('rotacja odrzuca alternatywna galaz po zaakceptowaniu pierwszej',
+        () async {
+      final crypto = CloudCrypto();
+      final initialVault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final branchA = await crypto.rotateIdentity(
+        vault: initialVault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final branchB = await crypto.rotateIdentity(
+        vault: initialVault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+
+      expect(
+        crypto.isNextIdentityRotation(
+          previousProof: null,
+          nextProof: branchA.proof,
+        ),
+        isTrue,
+      );
+      expect(
+        crypto.isNextIdentityRotation(
+          previousProof: branchA.proof,
+          nextProof: branchB.proof,
         ),
         isFalse,
       );

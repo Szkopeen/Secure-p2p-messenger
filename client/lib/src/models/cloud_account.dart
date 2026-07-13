@@ -1,3 +1,5 @@
+import 'package:crypto/crypto.dart' as crypto_hash;
+
 import '../crypto/codec.dart';
 
 class CloudSession {
@@ -55,6 +57,7 @@ class CloudPublicUser {
     required this.keyAgreementPublicKey,
     required this.identityPublicKey,
     required this.keyAgreementPublicKeySignature,
+    this.identityRotationProof,
   });
 
   final String userId;
@@ -63,6 +66,7 @@ class CloudPublicUser {
   final String keyAgreementPublicKey;
   final String identityPublicKey;
   final String keyAgreementPublicKeySignature;
+  final IdentityRotationProof? identityRotationProof;
 
   factory CloudPublicUser.fromJson(Map<String, dynamic> json) {
     return CloudPublicUser(
@@ -74,7 +78,71 @@ class CloudPublicUser {
       identityPublicKey: json['identityPublicKey'] as String? ?? '',
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String? ?? '',
+      identityRotationProof:
+          IdentityRotationProof.fromOptionalJson(json['identityRotationProof']),
     );
+  }
+}
+
+class IdentityRotationProof {
+  const IdentityRotationProof({
+    required this.rotationEpoch,
+    required this.previousRotationHash,
+    required this.oldIdentityPublicKey,
+    required this.newIdentityPublicKey,
+    required this.newKeyAgreementPublicKey,
+    required this.signature,
+    required this.newIdentityConfirmationSignature,
+    required this.rotatedAt,
+  });
+
+  final int rotationEpoch;
+  final String previousRotationHash;
+  final String oldIdentityPublicKey;
+  final String newIdentityPublicKey;
+  final String newKeyAgreementPublicKey;
+  final String signature;
+  final String newIdentityConfirmationSignature;
+  final DateTime rotatedAt;
+
+  String get rotationHash =>
+      crypto_hash.sha256.convert(canonicalJsonBytes(toJson())).toString();
+
+  Map<String, dynamic> toJson() => {
+        'v': 1,
+        'rotationEpoch': rotationEpoch,
+        'previousRotationHash': previousRotationHash,
+        'oldIdentityPublicKey': oldIdentityPublicKey,
+        'newIdentityPublicKey': newIdentityPublicKey,
+        'newKeyAgreementPublicKey': newKeyAgreementPublicKey,
+        'signature': signature,
+        'newIdentityConfirmationSignature': newIdentityConfirmationSignature,
+        'rotatedAt': rotatedAt.toUtc().toIso8601String(),
+      };
+
+  factory IdentityRotationProof.fromJson(Map<String, dynamic> json) {
+    return IdentityRotationProof(
+      rotationEpoch: json['rotationEpoch'] is int
+          ? json['rotationEpoch'] as int
+          : int.tryParse(json['rotationEpoch']?.toString() ?? '') ?? 1,
+      previousRotationHash: json['previousRotationHash'] as String? ?? '',
+      oldIdentityPublicKey: requiredString(json, 'oldIdentityPublicKey'),
+      newIdentityPublicKey: requiredString(json, 'newIdentityPublicKey'),
+      newKeyAgreementPublicKey:
+          requiredString(json, 'newKeyAgreementPublicKey'),
+      signature: requiredString(json, 'signature'),
+      newIdentityConfirmationSignature:
+          json['newIdentityConfirmationSignature'] as String? ?? '',
+      rotatedAt: DateTime.tryParse(json['rotatedAt']?.toString() ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+    );
+  }
+
+  static IdentityRotationProof? fromOptionalJson(Object? value) {
+    if (value is Map) {
+      return IdentityRotationProof.fromJson(value.cast<String, dynamic>());
+    }
+    return null;
   }
 }
 
@@ -148,6 +216,7 @@ class CloudVault {
     required this.identityPublicKey,
     required this.keyAgreementPublicKeySignature,
     required this.conversationKeys,
+    this.identityRotationProof,
   });
 
   final String keyAgreementPrivateKey;
@@ -156,6 +225,7 @@ class CloudVault {
   final String identityPublicKey;
   final String keyAgreementPublicKeySignature;
   final Map<String, String> conversationKeys;
+  final IdentityRotationProof? identityRotationProof;
 
   Map<String, dynamic> toJson() => {
         'v': 1,
@@ -164,6 +234,7 @@ class CloudVault {
         'identityPrivateKey': identityPrivateKey,
         'identityPublicKey': identityPublicKey,
         'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
+        'identityRotationProof': identityRotationProof?.toJson(),
         'conversationKeys': conversationKeys,
       };
 
@@ -175,6 +246,8 @@ class CloudVault {
       identityPublicKey: json['identityPublicKey'] as String? ?? '',
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String? ?? '',
+      identityRotationProof:
+          IdentityRotationProof.fromOptionalJson(json['identityRotationProof']),
       conversationKeys: ((json['conversationKeys'] as Map?) ?? const {})
           .map((key, value) => MapEntry(key.toString(), value.toString())),
     );
@@ -186,6 +259,7 @@ class CloudVault {
     String? identityPrivateKey,
     String? identityPublicKey,
     String? keyAgreementPublicKeySignature,
+    IdentityRotationProof? identityRotationProof,
     Map<String, String>? conversationKeys,
   }) {
     return CloudVault(
@@ -197,6 +271,8 @@ class CloudVault {
       identityPublicKey: identityPublicKey ?? this.identityPublicKey,
       keyAgreementPublicKeySignature:
           keyAgreementPublicKeySignature ?? this.keyAgreementPublicKeySignature,
+      identityRotationProof:
+          identityRotationProof ?? this.identityRotationProof,
       conversationKeys: conversationKeys ?? this.conversationKeys,
     );
   }

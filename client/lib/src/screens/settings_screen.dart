@@ -50,6 +50,22 @@ class SettingsScreen extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               _SettingsSection(
+                title: 'Bezpieczenstwo',
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.verified_user_outlined),
+                    title: const Text('Rotuj tozsamosc'),
+                    subtitle: const Text(
+                      'Tworzy nowy klucz Ed25519 podpisany dotychczasowym kluczem.',
+                    ),
+                    onTap: appState.cloudMode
+                        ? () => _confirmIdentityRotation(context)
+                        : null,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _SettingsSection(
                 title: 'Profil',
                 children: [
                   ListTile(
@@ -199,6 +215,43 @@ class SettingsScreen extends StatelessWidget {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Aktualizacja zostala pobrana.')),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
+  }
+
+  Future<void> _confirmIdentityRotation(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Rotuj tozsamosc'),
+          content: const Text(
+            'Aplikacja utworzy nowy klucz tozsamosci i podpisze go obecnym kluczem. Kontakty z aktualna wersja zaakceptuja taka rotacje automatycznie, ale po zmianie nadal warto porownac safety number.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Anuluj'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Rotuj'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    try {
+      await appState.rotateCloudIdentity();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tozsamosc zostala zrotowana.')),
       );
     } catch (error) {
       if (!context.mounted) return;

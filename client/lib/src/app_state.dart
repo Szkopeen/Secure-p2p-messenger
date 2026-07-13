@@ -776,6 +776,7 @@ class AppState extends ChangeNotifier {
       identityPublicKey: user.keyAgreementPublicKey,
       signingPublicKey: user.identityPublicKey,
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature,
+      identityRotationProof: user.identityRotationProof?.toJson(),
     );
   }
 
@@ -845,10 +846,102 @@ class AppState extends ChangeNotifier {
 
     if (existing.signingPublicKey != peer.identityPublicKey ||
         existing.identityPublicKey != peer.keyAgreementPublicKey) {
+      if (await _acceptCloudUserIdentityRotation(existing, peer)) {
+        return;
+      }
       throw StateError(
-        'Ostrzezenie: serwer zwrocil inna podpisana tozsamosc dla ${existing.displayName}. Rozmowa zostala zablokowana do recznej weryfikacji.',
+        'Ostrzezenie: serwer zwrocil inna podpisana tozsamosc dla ${existing.displayName} bez poprawnej rotacji podpisanej starym kluczem. Rozmowa zostala zablokowana do recznej weryfikacji.',
       );
     }
+  }
+
+  Future<bool> _acceptCloudUserIdentityRotation(
+    Contact existing,
+    CloudPublicUser peer,
+  ) async {
+    final proof = peer.identityRotationProof;
+    if (proof == null || existing.signingPublicKey?.isNotEmpty != true) {
+      return false;
+    }
+    if (proof.oldIdentityPublicKey != existing.signingPublicKey ||
+        proof.newIdentityPublicKey != peer.identityPublicKey ||
+        proof.newKeyAgreementPublicKey != peer.keyAgreementPublicKey) {
+      return false;
+    }
+    final previousProof =
+        IdentityRotationProof.fromOptionalJson(existing.identityRotationProof);
+    if (!_cloudCrypto.isNextIdentityRotation(
+      previousProof: previousProof,
+      nextProof: proof,
+    )) {
+      return false;
+    }
+    final valid = await _cloudCrypto.verifyIdentityRotationProof(
+      accountId: peer.userId,
+      serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
+      proof: proof,
+    );
+    if (!valid) return false;
+
+    final index = _contacts.indexWhere((item) => item.userId == peer.userId);
+    if (index < 0) return false;
+    _contacts[index] = existing.copyWith(
+      displayName: peer.displayName,
+      identityPublicKey: peer.keyAgreementPublicKey,
+      signingPublicKey: peer.identityPublicKey,
+      keyAgreementPublicKeySignature: peer.keyAgreementPublicKeySignature,
+      identityRotationProof: proof.toJson(),
+    );
+    await _store.saveContacts(_contacts);
+    _setStatus(
+      'Tozsamosc ${peer.displayName} zostala zaktualizowana podpisana rotacja.',
+    );
+    return true;
+  }
+
+  Future<bool> _acceptContactIdentityRotation(
+    Contact existing,
+    Contact contact,
+  ) async {
+    final proof =
+        IdentityRotationProof.fromOptionalJson(contact.identityRotationProof);
+    if (proof == null || existing.signingPublicKey?.isNotEmpty != true) {
+      return false;
+    }
+    if (proof.oldIdentityPublicKey != existing.signingPublicKey ||
+        proof.newIdentityPublicKey != contact.signingPublicKey ||
+        proof.newKeyAgreementPublicKey != contact.identityPublicKey) {
+      return false;
+    }
+    final previousProof =
+        IdentityRotationProof.fromOptionalJson(existing.identityRotationProof);
+    if (!_cloudCrypto.isNextIdentityRotation(
+      previousProof: previousProof,
+      nextProof: proof,
+    )) {
+      return false;
+    }
+    final valid = await _cloudCrypto.verifyIdentityRotationProof(
+      accountId: contact.userId,
+      serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
+      proof: proof,
+    );
+    if (!valid) return false;
+
+    final index = _contacts.indexWhere((item) => item.userId == contact.userId);
+    if (index < 0) return false;
+    _contacts[index] = existing.copyWith(
+      displayName: contact.displayName,
+      identityPublicKey: contact.identityPublicKey,
+      signingPublicKey: contact.signingPublicKey,
+      keyAgreementPublicKeySignature: contact.keyAgreementPublicKeySignature,
+      identityRotationProof: proof.toJson(),
+    );
+    await _store.saveContacts(_contacts);
+    _setStatus(
+      'Tozsamosc ${contact.displayName} zostala zaktualizowana podpisana rotacja.',
+    );
+    return true;
   }
 
   Future<void> _loadCloudConversations() async {
@@ -963,7 +1056,26 @@ class AppState extends ChangeNotifier {
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
       identityPublicKey: vault.identityPublicKey,
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
+      identityRotationProof: vault.identityRotationProof?.toJson(),
     );
+  }
+
+  Future<void> rotateCloudIdentity() async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    if (session == null || vault == null || _cloudClient == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    final rotation = await _cloudCrypto.rotateIdentity(
+      vault: vault,
+      accountId: session.userId,
+      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
+    );
+    _cloudVault = rotation.vault;
+    await _saveCloudVault();
+    await _publishCloudKeyBundle();
+    _setStatus('Tozsamosc konta zostala zrotowana i podpisana starym kluczem.');
+    notifyListeners();
   }
 
   Future<String?> _ensureCloudConversationKey(
@@ -1139,6 +1251,8 @@ class AppState extends ChangeNotifier {
         keyAgreementPublicKeySignature:
             contact.keyAgreementPublicKeySignature ??
                 existing?.keyAgreementPublicKeySignature,
+        identityRotationProof:
+            contact.identityRotationProof ?? existing?.identityRotationProof,
         avatarMimeType: existing?.avatarMimeType ?? contact.avatarMimeType,
         avatarBytesBase64:
             existing?.avatarBytesBase64 ?? contact.avatarBytesBase64,
@@ -1189,14 +1303,19 @@ class AppState extends ChangeNotifier {
           signingPublicKey: contact.signingPublicKey,
           keyAgreementPublicKeySignature:
               contact.keyAgreementPublicKeySignature,
+          identityRotationProof: contact.identityRotationProof,
         );
         await _store.saveContacts(_contacts);
       }
     } else if (existing.identityPublicKey != contact.identityPublicKey ||
         existing.signingPublicKey != contact.signingPublicKey) {
-      throw StateError(
-        'Podpisana tozsamosc kontaktu ${existing.displayName} zmienila sie. Nie wysylam wiadomosci przed reczna weryfikacja.',
-      );
+      if (await _acceptContactIdentityRotation(existing, contact)) {
+        await _assertContactKeyBundle(_contactById(contact.userId) ?? contact);
+      } else {
+        throw StateError(
+          'Podpisana tozsamosc kontaktu ${existing.displayName} zmienila sie bez poprawnej rotacji podpisanej starym kluczem. Nie wysylam wiadomosci przed reczna weryfikacja.',
+        );
+      }
     }
     await _assertContactKeyBundle(_contactById(contact.userId) ?? contact);
 
@@ -3634,6 +3753,8 @@ class AppState extends ChangeNotifier {
             existing.keyAgreementPublicKeySignature?.isNotEmpty == true
                 ? existing.keyAgreementPublicKeySignature
                 : contact.keyAgreementPublicKeySignature,
+        identityRotationProof:
+            existing.identityRotationProof ?? contact.identityRotationProof,
         avatarMimeType: useIncomingProfile
             ? contact.avatarMimeType
             : existing.avatarMimeType,
@@ -3984,6 +4105,7 @@ class AppState extends ChangeNotifier {
       identityPublicKey: contact.identityPublicKey,
       signingPublicKey: contact.signingPublicKey,
       keyAgreementPublicKeySignature: contact.keyAgreementPublicKeySignature,
+      identityRotationProof: contact.identityRotationProof,
       avatarMimeType: profile.avatarMimeType,
       avatarBytesBase64: profile.avatarBytesBase64,
       profileUpdatedAt: incomingUpdatedAt ?? DateTime.now().toUtc(),

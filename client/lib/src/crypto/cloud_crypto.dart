@@ -21,6 +21,16 @@ class CloudDecryptedMessage {
   final DateTime createdAt;
 }
 
+class CloudIdentityRotation {
+  const CloudIdentityRotation({
+    required this.vault,
+    required this.proof,
+  });
+
+  final CloudVault vault;
+  final IdentityRotationProof proof;
+}
+
 class CloudCrypto {
   CloudCrypto();
 
@@ -28,6 +38,7 @@ class CloudCrypto {
   static const keyWrapAad = 'secure-p2p-cloud-keywrap/v1';
   static const messageProtocol = 'secure-p2p-cloud-message/v1';
   static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v2';
+  static const identityRotationProtocol = 'secure-p2p-identity-rotation/v1';
 
   final AesGcm _aead = AesGcm.with256bits();
   final X25519 _x25519 = X25519();
@@ -166,6 +177,138 @@ class CloudCrypto {
     }
   }
 
+  Future<CloudIdentityRotation> rotateIdentity({
+    required CloudVault vault,
+    required String accountId,
+    required String serverOrigin,
+  }) async {
+    if (vault.identityPrivateKey.isEmpty || vault.identityPublicKey.isEmpty) {
+      throw StateError('Brak starego klucza tozsamosci do podpisania rotacji.');
+    }
+
+    final oldIdentityPrivateKey = vault.identityPrivateKey;
+    final oldIdentityPublicKey = vault.identityPublicKey;
+    final newIdentityKeyPair = await _ed25519.newKeyPair();
+    final newIdentityPrivateBytes =
+        await newIdentityKeyPair.extractPrivateKeyBytes();
+    final newIdentityPublicKey = await newIdentityKeyPair.extractPublicKey();
+    final newIdentityPrivateKeyBase64 = b64(newIdentityPrivateBytes);
+    final newIdentityPublicKeyBase64 = b64(newIdentityPublicKey.bytes);
+    final keyAgreementSignature = await _signKeyAgreementPublicKey(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
+      identityPrivateKey: newIdentityPrivateKeyBase64,
+      identityPublicKey: newIdentityPublicKeyBase64,
+      keyAgreementPublicKey: vault.keyAgreementPublicKey,
+    );
+    final rotatedAt = DateTime.now().toUtc();
+    final previousProof = vault.identityRotationProof;
+    final rotationEpoch = (previousProof?.rotationEpoch ?? 0) + 1;
+    final previousRotationHash = previousProof?.rotationHash ?? '';
+    final rotationSignature = await _signIdentityRotation(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
+      oldIdentityPrivateKey: oldIdentityPrivateKey,
+      oldIdentityPublicKey: oldIdentityPublicKey,
+      newIdentityPublicKey: newIdentityPublicKeyBase64,
+      newKeyAgreementPublicKey: vault.keyAgreementPublicKey,
+      rotationEpoch: rotationEpoch,
+      previousRotationHash: previousRotationHash,
+      rotatedAt: rotatedAt,
+    );
+    final confirmationSignature = await _signIdentityRotationConfirmation(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
+      newIdentityPrivateKey: newIdentityPrivateKeyBase64,
+      newIdentityPublicKey: newIdentityPublicKeyBase64,
+      oldIdentityPublicKey: oldIdentityPublicKey,
+      newKeyAgreementPublicKey: vault.keyAgreementPublicKey,
+      rotationEpoch: rotationEpoch,
+      previousRotationHash: previousRotationHash,
+      rotatedAt: rotatedAt,
+    );
+    final proof = IdentityRotationProof(
+      rotationEpoch: rotationEpoch,
+      previousRotationHash: previousRotationHash,
+      oldIdentityPublicKey: oldIdentityPublicKey,
+      newIdentityPublicKey: newIdentityPublicKeyBase64,
+      newKeyAgreementPublicKey: vault.keyAgreementPublicKey,
+      signature: rotationSignature,
+      newIdentityConfirmationSignature: confirmationSignature,
+      rotatedAt: rotatedAt,
+    );
+
+    return CloudIdentityRotation(
+      vault: vault.copyWith(
+        identityPrivateKey: newIdentityPrivateKeyBase64,
+        identityPublicKey: newIdentityPublicKeyBase64,
+        keyAgreementPublicKeySignature: keyAgreementSignature,
+        identityRotationProof: proof,
+      ),
+      proof: proof,
+    );
+  }
+
+  Future<bool> verifyIdentityRotationProof({
+    required String accountId,
+    required String serverOrigin,
+    required IdentityRotationProof proof,
+  }) async {
+    if (proof.oldIdentityPublicKey.isEmpty ||
+        proof.newIdentityPublicKey.isEmpty ||
+        proof.newKeyAgreementPublicKey.isEmpty ||
+        proof.signature.isEmpty ||
+        proof.newIdentityConfirmationSignature.isEmpty ||
+        proof.rotationEpoch < 1) {
+      return false;
+    }
+    try {
+      final rotationBytes = _identityRotationBytes(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        oldIdentityPublicKey: proof.oldIdentityPublicKey,
+        newIdentityPublicKey: proof.newIdentityPublicKey,
+        newKeyAgreementPublicKey: proof.newKeyAgreementPublicKey,
+        rotationEpoch: proof.rotationEpoch,
+        previousRotationHash: proof.previousRotationHash,
+        rotatedAt: proof.rotatedAt,
+      );
+      final oldKeyValid = await _ed25519.verify(
+        rotationBytes,
+        signature: Signature(
+          unb64(proof.signature),
+          publicKey: SimplePublicKey(
+            unb64(proof.oldIdentityPublicKey),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+      if (!oldKeyValid) return false;
+      return _ed25519.verify(
+        rotationBytes,
+        signature: Signature(
+          unb64(proof.newIdentityConfirmationSignature),
+          publicKey: SimplePublicKey(
+            unb64(proof.newIdentityPublicKey),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool isNextIdentityRotation({
+    required IdentityRotationProof? previousProof,
+    required IdentityRotationProof nextProof,
+  }) {
+    final expectedEpoch = (previousProof?.rotationEpoch ?? 0) + 1;
+    final expectedPreviousHash = previousProof?.rotationHash ?? '';
+    return nextProof.rotationEpoch == expectedEpoch &&
+        nextProof.previousRotationHash == expectedPreviousHash;
+  }
+
   Future<String> _signKeyAgreementPublicKey({
     required String accountId,
     required String serverOrigin,
@@ -192,6 +335,74 @@ class CloudCrypto {
     return b64(signature.bytes);
   }
 
+  Future<String> _signIdentityRotation({
+    required String accountId,
+    required String serverOrigin,
+    required String oldIdentityPrivateKey,
+    required String oldIdentityPublicKey,
+    required String newIdentityPublicKey,
+    required String newKeyAgreementPublicKey,
+    required int rotationEpoch,
+    required String previousRotationHash,
+    required DateTime rotatedAt,
+  }) async {
+    final signature = await _ed25519.sign(
+      _identityRotationBytes(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        oldIdentityPublicKey: oldIdentityPublicKey,
+        newIdentityPublicKey: newIdentityPublicKey,
+        newKeyAgreementPublicKey: newKeyAgreementPublicKey,
+        rotationEpoch: rotationEpoch,
+        previousRotationHash: previousRotationHash,
+        rotatedAt: rotatedAt,
+      ),
+      keyPair: SimpleKeyPairData(
+        unb64(oldIdentityPrivateKey),
+        publicKey: SimplePublicKey(
+          unb64(oldIdentityPublicKey),
+          type: KeyPairType.ed25519,
+        ),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    return b64(signature.bytes);
+  }
+
+  Future<String> _signIdentityRotationConfirmation({
+    required String accountId,
+    required String serverOrigin,
+    required String newIdentityPrivateKey,
+    required String newIdentityPublicKey,
+    required String oldIdentityPublicKey,
+    required String newKeyAgreementPublicKey,
+    required int rotationEpoch,
+    required String previousRotationHash,
+    required DateTime rotatedAt,
+  }) async {
+    final signature = await _ed25519.sign(
+      _identityRotationBytes(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        oldIdentityPublicKey: oldIdentityPublicKey,
+        newIdentityPublicKey: newIdentityPublicKey,
+        newKeyAgreementPublicKey: newKeyAgreementPublicKey,
+        rotationEpoch: rotationEpoch,
+        previousRotationHash: previousRotationHash,
+        rotatedAt: rotatedAt,
+      ),
+      keyPair: SimpleKeyPairData(
+        unb64(newIdentityPrivateKey),
+        publicKey: SimplePublicKey(
+          unb64(newIdentityPublicKey),
+          type: KeyPairType.ed25519,
+        ),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    return b64(signature.bytes);
+  }
+
   Uint8List _keyAgreementBindingBytes({
     required String accountId,
     required String serverOrigin,
@@ -205,6 +416,30 @@ class CloudCrypto {
       'serverOrigin': serverOrigin,
       'identityPublicKey': identityPublicKey,
       'keyAgreementPublicKey': keyAgreementPublicKey,
+    });
+  }
+
+  Uint8List _identityRotationBytes({
+    required String accountId,
+    required String serverOrigin,
+    required String oldIdentityPublicKey,
+    required String newIdentityPublicKey,
+    required String newKeyAgreementPublicKey,
+    required int rotationEpoch,
+    required String previousRotationHash,
+    required DateTime rotatedAt,
+  }) {
+    return canonicalJsonBytes({
+      'v': 1,
+      'protocol': identityRotationProtocol,
+      'accountId': accountId,
+      'serverOrigin': serverOrigin,
+      'rotationEpoch': rotationEpoch,
+      'previousRotationHash': previousRotationHash,
+      'oldIdentityPublicKey': oldIdentityPublicKey,
+      'newIdentityPublicKey': newIdentityPublicKey,
+      'newKeyAgreementPublicKey': newKeyAgreementPublicKey,
+      'rotatedAt': rotatedAt.toUtc().toIso8601String(),
     });
   }
 

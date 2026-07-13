@@ -5,6 +5,7 @@ class Contact {
     required this.identityPublicKey,
     this.signingPublicKey,
     this.keyAgreementPublicKeySignature,
+    this.identityRotationProof,
     this.avatarMimeType,
     this.avatarBytesBase64,
     this.profileUpdatedAt,
@@ -17,6 +18,7 @@ class Contact {
   // Ed25519 public identity key used to verify keyAgreementPublicKeySignature.
   final String? signingPublicKey;
   final String? keyAgreementPublicKeySignature;
+  final Map<String, dynamic>? identityRotationProof;
   final String? avatarMimeType;
   final String? avatarBytesBase64;
   final DateTime? profileUpdatedAt;
@@ -30,6 +32,7 @@ class Contact {
         'identityPublicKey': identityPublicKey,
         'signingPublicKey': signingPublicKey,
         'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
+        'identityRotationProof': identityRotationProof,
         'avatarMimeType': avatarMimeType,
         'avatarBytes': avatarBytesBase64,
         'profileUpdatedAt': profileUpdatedAt?.toUtc().toIso8601String(),
@@ -44,6 +47,8 @@ class Contact {
       signingPublicKey: json['signingPublicKey'] as String?,
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String?,
+      identityRotationProof: (json['identityRotationProof'] as Map?)
+          ?.map((key, value) => MapEntry(key.toString(), value)),
       avatarMimeType: json['avatarMimeType'] as String?,
       avatarBytesBase64: json['avatarBytes'] as String?,
       profileUpdatedAt: profileUpdatedAtRaw == null
@@ -57,6 +62,7 @@ class Contact {
     String? identityPublicKey,
     String? signingPublicKey,
     String? keyAgreementPublicKeySignature,
+    Map<String, dynamic>? identityRotationProof,
     String? avatarMimeType,
     String? avatarBytesBase64,
     DateTime? profileUpdatedAt,
@@ -68,6 +74,8 @@ class Contact {
       signingPublicKey: signingPublicKey ?? this.signingPublicKey,
       keyAgreementPublicKeySignature:
           keyAgreementPublicKeySignature ?? this.keyAgreementPublicKeySignature,
+      identityRotationProof:
+          identityRotationProof ?? this.identityRotationProof,
       avatarMimeType: avatarMimeType ?? this.avatarMimeType,
       avatarBytesBase64: avatarBytesBase64 ?? this.avatarBytesBase64,
       profileUpdatedAt: profileUpdatedAt ?? this.profileUpdatedAt,
