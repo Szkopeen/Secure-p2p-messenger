@@ -95,6 +95,10 @@ function isValidDeviceList(value) {
     if (!isObject(device) ||
         typeof device.deviceId !== 'string' ||
         device.deviceId.length < 8 ||
+        (device.deviceSigningPublicKey !== undefined &&
+          typeof device.deviceSigningPublicKey !== 'string') ||
+        (device.deviceCertificateHash !== undefined &&
+          typeof device.deviceCertificateHash !== 'string') ||
         !Number.isInteger(device.revokedDeviceEpoch) ||
         device.revokedDeviceEpoch < 1 ||
         typeof device.revokedAt !== 'string' ||
@@ -102,7 +106,25 @@ function isValidDeviceList(value) {
       return false;
     }
   }
+  const activeIds = new Set(value.devices.map((device) => device.deviceId));
+  for (const device of value.revokedDevices) {
+    if (activeIds.has(device.deviceId)) return false;
+  }
   return true;
+}
+
+function revokedDeviceIds(user) {
+  if (!isValidDeviceList(user?.deviceList)) return new Set();
+  return new Set(user.deviceList.revokedDevices.map((device) => device.deviceId));
+}
+
+function activeDeviceEntry(user, deviceId) {
+  if (!isValidDeviceList(user?.deviceList)) return null;
+  return user.deviceList.devices.find((device) => device.deviceId === deviceId) || null;
+}
+
+function isDeviceRevoked(user, deviceId) {
+  return revokedDeviceIds(user).has(deviceId);
 }
 
 function validateCloudMessagePayload(payload, body, auth) {
@@ -146,6 +168,18 @@ function validateCloudMessagePayload(payload, body, auth) {
     }
     if (typeof payload.deviceSignature !== 'string' || payload.deviceSignature.length < 16) {
       return 'Brak podpisu urzadzenia.';
+    }
+    if (isDeviceRevoked(auth.user, auth.session.deviceId)) {
+      return 'Urzadzenie zostalo uniewaznione.';
+    }
+    const activeDevice = activeDeviceEntry(auth.user, auth.session.deviceId);
+    if (isValidDeviceList(auth.user.deviceList)) {
+      if (!activeDevice) {
+        return 'Urzadzenie nie jest aktywne na podpisanej liscie urzadzen.';
+      }
+      if (activeDevice.deviceSigningPublicKey !== payload.deviceCertificate.deviceSigningPublicKey) {
+        return 'Certyfikat urzadzenia nie zgadza sie z lista urzadzen.';
+      }
     }
   }
   if (payload.deviceSignature !== undefined && payload.deviceCertificate === undefined) {
@@ -243,6 +277,7 @@ export class V2Store {
     this.conversations = readJson(this.conversationsFile, { v: 1, conversations: {} });
     this.messages = readJson(this.messagesFile, { v: 1, messages: {} });
     this.liveSockets = new Map();
+    this.accountQueues = new Map();
     this.pruneSessions();
   }
 
@@ -307,6 +342,9 @@ export class V2Store {
   }
 
   createSession(user, deviceId, deviceName) {
+    if (isDeviceRevoked(user, deviceId)) {
+      throw new Error('Urzadzenie zostalo uniewaznione.');
+    }
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAtMs = Date.now() + SESSION_TTL_MS;
     user.devices ||= {};
@@ -336,6 +374,11 @@ export class V2Store {
     if (!session) return null;
     const user = this.users.users[session.userId];
     if (!user) return null;
+    if (isDeviceRevoked(user, session.deviceId)) {
+      delete this.sessions.sessions[token];
+      this.persistSessions();
+      return null;
+    }
     user.devices ||= {};
     if (user.devices[session.deviceId]) {
       user.devices[session.deviceId].lastSeenAt = nowIso();
@@ -378,7 +421,9 @@ export class V2Store {
     }
   }
 
-  attachSocket(userId, ws) {
+  attachSocket(userId, deviceId, token, ws) {
+    ws._secureP2pDeviceId = deviceId;
+    ws._secureP2pToken = token;
     const sockets = this.liveSockets.get(userId) || new Set();
     sockets.add(ws);
     this.liveSockets.set(userId, sockets);
@@ -386,6 +431,41 @@ export class V2Store {
       sockets.delete(ws);
       if (sockets.size === 0) this.liveSockets.delete(userId);
     });
+  }
+
+  revokeDeviceSessions(userId, deviceIds) {
+    const revoked = new Set(deviceIds);
+    if (revoked.size === 0) return;
+    let changed = false;
+    for (const [token, session] of Object.entries(this.sessions.sessions)) {
+      if (session.userId === userId && revoked.has(session.deviceId)) {
+        delete this.sessions.sessions[token];
+        changed = true;
+      }
+    }
+    if (changed) this.persistSessions();
+    const sockets = this.liveSockets.get(userId);
+    if (!sockets) return;
+    for (const ws of Array.from(sockets)) {
+      if (revoked.has(ws._secureP2pDeviceId) && ws.readyState === 1) {
+        ws.close(4001, 'Urzadzenie zostalo uniewaznione.');
+      }
+    }
+  }
+
+  withAccountLock(userId, task) {
+    const previous = this.accountQueues.get(userId) || Promise.resolve();
+    let current;
+    current = previous
+      .catch(() => {})
+      .then(task)
+      .finally(() => {
+        if (this.accountQueues.get(userId) === current) {
+          this.accountQueues.delete(userId);
+        }
+      });
+    this.accountQueues.set(userId, current);
+    return current;
   }
 }
 
@@ -431,7 +511,12 @@ export async function handleV2Http(store, req, res, url) {
         updatedAt: nowIso()
       };
       store.users.users[userId] = user;
-      const session = store.createSession(user, deviceId, body.deviceName);
+      let session;
+      try {
+        session = store.createSession(user, deviceId, body.deviceName);
+      } catch (error) {
+        return sendJson(res, 403, { ok: false, error: String(error.message || error) });
+      }
       store.persistUsers();
       return sendJson(res, 200, {
         ok: true,
@@ -451,7 +536,12 @@ export async function handleV2Http(store, req, res, url) {
         return sendJson(res, 401, { ok: false, error: 'Niepoprawny login albo haslo.' });
       }
       const deviceId = String(body.deviceId || randomId());
-      const session = store.createSession(user, deviceId, body.deviceName);
+      let session;
+      try {
+        session = store.createSession(user, deviceId, body.deviceName);
+      } catch (error) {
+        return sendJson(res, 403, { ok: false, error: String(error.message || error) });
+      }
       return sendJson(res, 200, {
         ok: true,
         token: session.token,
@@ -480,6 +570,11 @@ export async function handleV2Http(store, req, res, url) {
 
     if (method === 'PUT' && url.pathname === '/v2/keys') {
       const body = await readBody(req);
+      return await store.withAccountLock(auth.user.userId, async () => {
+      auth.user = store.users.users[auth.user.userId];
+      if (!auth.user) {
+        return sendJson(res, 401, { ok: false, error: 'Brak logowania.' });
+      }
       if (typeof body.keyAgreementPublicKey !== 'string' || body.keyAgreementPublicKey.length < 16) {
         return sendJson(res, 400, { ok: false, error: 'Brak publicznego klucza szyfrowania.' });
       }
@@ -508,6 +603,9 @@ export async function handleV2Http(store, req, res, url) {
         if (body.deviceList.accountId !== auth.user.userId) {
           return sendJson(res, 400, { ok: false, error: 'Lista urzadzen nie zgadza sie z kontem.' });
         }
+        if (body.deviceList.revokedDevices.some((device) => device.deviceId === auth.session.deviceId)) {
+          return sendJson(res, 400, { ok: false, error: 'Nie mozna uniewaznic aktualnie uzywanego urzadzenia.' });
+        }
         if (typeof body.deviceListHash !== 'string' || body.deviceListHash.length < 16) {
           return sendJson(res, 400, { ok: false, error: 'Brak hasha listy urzadzen.' });
         }
@@ -530,6 +628,7 @@ export async function handleV2Http(store, req, res, url) {
           });
         }
       }
+      const previouslyRevoked = revokedDeviceIds(auth.user);
       auth.user.keyAgreementPublicKey = body.keyAgreementPublicKey;
       auth.user.identityPublicKey = body.identityPublicKey;
       auth.user.keyAgreementPublicKeySignature = body.keyAgreementPublicKeySignature;
@@ -551,7 +650,13 @@ export async function handleV2Http(store, req, res, url) {
       }
       auth.user.updatedAt = nowIso();
       store.persistUsers();
+      if (isValidDeviceList(body.deviceList)) {
+        const nowRevoked = revokedDeviceIds(auth.user);
+        const newlyRevoked = Array.from(nowRevoked).filter((deviceId) => !previouslyRevoked.has(deviceId));
+        store.revokeDeviceSessions(auth.user.userId, newlyRevoked);
+      }
       return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user) });
+      });
     }
 
     if (method === 'PUT' && url.pathname === '/v2/vault') {
@@ -668,7 +773,7 @@ export function handleV2WebSocket(store, ws, request) {
     ws.close(1008, 'Brak logowania.');
     return;
   }
-  store.attachSocket(auth.user.userId, ws);
+  store.attachSocket(auth.user.userId, auth.session.deviceId, auth.token, ws);
   ws.send(JSON.stringify({
     type: 'ready',
     userId: auth.user.userId,

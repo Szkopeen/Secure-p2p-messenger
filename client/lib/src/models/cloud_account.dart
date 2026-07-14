@@ -201,18 +201,24 @@ class CloudDeviceListEntry {
 class CloudRevokedDevice {
   const CloudRevokedDevice({
     required this.deviceId,
+    required this.deviceSigningPublicKey,
+    required this.deviceCertificateHash,
     required this.revokedDeviceEpoch,
     required this.revokedAt,
     required this.reasonCode,
   });
 
   final String deviceId;
+  final String deviceSigningPublicKey;
+  final String deviceCertificateHash;
   final int revokedDeviceEpoch;
   final DateTime revokedAt;
   final String reasonCode;
 
   Map<String, dynamic> toJson() => {
         'deviceId': deviceId,
+        'deviceSigningPublicKey': deviceSigningPublicKey,
+        'deviceCertificateHash': deviceCertificateHash,
         'revokedDeviceEpoch': revokedDeviceEpoch,
         'revokedAt': revokedAt.toUtc().toIso8601String(),
         'reasonCode': reasonCode,
@@ -221,6 +227,8 @@ class CloudRevokedDevice {
   factory CloudRevokedDevice.fromJson(Map<String, dynamic> json) {
     return CloudRevokedDevice(
       deviceId: requiredString(json, 'deviceId'),
+      deviceSigningPublicKey: json['deviceSigningPublicKey'] as String? ?? '',
+      deviceCertificateHash: json['deviceCertificateHash'] as String? ?? '',
       revokedDeviceEpoch: json['revokedDeviceEpoch'] is int
           ? json['revokedDeviceEpoch'] as int
           : int.tryParse(json['revokedDeviceEpoch']?.toString() ?? '') ?? 1,

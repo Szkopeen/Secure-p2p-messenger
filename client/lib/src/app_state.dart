@@ -123,6 +123,7 @@ class AppState extends ChangeNotifier {
   bool get relayConnected => _relayConnected;
   String? get status => _status;
   String? get ownUserId => _cloudSession?.userId ?? _identity?.userId;
+  String? get ownDeviceId => _cloudSession?.deviceId ?? _identity?.deviceId;
   String? get ownDisplayName =>
       _cloudSession?.displayName ??
       _cloudSession?.username ??
@@ -138,6 +139,7 @@ class AppState extends ChangeNotifier {
   List<DirectoryEntry> get directoryEntries =>
       List.unmodifiable(_directoryEntries);
   List<CloudPublicUser> get cloudUsers => List.unmodifiable(_cloudUsers);
+  CloudDeviceList? get ownCloudDeviceList => _ownCloudDeviceList;
   bool get directoryEnabled => _directoryEnabled;
   bool get loadingDirectory => _loadingDirectory;
   String? get directoryStatus => _directoryStatus;
@@ -1335,6 +1337,92 @@ class AppState extends ChangeNotifier {
     await _saveCloudVault();
     await _publishCloudKeyBundle();
     _setStatus('Tozsamosc konta zostala zrotowana i podpisana starym kluczem.');
+    notifyListeners();
+  }
+
+  Future<void> revokeCloudDevice(String deviceId) async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    final client = _cloudClient;
+    if (session == null || vault == null || client == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    if (deviceId == session.deviceId) {
+      throw StateError('Nie mozna uniewaznic aktualnie uzywanego urzadzenia.');
+    }
+
+    final deviceKey = await _ensureCloudDeviceKey();
+    var current = await client.currentUser();
+    if (current.deviceList == null) {
+      await _publishCloudKeyBundle();
+      current = await client.currentUser();
+    }
+    final previous = current.deviceList;
+    if (previous == null) {
+      throw StateError('Konto nie ma jeszcze podpisanej listy urzadzen.');
+    }
+    final origin = _cloudSignatureOrigin(session.serverUrl);
+    var valid = await _cloudCrypto.verifyDeviceList(
+      accountId: session.userId,
+      serverOrigin: origin,
+      identityPublicKey: vault.identityPublicKey,
+      deviceList: previous,
+    );
+    final proof = vault.identityRotationProof;
+    if (!valid && proof?.oldIdentityPublicKey.isNotEmpty == true) {
+      valid = await _cloudCrypto.verifyDeviceList(
+        accountId: session.userId,
+        serverOrigin: origin,
+        identityPublicKey: proof!.oldIdentityPublicKey,
+        deviceList: previous,
+      );
+    }
+    if (!valid) {
+      throw StateError('Serwer zwrocil niepoprawna liste urzadzen konta.');
+    }
+
+    final target = previous.activeDevice(deviceId);
+    if (target == null) {
+      if (previous.isRevoked(deviceId)) {
+        throw StateError('To urzadzenie jest juz uniewaznione.');
+      }
+      throw StateError('Nie ma takiego aktywnego urzadzenia na liscie.');
+    }
+    final devices = previous.devices
+        .where((device) => device.deviceId != deviceId)
+        .toList(growable: false);
+    final revokedDevices = [
+      ...previous.revokedDevices,
+      CloudRevokedDevice(
+        deviceId: target.deviceId,
+        deviceSigningPublicKey: target.deviceSigningPublicKey,
+        deviceCertificateHash: target.certificateHash,
+        revokedDeviceEpoch: target.deviceEpoch,
+        revokedAt: DateTime.now().toUtc(),
+        reasonCode: 'user',
+      ),
+    ];
+    final signed = await _cloudCrypto.signDeviceList(
+      vault: vault,
+      accountId: session.userId,
+      serverOrigin: origin,
+      previousList: previous,
+      devices: devices,
+      revokedDevices: revokedDevices,
+    );
+    await client.updateKeyBundle(
+      keyAgreementPublicKey: vault.keyAgreementPublicKey,
+      identityPublicKey: vault.identityPublicKey,
+      keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
+      deviceCertificate: deviceKey.certificate.toJson(),
+      deviceList: signed.toJson(),
+      deviceListHash: signed.deviceListHash,
+      expectedDeviceListEpoch: previous.deviceListEpoch,
+      expectedDeviceListHash: previous.deviceListHash,
+      identityRotationProof: vault.identityRotationProof?.toJson(),
+    );
+    _ownCloudDeviceList = signed;
+    _setStatus('Urzadzenie zostalo uniewaznione.');
     notifyListeners();
   }
 

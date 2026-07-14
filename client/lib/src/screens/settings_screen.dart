@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_state.dart';
+import '../models/cloud_account.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({required this.appState, super.key});
@@ -62,6 +63,14 @@ class SettingsScreen extends StatelessWidget {
                         ? () => _confirmIdentityRotation(context)
                         : null,
                   ),
+                  if (appState.cloudMode) ...[
+                    ListTile(
+                      leading: const Icon(Icons.devices_other_outlined),
+                      title: const Text('Urzadzenia konta'),
+                      subtitle: Text(_deviceListLabel(appState)),
+                    ),
+                    ..._deviceTiles(context, appState),
+                  ],
                 ],
               ),
               const SizedBox(height: 16),
@@ -261,6 +270,67 @@ class SettingsScreen extends StatelessWidget {
     }
   }
 
+  String _deviceListLabel(AppState appState) {
+    final list = appState.ownCloudDeviceList;
+    if (list == null) return 'Lista zostanie opublikowana po polaczeniu.';
+    return 'Epoch ${list.deviceListEpoch}, aktywne: ${list.devices.length}, uniewaznione: ${list.revokedDevices.length}';
+  }
+
+  List<Widget> _deviceTiles(BuildContext context, AppState appState) {
+    final list = appState.ownCloudDeviceList;
+    if (list == null) return const [];
+    return list.devices
+        .map(
+          (device) => _DeviceTile(
+            device: device,
+            currentDeviceId: appState.ownDeviceId,
+            onRevoke: () => _confirmDeviceRevocation(context, device),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<void> _confirmDeviceRevocation(
+    BuildContext context,
+    CloudDeviceListEntry device,
+  ) async {
+    if (device.deviceId == appState.ownDeviceId) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Uniewaznij urzadzenie'),
+          content: Text(
+            'Urzadzenie ${device.deviceId} utraci aktywne sesje i nie bedzie moglo wysylac nowych zaakceptowanych wiadomosci. Historyczne wiadomosci pozostana widoczne.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Anuluj'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Uniewaznij'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    try {
+      await appState.revokeCloudDevice(device.deviceId);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Urzadzenie zostalo uniewaznione.')),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.toString())),
+      );
+    }
+  }
+
   String _formatBytes(int? bytes) {
     if (bytes == null || bytes <= 0) return 'rozmiar nieznany';
     const units = ['B', 'KB', 'MB', 'GB'];
@@ -299,6 +369,40 @@ class SettingsScreen extends StatelessWidget {
     await appState.wipeLocalData();
     if (!context.mounted) return;
     Navigator.of(context).pop();
+  }
+}
+
+class _DeviceTile extends StatelessWidget {
+  const _DeviceTile({
+    required this.device,
+    required this.currentDeviceId,
+    required this.onRevoke,
+  });
+
+  final CloudDeviceListEntry device;
+  final String? currentDeviceId;
+  final VoidCallback onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = device.deviceId == currentDeviceId;
+    return ListTile(
+      leading: Icon(
+        current ? Icons.laptop_mac_outlined : Icons.devices_outlined,
+      ),
+      title: Text(current ? 'To urzadzenie' : 'Urzadzenie'),
+      subtitle: Text(
+        '${device.deviceId}\nEpoch ${device.deviceEpoch}',
+        maxLines: 2,
+      ),
+      trailing: current
+          ? const Icon(Icons.check_circle_outline)
+          : IconButton(
+              tooltip: 'Uniewaznij',
+              onPressed: onRevoke,
+              icon: const Icon(Icons.block),
+            ),
+    );
   }
 }
 

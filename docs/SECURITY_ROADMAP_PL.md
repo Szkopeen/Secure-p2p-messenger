@@ -77,6 +77,12 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Backend zapisuje liste urzadzen z mechanizmem compare-and-swap na
   `expectedDeviceListEpoch` i `expectedDeviceListHash`, zeby dwie rownolegle
   aktualizacje nie nadpisywaly sie po cichu.
+- Dodano uniewaznianie urzadzen: klient tworzy kolejny podpisany epoch listy,
+  przenosi urzadzenie do `revokedDevices`, a backend usuwa jego aktywne sesje i
+  zamyka polaczenia WebSocket.
+- Nowe wiadomosci podpisane przez uniewaznione albo nieaktywne urzadzenie sa
+  odrzucane. Wczesniej zapisane wiadomosci historyczne pozostaja w lokalnej
+  historii.
 
 Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
 pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
@@ -97,9 +103,9 @@ sekretem.
 6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; backend
    przejsciowo przyjmuje tez format legacy bez licznikow, zeby aktualizacja
    serwera nie odciela starszych klientow.
-7. Podpisana lista urzadzen nie ma jeszcze kompletnego UI do uniewazniania
-   urzadzen, wylogowania konkretnej sesji i rotacji kluczy rozmow po usunieciu
-   urzadzenia.
+7. Uniewaznienie urzadzenia blokuje nowe podpisane wiadomosci i sesje, ale nie
+   odbiera jeszcze dostepu do przyszlych szyfrogramow, jesli skompromitowane
+   urzadzenie nadal posiada klucze rozmow.
 8. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
 9. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
@@ -112,8 +118,8 @@ sekretem.
 1. Wdrozyc OPAQUE albo inny protokol logowania, w ktorym serwer nie otrzymuje
    sekretu pozwalajacego odszyfrowac vault.
 2. Dodac key transparency log dla publicznych tozsamosci Ed25519.
-3. Dodac UI i API do uniewazniania konkretnych urzadzen, wylogowania ich sesji
-   oraz wykluczania ich z kolejnych aktualizacji vaultu.
+3. Po uniewaznieniu urzadzenia rotowac klucze aktywnych rozmow i opakowywac je
+   wylacznie dla pozostalych aktywnych urzadzen.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.
 

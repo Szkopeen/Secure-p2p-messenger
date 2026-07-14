@@ -405,6 +405,71 @@ void main() {
         isFalse,
       );
     });
+
+    test('uniewaznienie urzadzenia jest podpisanym kolejnym epochem', () async {
+      final crypto = CloudCrypto();
+      final vault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final firstDevice = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-a',
+      );
+      final secondDevice = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-b',
+      );
+      final firstList = await crypto.signDeviceList(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        previousList: null,
+        devices: [
+          crypto.deviceListEntryForCertificate(firstDevice.certificate),
+          crypto.deviceListEntryForCertificate(secondDevice.certificate),
+        ],
+        revokedDevices: const [],
+      );
+      final target = firstList.activeDevice('device-b')!;
+      final revokedList = await crypto.signDeviceList(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        previousList: firstList,
+        devices: firstList.devices
+            .where((device) => device.deviceId != 'device-b')
+            .toList(growable: false),
+        revokedDevices: [
+          CloudRevokedDevice(
+            deviceId: target.deviceId,
+            deviceSigningPublicKey: target.deviceSigningPublicKey,
+            deviceCertificateHash: target.certificateHash,
+            revokedDeviceEpoch: target.deviceEpoch,
+            revokedAt: DateTime.utc(2026, 7, 14),
+            reasonCode: 'test',
+          ),
+        ],
+      );
+
+      expect(revokedList.deviceListEpoch, firstList.deviceListEpoch + 1);
+      expect(revokedList.previousDeviceListHash, firstList.deviceListHash);
+      expect(revokedList.activeDevice('device-b'), isNull);
+      expect(revokedList.isRevoked('device-b'), isTrue);
+      expect(
+        await crypto.verifyDeviceList(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          deviceList: revokedList,
+        ),
+        isTrue,
+      );
+    });
   });
 
   group('Podpisana tozsamosc', () {
