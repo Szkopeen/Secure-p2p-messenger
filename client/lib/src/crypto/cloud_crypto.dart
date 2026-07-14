@@ -48,6 +48,7 @@ class CloudCrypto {
   static const vaultAad = 'secure-p2p-cloud-vault/v1';
   static const keyWrapAad = 'secure-p2p-cloud-keywrap/v1';
   static const messageProtocol = 'secure-p2p-cloud-message/v1';
+  static const messageChainProtocol = 'secure-chat/message-chain/v1';
   static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v2';
   static const identityRotationProtocol = 'secure-p2p-identity-rotation/v1';
 
@@ -614,8 +615,25 @@ class CloudCrypto {
     };
   }
 
+  String get cloudMessageGenesisHash {
+    return crypto_hash.sha256
+        .convert(canonicalJsonBytes({
+          'v': 1,
+          'protocol': messageChainProtocol,
+          'type': 'genesis',
+        }))
+        .toString();
+  }
+
   String cloudMessageHash(Map<String, dynamic> payload) {
-    return crypto_hash.sha256.convert(canonicalJsonBytes(payload)).toString();
+    return crypto_hash.sha256
+        .convert(canonicalJsonBytes({
+          'v': 1,
+          'protocol': messageChainProtocol,
+          'type': 'message',
+          'message': payload,
+        }))
+        .toString();
   }
 
   Future<CloudDecryptedMessage> decryptMessage({

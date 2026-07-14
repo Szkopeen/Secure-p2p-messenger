@@ -50,6 +50,11 @@ function validateCloudMessagePayload(payload, body, auth) {
   if (String(payload.aad.senderUserId || '') !== auth.user.userId) {
     return 'senderUserId w AAD nie zgadza sie z sesja.';
   }
+  const hasReplayFields =
+    payload.aad.senderDeviceId !== undefined ||
+    payload.aad.messageCounter !== undefined ||
+    payload.aad.previousMessageHash !== undefined;
+  if (!hasReplayFields) return null;
   if (String(payload.aad.senderDeviceId || '') !== auth.session.deviceId) {
     return 'senderDeviceId w AAD nie zgadza sie z sesja.';
   }

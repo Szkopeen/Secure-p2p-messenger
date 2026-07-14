@@ -141,7 +141,7 @@ void main() {
         senderUserId: 'uuid-alice',
         senderDeviceId: 'device-a',
         messageCounter: 1,
-        previousMessageHash: '',
+        previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
         payload: const PlainPayload.text('pierwsza'),
       );
@@ -169,7 +169,8 @@ void main() {
 
       expect(decryptedFirst.senderDeviceId, 'device-a');
       expect(decryptedFirst.messageCounter, 1);
-      expect(decryptedFirst.previousMessageHash, isEmpty);
+      expect(
+          decryptedFirst.previousMessageHash, crypto.cloudMessageGenesisHash);
       expect(decryptedFirst.messageHash, firstHash);
       expect(decryptedSecond.messageCounter, 2);
       expect(decryptedSecond.previousMessageHash, firstHash);
@@ -183,7 +184,7 @@ void main() {
         senderUserId: 'uuid-alice',
         senderDeviceId: 'device-a',
         messageCounter: 1,
-        previousMessageHash: '',
+        previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
         payload: const PlainPayload.text('test'),
       );
@@ -201,6 +202,29 @@ void main() {
         ),
         throwsA(isA<SecretBoxAuthenticationError>()),
       );
+    });
+
+    test('hash lancucha obejmuje cala koperte wiadomosci', () async {
+      final crypto = CloudCrypto();
+      final conversationKey = await crypto.newConversationKey();
+      final encrypted = await crypto.encryptMessage(
+        conversationId: 'conversation-1',
+        senderUserId: 'uuid-alice',
+        senderDeviceId: 'device-a',
+        messageCounter: 1,
+        previousMessageHash: crypto.cloudMessageGenesisHash,
+        conversationKey: conversationKey,
+        payload: const PlainPayload.text('test'),
+      );
+      final originalHash = crypto.cloudMessageHash(encrypted);
+      final changedNonce = Map<String, dynamic>.of(encrypted)
+        ..['nonce'] = 'AAAAAAAAAAAAAAAA';
+      final changedCiphertext = Map<String, dynamic>.of(encrypted)
+        ..['ciphertext'] = '${encrypted['ciphertext']}AA';
+
+      expect(crypto.cloudMessageHash(changedNonce), isNot(originalHash));
+      expect(crypto.cloudMessageHash(changedCiphertext), isNot(originalHash));
+      expect(crypto.cloudMessageGenesisHash, isNot(originalHash));
     });
   });
 

@@ -34,6 +34,8 @@ import 'services/desktop_notifier.dart';
 import 'storage/message_archive.dart';
 import 'storage/secure_store.dart';
 
+enum _CloudReplayDecision { accept, legacy, buffer }
+
 class AppState extends ChangeNotifier {
   AppState({
     SecureStore? store,
@@ -75,6 +77,10 @@ class AppState extends ChangeNotifier {
   final Map<String, String> _cloudContactToConversation = {};
   final Map<String, int> _cloudLastSeq = {};
   final Map<String, CloudMessageReplayState> _cloudReplayStates = {};
+  final Map<String, Map<int, CloudStoredMessage>> _pendingCloudReplayMessages =
+      {};
+  final Set<String> _cloudGapFetches = {};
+  final Map<String, Future<void>> _cloudSendQueues = {};
   final List<CloudPublicUser> _cloudUsers = [];
   final Set<String> _pendingInviteHandshakeContacts = {};
 
@@ -383,6 +389,9 @@ class AppState extends ChangeNotifier {
     _cloudConversations.clear();
     _cloudContactToConversation.clear();
     _cloudLastSeq.clear();
+    _pendingCloudReplayMessages.clear();
+    _cloudGapFetches.clear();
+    _cloudSendQueues.clear();
     await _loadCloudReplayStates();
     _relayConnected = false;
     await _store.saveCloudSession(session);
@@ -1127,6 +1136,7 @@ class AppState extends ChangeNotifier {
   Future<void> _applyCloudMessage(
     CloudStoredMessage stored, {
     bool notify = true,
+    bool drainBuffered = true,
   }) async {
     final session = _cloudSession;
     if (session == null) return;
@@ -1160,43 +1170,36 @@ class AppState extends ChangeNotifier {
         'Urzadzenie nadawcy w AAD wiadomosci nie zgadza sie z serwerem.',
       );
     }
+    final senderDeviceId = decrypted.senderDeviceId.isNotEmpty
+        ? decrypted.senderDeviceId
+        : stored.senderDeviceId;
     if (_hasCloudMessage(stored.conversationId, decrypted.messageId)) {
-      final senderDeviceId = decrypted.senderDeviceId.isNotEmpty
-          ? decrypted.senderDeviceId
-          : stored.senderDeviceId;
-      final existingReplayState = _cloudReplayStateFor(
+      await _advanceCloudReplayStateForStoredMessage(
         conversationId: stored.conversationId,
         senderUserId: stored.senderUserId,
         senderDeviceId: senderDeviceId,
+        messageCounter: decrypted.messageCounter,
+        previousMessageHash: decrypted.previousMessageHash,
+        messageHash: decrypted.messageHash,
       );
-      if (decrypted.messageCounter != null &&
-          (existingReplayState == null ||
-              decrypted.messageCounter! > existingReplayState.lastCounter)) {
-        await _acceptCloudMessageReplayState(
-          conversationId: stored.conversationId,
-          senderUserId: stored.senderUserId,
-          senderDeviceId: senderDeviceId,
-          messageCounter: decrypted.messageCounter,
-          previousMessageHash: decrypted.previousMessageHash,
-          messageHash: decrypted.messageHash,
-        );
-      }
       final currentSeq = _cloudLastSeq[stored.conversationId] ?? 0;
       if (stored.seq > currentSeq) {
         _cloudLastSeq[stored.conversationId] = stored.seq;
       }
       return;
     }
-    await _acceptCloudMessageReplayState(
+
+    final replayDecision = _checkCloudMessageReplayState(
+      stored: stored,
+      conversation: conversation,
       conversationId: stored.conversationId,
       senderUserId: stored.senderUserId,
-      senderDeviceId: decrypted.senderDeviceId.isNotEmpty
-          ? decrypted.senderDeviceId
-          : stored.senderDeviceId,
+      senderDeviceId: senderDeviceId,
       messageCounter: decrypted.messageCounter,
       previousMessageHash: decrypted.previousMessageHash,
-      messageHash: decrypted.messageHash,
     );
+    if (replayDecision == _CloudReplayDecision.buffer) return;
+
     final direction = stored.senderUserId == session.userId
         ? MessageDirection.outbound
         : MessageDirection.inbound;
@@ -1214,6 +1217,18 @@ class AppState extends ChangeNotifier {
         transport: 'cloud',
       ),
     );
+    if (added) {
+      await _persistMessages();
+      if (replayDecision == _CloudReplayDecision.accept) {
+        await _rememberCloudReplayState(
+          conversationId: stored.conversationId,
+          senderUserId: stored.senderUserId,
+          senderDeviceId: senderDeviceId,
+          lastCounter: decrypted.messageCounter!,
+          lastMessageHash: decrypted.messageHash,
+        );
+      }
+    }
     final currentSeq = _cloudLastSeq[stored.conversationId] ?? 0;
     if (stored.seq > currentSeq) {
       _cloudLastSeq[stored.conversationId] = stored.seq;
@@ -1225,6 +1240,13 @@ class AppState extends ChangeNotifier {
           senderName: contact?.displayName ?? peerId,
           payload: decrypted.payload,
         ),
+      );
+    }
+    if (drainBuffered && replayDecision == _CloudReplayDecision.accept) {
+      await _drainCloudReplayBuffer(
+        conversationId: stored.conversationId,
+        senderUserId: stored.senderUserId,
+        senderDeviceId: senderDeviceId,
       );
     }
     if (notify) notifyListeners();
@@ -1241,6 +1263,26 @@ class AppState extends ChangeNotifier {
     if (conversationId == null) {
       throw StateError('Nie mozna utworzyc rozmowy cloud.');
     }
+    final queueKey = '$conversationId|${session.userId}|${session.deviceId}';
+    await _enqueueCloudSend(
+      queueKey,
+      () => _sendCloudPayloadLocked(
+        contact: contact,
+        payload: payload,
+        session: session,
+        client: client,
+        conversationId: conversationId,
+      ),
+    );
+  }
+
+  Future<void> _sendCloudPayloadLocked({
+    required Contact contact,
+    required PlainPayload payload,
+    required CloudSession session,
+    required CloudApiClient client,
+    required String conversationId,
+  }) async {
     final conversation = _cloudConversations[conversationId];
     if (conversation == null) {
       throw StateError('Brak rozmowy cloud.');
@@ -1255,7 +1297,8 @@ class AppState extends ChangeNotifier {
       senderDeviceId: session.deviceId,
     );
     final messageCounter = (streamState?.lastCounter ?? 0) + 1;
-    final previousMessageHash = streamState?.lastMessageHash ?? '';
+    final previousMessageHash =
+        streamState?.lastMessageHash ?? _cloudCrypto.cloudMessageGenesisHash;
     final encrypted = await _cloudCrypto.encryptMessage(
       conversationId: conversationId,
       senderUserId: session.userId,
@@ -2325,6 +2368,9 @@ class AppState extends ChangeNotifier {
     _cloudContactToConversation.clear();
     _cloudLastSeq.clear();
     _cloudReplayStates.clear();
+    _pendingCloudReplayMessages.clear();
+    _cloudGapFetches.clear();
+    _cloudSendQueues.clear();
     _cloudUsers.clear();
     _deviceSyncTimer?.cancel();
     _pendingInviteHandshakeContacts.clear();
@@ -4200,17 +4246,18 @@ class AppState extends ChangeNotifier {
     )];
   }
 
-  Future<void> _acceptCloudMessageReplayState({
+  _CloudReplayDecision _checkCloudMessageReplayState({
+    required CloudStoredMessage stored,
+    required CloudConversation conversation,
     required String conversationId,
     required String senderUserId,
     required String senderDeviceId,
     required int? messageCounter,
     required String previousMessageHash,
-    required String messageHash,
-  }) async {
+  }) {
     final session = _cloudSession;
     if (session == null || messageCounter == null || senderDeviceId.isEmpty) {
-      return;
+      return _CloudReplayDecision.legacy;
     }
     if (messageCounter < 1) {
       throw StateError('Niepoprawny licznik wiadomosci cloud.');
@@ -4224,12 +4271,68 @@ class AppState extends ChangeNotifier {
       if (messageCounter <= existing.lastCounter) {
         throw StateError('Wykryto powtorzona wiadomosc cloud.');
       }
-      if (messageCounter != existing.lastCounter + 1 ||
-          previousMessageHash != existing.lastMessageHash) {
+      if (messageCounter > existing.lastCounter + 1) {
+        return _bufferCloudReplayMessage(
+          stored: stored,
+          conversation: conversation,
+          senderUserId: senderUserId,
+          senderDeviceId: senderDeviceId,
+          messageCounter: messageCounter,
+        );
+      }
+      if (previousMessageHash != existing.lastMessageHash) {
         throw StateError(
           'Wykryto przerwanie albo zmiane kolejnosci strumienia wiadomosci cloud.',
         );
       }
+      return _CloudReplayDecision.accept;
+    }
+
+    if (messageCounter > 1) {
+      return _bufferCloudReplayMessage(
+        stored: stored,
+        conversation: conversation,
+        senderUserId: senderUserId,
+        senderDeviceId: senderDeviceId,
+        messageCounter: messageCounter,
+      );
+    }
+    if (previousMessageHash != _cloudCrypto.cloudMessageGenesisHash) {
+      throw StateError('Pierwsza wiadomosc cloud ma niepoprawny genesis hash.');
+    }
+    return _CloudReplayDecision.accept;
+  }
+
+  Future<void> _advanceCloudReplayStateForStoredMessage({
+    required String conversationId,
+    required String senderUserId,
+    required String senderDeviceId,
+    required int? messageCounter,
+    required String previousMessageHash,
+    required String messageHash,
+  }) async {
+    if (messageCounter == null || senderDeviceId.isEmpty) return;
+    final existing = _cloudReplayStateFor(
+      conversationId: conversationId,
+      senderUserId: senderUserId,
+      senderDeviceId: senderDeviceId,
+    );
+    if (existing == null) {
+      if (messageCounter == 1 &&
+          previousMessageHash == _cloudCrypto.cloudMessageGenesisHash) {
+        await _rememberCloudReplayState(
+          conversationId: conversationId,
+          senderUserId: senderUserId,
+          senderDeviceId: senderDeviceId,
+          lastCounter: messageCounter,
+          lastMessageHash: messageHash,
+        );
+      }
+      return;
+    }
+    if (messageCounter != existing.lastCounter + 1 ||
+        previousMessageHash != existing.lastMessageHash) {
+      return;
     }
     await _rememberCloudReplayState(
       conversationId: conversationId,
@@ -4238,6 +4341,66 @@ class AppState extends ChangeNotifier {
       lastCounter: messageCounter,
       lastMessageHash: messageHash,
     );
+  }
+
+  _CloudReplayDecision _bufferCloudReplayMessage({
+    required CloudStoredMessage stored,
+    required CloudConversation conversation,
+    required String senderUserId,
+    required String senderDeviceId,
+    required int messageCounter,
+  }) {
+    final streamKey = _cloudReplayKey(
+      conversationId: stored.conversationId,
+      senderUserId: senderUserId,
+      senderDeviceId: senderDeviceId,
+    );
+    final pending =
+        _pendingCloudReplayMessages.putIfAbsent(streamKey, () => {});
+    pending.putIfAbsent(messageCounter, () => stored);
+    _setStatus('Wykryto luke w strumieniu wiadomosci, pobieram brakujace.');
+    _requestCloudGapFill(streamKey, conversation);
+    return _CloudReplayDecision.buffer;
+  }
+
+  void _requestCloudGapFill(String streamKey, CloudConversation conversation) {
+    if (!_cloudGapFetches.add(streamKey)) return;
+    unawaited(
+      _loadCloudMessages(conversation).whenComplete(
+        () => _cloudGapFetches.remove(streamKey),
+      ),
+    );
+  }
+
+  Future<void> _drainCloudReplayBuffer({
+    required String conversationId,
+    required String senderUserId,
+    required String senderDeviceId,
+  }) async {
+    final streamKey = _cloudReplayKey(
+      conversationId: conversationId,
+      senderUserId: senderUserId,
+      senderDeviceId: senderDeviceId,
+    );
+    final pending = _pendingCloudReplayMessages[streamKey];
+    if (pending == null || pending.isEmpty) return;
+
+    while (true) {
+      final state = _cloudReplayStateFor(
+        conversationId: conversationId,
+        senderUserId: senderUserId,
+        senderDeviceId: senderDeviceId,
+      );
+      final nextCounter = (state?.lastCounter ?? 0) + 1;
+      final next = pending.remove(nextCounter);
+      if (pending.isEmpty) _pendingCloudReplayMessages.remove(streamKey);
+      if (next == null) return;
+      await _applyCloudMessage(
+        next,
+        notify: false,
+        drainBuffered: false,
+      );
+    }
   }
 
   Future<void> _rememberCloudReplayState({
@@ -4259,6 +4422,21 @@ class AppState extends ChangeNotifier {
     );
     _cloudReplayStates[state.key] = state;
     await _saveCloudReplayStates();
+  }
+
+  Future<void> _enqueueCloudSend(
+    String queueKey,
+    Future<void> Function() task,
+  ) {
+    final previous = _cloudSendQueues[queueKey] ?? Future<void>.value();
+    late Future<void> queued;
+    queued = previous.catchError((_) {}).then((_) => task()).whenComplete(() {
+      if (identical(_cloudSendQueues[queueKey], queued)) {
+        _cloudSendQueues.remove(queueKey);
+      }
+    });
+    _cloudSendQueues[queueKey] = queued;
+    return queued;
   }
 
   bool _hasCloudMessage(String conversationId, String messageId) {

@@ -53,6 +53,13 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   AAD `senderDeviceId`, monotoniczny `messageCounter` oraz
   `previousMessageHash`, a klient trwale zapisuje ostatni zaakceptowany licznik
   i hash dla strumienia `rozmowa + nadawca + urzadzenie`.
+- Hash lancucha wiadomosci jest liczony z kanonicznej koperty calej
+  zaszyfrowanej wiadomosci w domenie `secure-chat/message-chain/v1`, a pierwsza
+  wiadomosc strumienia musi wskazywac staly genesis hash.
+- Wiadomosci dostarczone poza kolejnoscia sa buforowane jako luka i klient
+  probuje dociagnac brakujace pakiety, zamiast od razu trwale blokowac rozmowe.
+- Wysylanie z jednego urzadzenia w jednej rozmowie jest kolejkowane, zeby dwa
+  pakiety nie dostaly tego samego licznika i poprzedniego hasha.
 
 Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
 pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
@@ -70,8 +77,9 @@ sekretem.
    pierwsze galezie rotacji miedzy grupy kontaktow, zanim zobacza one wspolny
    lancuch.
 5. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
-6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; stare wiadomosci
-   bez licznikow sa traktowane jako format legacy.
+6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; backend
+   przejsciowo przyjmuje tez format legacy bez licznikow, zeby aktualizacja
+   serwera nie odciela starszych klientow.
 7. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
 8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
