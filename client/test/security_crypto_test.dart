@@ -136,23 +136,35 @@ void main() {
         () async {
       final crypto = CloudCrypto();
       final conversationKey = await crypto.newConversationKey();
+      final vault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final deviceKey = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-a',
+      );
       final first = await crypto.encryptMessage(
         conversationId: 'conversation-1',
-        senderUserId: 'uuid-alice',
+        senderUserId: accountId,
         senderDeviceId: 'device-a',
         messageCounter: 1,
         previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
+        deviceKey: deviceKey,
         payload: const PlainPayload.text('pierwsza'),
       );
       final firstHash = crypto.cloudMessageHash(first);
       final second = await crypto.encryptMessage(
         conversationId: 'conversation-1',
-        senderUserId: 'uuid-alice',
+        senderUserId: accountId,
         senderDeviceId: 'device-a',
         messageCounter: 2,
         previousMessageHash: firstHash,
         conversationKey: conversationKey,
+        deviceKey: deviceKey,
         payload: const PlainPayload.text('druga'),
       );
 
@@ -174,18 +186,39 @@ void main() {
       expect(decryptedFirst.messageHash, firstHash);
       expect(decryptedSecond.messageCounter, 2);
       expect(decryptedSecond.previousMessageHash, firstHash);
+      expect(
+        await crypto.verifyDeviceMessageSignature(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          senderDeviceId: 'device-a',
+          payload: first,
+        ),
+        isTrue,
+      );
     });
 
     test('zmiana licznika w AAD uniewaznia szyfrogram', () async {
       final crypto = CloudCrypto();
       final conversationKey = await crypto.newConversationKey();
+      final vault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final deviceKey = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-a',
+      );
       final encrypted = await crypto.encryptMessage(
         conversationId: 'conversation-1',
-        senderUserId: 'uuid-alice',
+        senderUserId: accountId,
         senderDeviceId: 'device-a',
         messageCounter: 1,
         previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
+        deviceKey: deviceKey,
         payload: const PlainPayload.text('test'),
       );
       final aad = Map<String, dynamic>.of(
@@ -207,13 +240,24 @@ void main() {
     test('hash lancucha obejmuje cala koperte wiadomosci', () async {
       final crypto = CloudCrypto();
       final conversationKey = await crypto.newConversationKey();
+      final vault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final deviceKey = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-a',
+      );
       final encrypted = await crypto.encryptMessage(
         conversationId: 'conversation-1',
-        senderUserId: 'uuid-alice',
+        senderUserId: accountId,
         senderDeviceId: 'device-a',
         messageCounter: 1,
         previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
+        deviceKey: deviceKey,
         payload: const PlainPayload.text('test'),
       );
       final originalHash = crypto.cloudMessageHash(encrypted);
@@ -225,6 +269,57 @@ void main() {
       expect(crypto.cloudMessageHash(changedNonce), isNot(originalHash));
       expect(crypto.cloudMessageHash(changedCiphertext), isNot(originalHash));
       expect(crypto.cloudMessageGenesisHash, isNot(originalHash));
+    });
+
+    test('podpis urzadzenia odrzuca podmieniona koperte', () async {
+      final crypto = CloudCrypto();
+      final conversationKey = await crypto.newConversationKey();
+      final vault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final deviceKey = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-a',
+      );
+      final encrypted = await crypto.encryptMessage(
+        conversationId: 'conversation-1',
+        senderUserId: accountId,
+        senderDeviceId: 'device-a',
+        messageCounter: 1,
+        previousMessageHash: crypto.cloudMessageGenesisHash,
+        conversationKey: conversationKey,
+        deviceKey: deviceKey,
+        payload: const PlainPayload.text('test'),
+      );
+      final aad = Map<String, dynamic>.of(
+        (encrypted['aad'] as Map).cast<String, dynamic>(),
+      );
+      aad['senderDeviceId'] = 'device-b';
+      final tampered = Map<String, dynamic>.of(encrypted)..['aad'] = aad;
+
+      expect(
+        await crypto.verifyDeviceMessageSignature(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          senderDeviceId: 'device-a',
+          payload: encrypted,
+        ),
+        isTrue,
+      );
+      expect(
+        await crypto.verifyDeviceMessageSignature(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          senderDeviceId: 'device-b',
+          payload: tampered,
+        ),
+        isFalse,
+      );
     });
   });
 

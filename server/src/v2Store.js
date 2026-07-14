@@ -38,6 +38,25 @@ function isValidIdentityRotationProof(value) {
     value.rotatedAt.length >= 16;
 }
 
+function isValidDeviceCertificate(value) {
+  return isObject(value) &&
+    value.v === 1 &&
+    typeof value.accountId === 'string' &&
+    value.accountId.length >= 16 &&
+    typeof value.serverOrigin === 'string' &&
+    value.serverOrigin.length >= 8 &&
+    typeof value.deviceId === 'string' &&
+    value.deviceId.length >= 8 &&
+    typeof value.deviceSigningPublicKey === 'string' &&
+    value.deviceSigningPublicKey.length >= 16 &&
+    Number.isInteger(value.deviceEpoch) &&
+    value.deviceEpoch >= 1 &&
+    typeof value.createdAt === 'string' &&
+    value.createdAt.length >= 16 &&
+    typeof value.signature === 'string' &&
+    value.signature.length >= 16;
+}
+
 function validateCloudMessagePayload(payload, body, auth) {
   if (!isObject(payload)) return 'Brak zaszyfrowanego payloadu.';
   if (!isObject(payload.aad)) return 'Brak AAD wiadomosci.';
@@ -54,7 +73,9 @@ function validateCloudMessagePayload(payload, body, auth) {
     payload.aad.senderDeviceId !== undefined ||
     payload.aad.messageCounter !== undefined ||
     payload.aad.previousMessageHash !== undefined;
-  if (!hasReplayFields) return null;
+  if (!hasReplayFields &&
+      payload.deviceCertificate === undefined &&
+      payload.deviceSignature === undefined) return null;
   if (String(payload.aad.senderDeviceId || '') !== auth.session.deviceId) {
     return 'senderDeviceId w AAD nie zgadza sie z sesja.';
   }
@@ -63,6 +84,24 @@ function validateCloudMessagePayload(payload, body, auth) {
   }
   if (typeof payload.aad.previousMessageHash !== 'string') {
     return 'Niepoprawny hash poprzedniej wiadomosci.';
+  }
+  if (payload.aad.protocolVersion !== undefined && payload.aad.protocolVersion !== 2) {
+    return 'Niepoprawna wersja protokolu wiadomosci.';
+  }
+  if (payload.deviceCertificate !== undefined) {
+    if (!isValidDeviceCertificate(payload.deviceCertificate)) {
+      return 'Niepoprawny certyfikat urzadzenia.';
+    }
+    if (payload.deviceCertificate.accountId !== auth.user.userId ||
+        payload.deviceCertificate.deviceId !== auth.session.deviceId) {
+      return 'Certyfikat urzadzenia nie zgadza sie z sesja.';
+    }
+    if (typeof payload.deviceSignature !== 'string' || payload.deviceSignature.length < 16) {
+      return 'Brak podpisu urzadzenia.';
+    }
+  }
+  if (payload.deviceSignature !== undefined && payload.deviceCertificate === undefined) {
+    return 'Podpis urzadzenia wymaga certyfikatu urzadzenia.';
   }
   return null;
 }
@@ -193,6 +232,17 @@ export class V2Store {
   }
 
   publicUser(user) {
+    const devices = {};
+    for (const [deviceId, device] of Object.entries(user.devices || {})) {
+      devices[deviceId] = {
+        deviceId,
+        deviceName: device.deviceName || 'Urzadzenie',
+        lastSeenAt: device.lastSeenAt || null,
+        deviceCertificate: isValidDeviceCertificate(device.deviceCertificate)
+          ? device.deviceCertificate
+          : null
+      };
+    }
     return {
       userId: user.userId,
       username: user.username,
@@ -200,6 +250,7 @@ export class V2Store {
       keyAgreementPublicKey: user.keyAgreementPublicKey,
       identityPublicKey: user.identityPublicKey || '',
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
+      devices,
       identityRotationProof: user.identityRotationProof || null,
       updatedAt: user.updatedAt
     };
@@ -209,7 +260,9 @@ export class V2Store {
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAtMs = Date.now() + SESSION_TTL_MS;
     user.devices ||= {};
+    const previousDevice = user.devices[deviceId] || {};
     user.devices[deviceId] = {
+      ...previousDevice,
       deviceId,
       deviceName: String(deviceName || 'Urzadzenie').slice(0, 80),
       lastSeenAt: nowIso()
@@ -389,10 +442,30 @@ export async function handleV2Http(store, req, res, url) {
       if (body.identityRotationProof !== undefined && body.identityRotationProof !== null && !isValidIdentityRotationProof(body.identityRotationProof)) {
         return sendJson(res, 400, { ok: false, error: 'Niepoprawny dowod rotacji tozsamosci.' });
       }
+      if (body.deviceCertificate !== undefined && body.deviceCertificate !== null) {
+        if (!isValidDeviceCertificate(body.deviceCertificate)) {
+          return sendJson(res, 400, { ok: false, error: 'Niepoprawny certyfikat urzadzenia.' });
+        }
+        if (body.deviceCertificate.accountId !== auth.user.userId ||
+            body.deviceCertificate.deviceId !== auth.session.deviceId) {
+          return sendJson(res, 400, { ok: false, error: 'Certyfikat urzadzenia nie zgadza sie z sesja.' });
+        }
+      }
       auth.user.keyAgreementPublicKey = body.keyAgreementPublicKey;
       auth.user.identityPublicKey = body.identityPublicKey;
       auth.user.keyAgreementPublicKeySignature = body.keyAgreementPublicKeySignature;
       auth.user.identityRotationProof = isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null;
+      if (isValidDeviceCertificate(body.deviceCertificate)) {
+        auth.user.devices ||= {};
+        const previousDevice = auth.user.devices[auth.session.deviceId] || {};
+        auth.user.devices[auth.session.deviceId] = {
+          ...previousDevice,
+          deviceId: auth.session.deviceId,
+          deviceCertificate: body.deviceCertificate,
+          deviceSigningPublicKey: body.deviceCertificate.deviceSigningPublicKey,
+          lastSeenAt: nowIso()
+        };
+      }
       auth.user.updatedAt = nowIso();
       store.persistUsers();
       return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user) });

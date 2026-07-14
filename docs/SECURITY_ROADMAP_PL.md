@@ -60,6 +60,15 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   probuje dociagnac brakujace pakiety, zamiast od razu trwale blokowac rozmowe.
 - Wysylanie z jednego urzadzenia w jednej rozmowie jest kolejkowane, zeby dwa
   pakiety nie dostaly tego samego licznika i poprzedniego hasha.
+- Dodano kryptograficzna tozsamosc urzadzenia: kazde urzadzenie generuje
+  lokalny klucz Ed25519, publikuje podpisany przez tozsamosc konta certyfikat
+  urzadzenia i podpisuje nim zaszyfrowana koperte wiadomosci.
+- Hash lancucha wiadomosci obejmuje rowniez podpis urzadzenia, dzieki czemu
+  nastepna wiadomosc zalezy nie tylko od szyfrogramu, ale tez od tego, ktore
+  urzadzenie podpisalo poprzednia koperte.
+- Klient blokuje downgrade podpisanego strumienia: jezeli dany strumien
+  `rozmowa + nadawca + urzadzenie` przeszedl na podpisy urzadzen, kolejne
+  wiadomosci bez poprawnego podpisu sa odrzucane.
 
 Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
 pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
@@ -80,11 +89,13 @@ sekretem.
 6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; backend
    przejsciowo przyjmuje tez format legacy bez licznikow, zeby aktualizacja
    serwera nie odciela starszych klientow.
-7. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
+7. Podpisy urzadzen nie maja jeszcze pelnego cyklu zycia: brakuje podpisanej
+   listy urzadzen, uniewazniania urzadzen i ochrony listy przed rollbackiem.
+8. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
-8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
+9. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
-9. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
+10. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
    prototypu, ale nie dla duzej uslugi.
 
 ## Priorytet 1: prawdziwsze E2EE wzgledem serwera
@@ -92,7 +103,8 @@ sekretem.
 1. Wdrozyc OPAQUE albo inny protokol logowania, w ktorym serwer nie otrzymuje
    sekretu pozwalajacego odszyfrowac vault.
 2. Dodac key transparency log dla publicznych tozsamosci Ed25519.
-3. Dodac osobne podpisane klucze urzadzen.
+3. Dodac podpisana liste urzadzen, uniewaznianie konkretnych urzadzen i ochrone
+   przed cofaniem tej listy.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.
 

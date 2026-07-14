@@ -57,6 +57,7 @@ class CloudPublicUser {
     required this.keyAgreementPublicKey,
     required this.identityPublicKey,
     required this.keyAgreementPublicKeySignature,
+    this.deviceCertificates = const {},
     this.identityRotationProof,
   });
 
@@ -66,9 +67,24 @@ class CloudPublicUser {
   final String keyAgreementPublicKey;
   final String identityPublicKey;
   final String keyAgreementPublicKeySignature;
+  final Map<String, CloudDeviceCertificate> deviceCertificates;
   final IdentityRotationProof? identityRotationProof;
 
   factory CloudPublicUser.fromJson(Map<String, dynamic> json) {
+    final devices = <String, CloudDeviceCertificate>{};
+    final rawDevices = json['devices'];
+    if (rawDevices is Map) {
+      for (final entry in rawDevices.entries) {
+        final value = entry.value;
+        final certificateJson =
+            value is Map ? value['deviceCertificate'] : null;
+        final certificate =
+            CloudDeviceCertificate.fromOptionalJson(certificateJson);
+        if (certificate != null) {
+          devices[entry.key.toString()] = certificate;
+        }
+      }
+    }
     return CloudPublicUser(
       userId: requiredString(json, 'userId'),
       username: requiredString(json, 'username'),
@@ -78,8 +94,103 @@ class CloudPublicUser {
       identityPublicKey: json['identityPublicKey'] as String? ?? '',
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String? ?? '',
+      deviceCertificates: devices,
       identityRotationProof:
           IdentityRotationProof.fromOptionalJson(json['identityRotationProof']),
+    );
+  }
+}
+
+class CloudDeviceCertificate {
+  const CloudDeviceCertificate({
+    required this.accountId,
+    required this.serverOrigin,
+    required this.deviceId,
+    required this.deviceSigningPublicKey,
+    required this.deviceEpoch,
+    required this.createdAt,
+    required this.signature,
+  });
+
+  final String accountId;
+  final String serverOrigin;
+  final String deviceId;
+  final String deviceSigningPublicKey;
+  final int deviceEpoch;
+  final DateTime createdAt;
+  final String signature;
+
+  Map<String, dynamic> toJson() => {
+        'v': 1,
+        'accountId': accountId,
+        'serverOrigin': serverOrigin,
+        'deviceId': deviceId,
+        'deviceSigningPublicKey': deviceSigningPublicKey,
+        'deviceEpoch': deviceEpoch,
+        'createdAt': createdAt.toUtc().toIso8601String(),
+        'signature': signature,
+      };
+
+  factory CloudDeviceCertificate.fromJson(Map<String, dynamic> json) {
+    return CloudDeviceCertificate(
+      accountId: requiredString(json, 'accountId'),
+      serverOrigin: requiredString(json, 'serverOrigin'),
+      deviceId: requiredString(json, 'deviceId'),
+      deviceSigningPublicKey: requiredString(json, 'deviceSigningPublicKey'),
+      deviceEpoch: json['deviceEpoch'] is int
+          ? json['deviceEpoch'] as int
+          : int.tryParse(json['deviceEpoch']?.toString() ?? '') ?? 1,
+      createdAt: DateTime.tryParse(json['createdAt']?.toString() ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      signature: requiredString(json, 'signature'),
+    );
+  }
+
+  static CloudDeviceCertificate? fromOptionalJson(Object? value) {
+    if (value is Map) {
+      return CloudDeviceCertificate.fromJson(value.cast<String, dynamic>());
+    }
+    return null;
+  }
+}
+
+class CloudDeviceKeyMaterial {
+  const CloudDeviceKeyMaterial({
+    required this.accountId,
+    required this.serverOrigin,
+    required this.deviceId,
+    required this.deviceSigningPrivateKey,
+    required this.deviceSigningPublicKey,
+    required this.certificate,
+  });
+
+  final String accountId;
+  final String serverOrigin;
+  final String deviceId;
+  final String deviceSigningPrivateKey;
+  final String deviceSigningPublicKey;
+  final CloudDeviceCertificate certificate;
+
+  Map<String, dynamic> toJson() => {
+        'v': 1,
+        'accountId': accountId,
+        'serverOrigin': serverOrigin,
+        'deviceId': deviceId,
+        'deviceSigningPrivateKey': deviceSigningPrivateKey,
+        'deviceSigningPublicKey': deviceSigningPublicKey,
+        'certificate': certificate.toJson(),
+      };
+
+  factory CloudDeviceKeyMaterial.fromJson(Map<String, dynamic> json) {
+    return CloudDeviceKeyMaterial(
+      accountId: requiredString(json, 'accountId'),
+      serverOrigin: requiredString(json, 'serverOrigin'),
+      deviceId: requiredString(json, 'deviceId'),
+      deviceSigningPrivateKey: requiredString(json, 'deviceSigningPrivateKey'),
+      deviceSigningPublicKey: requiredString(json, 'deviceSigningPublicKey'),
+      certificate: CloudDeviceCertificate.fromJson(
+        asStringKeyMap(json['certificate'], 'certificate'),
+      ),
     );
   }
 }
@@ -216,6 +327,7 @@ class CloudMessageReplayState {
     required this.senderDeviceId,
     required this.lastCounter,
     required this.lastMessageHash,
+    this.requiresDeviceSignature = false,
   });
 
   final String accountId;
@@ -224,6 +336,7 @@ class CloudMessageReplayState {
   final String senderDeviceId;
   final int lastCounter;
   final String lastMessageHash;
+  final bool requiresDeviceSignature;
 
   String get key => '$accountId|$conversationId|$senderUserId|$senderDeviceId';
 
@@ -235,6 +348,7 @@ class CloudMessageReplayState {
         'senderDeviceId': senderDeviceId,
         'lastCounter': lastCounter,
         'lastMessageHash': lastMessageHash,
+        'requiresDeviceSignature': requiresDeviceSignature,
       };
 
   factory CloudMessageReplayState.fromJson(Map<String, dynamic> json) {
@@ -245,6 +359,7 @@ class CloudMessageReplayState {
       senderDeviceId: requiredString(json, 'senderDeviceId'),
       lastCounter: requiredInt(json, 'lastCounter'),
       lastMessageHash: requiredString(json, 'lastMessageHash'),
+      requiresDeviceSignature: json['requiresDeviceSignature'] == true,
     );
   }
 }

@@ -87,6 +87,7 @@ class AppState extends ChangeNotifier {
   IdentityKeyMaterial? _identity;
   CloudSession? _cloudSession;
   CloudVault? _cloudVault;
+  CloudDeviceKeyMaterial? _cloudDeviceKey;
   CloudApiClient? _cloudClient;
   StreamSubscription<CloudEvent>? _cloudSubscription;
   UserProfile? _ownProfile;
@@ -372,6 +373,7 @@ class AppState extends ChangeNotifier {
 
     _cloudSession = session;
     _cloudVault = vault;
+    _cloudDeviceKey = null;
     _cloudClient = CloudApiClient(
       serverUrl: session.serverUrl,
       token: session.token,
@@ -1072,12 +1074,49 @@ class AppState extends ChangeNotifier {
     final client = _cloudClient;
     final vault = _cloudVault;
     if (client == null || vault == null) return;
+    final deviceKey = await _ensureCloudDeviceKey();
     await client.updateKeyBundle(
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
       identityPublicKey: vault.identityPublicKey,
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
+      deviceCertificate: deviceKey.certificate.toJson(),
       identityRotationProof: vault.identityRotationProof?.toJson(),
     );
+  }
+
+  Future<CloudDeviceKeyMaterial> _ensureCloudDeviceKey() async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    if (session == null || vault == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    final origin = _cloudSignatureOrigin(session.serverUrl);
+    final cached = _cloudDeviceKey ?? await _store.loadCloudDeviceKey();
+    if (cached != null &&
+        cached.accountId == session.userId &&
+        cached.serverOrigin == origin &&
+        cached.deviceId == session.deviceId &&
+        cached.deviceSigningPublicKey ==
+            cached.certificate.deviceSigningPublicKey &&
+        await _cloudCrypto.verifyDeviceCertificate(
+          accountId: session.userId,
+          serverOrigin: origin,
+          identityPublicKey: vault.identityPublicKey,
+          certificate: cached.certificate,
+        )) {
+      _cloudDeviceKey = cached;
+      return cached;
+    }
+
+    final created = await _cloudCrypto.createDeviceKeyMaterial(
+      vault: vault,
+      accountId: session.userId,
+      serverOrigin: origin,
+      deviceId: session.deviceId,
+    );
+    _cloudDeviceKey = created;
+    await _store.saveCloudDeviceKey(created);
+    return created;
   }
 
   Future<void> rotateCloudIdentity() async {
@@ -1154,6 +1193,32 @@ class AppState extends ChangeNotifier {
     }
     if (peerId == null) return;
 
+    final payloadAad = asStringKeyMap(stored.payload['aad'], 'aad');
+    final aadSenderUserId =
+        payloadAad['senderUserId']?.toString() ?? stored.senderUserId;
+    final aadSenderDeviceId =
+        payloadAad['senderDeviceId']?.toString() ?? stored.senderDeviceId;
+    final deviceSignatureVerified = await _verifyCloudMessageDeviceSignature(
+      senderUserId: aadSenderUserId,
+      senderDeviceId: aadSenderDeviceId,
+      payload: stored.payload,
+    );
+    if (_cloudCrypto.hasDeviceSignature(stored.payload) &&
+        !deviceSignatureVerified) {
+      throw StateError('Podpis urzadzenia nadawcy jest niepoprawny.');
+    }
+    final existingReplayState = _cloudReplayStateFor(
+      conversationId: stored.conversationId,
+      senderUserId: stored.senderUserId,
+      senderDeviceId: aadSenderDeviceId,
+    );
+    if ((existingReplayState?.requiresDeviceSignature ?? false) &&
+        !deviceSignatureVerified) {
+      throw StateError(
+        'Wiadomosc cloud nie ma poprawnego podpisu znanego urzadzenia.',
+      );
+    }
+
     final decrypted = await _cloudCrypto.decryptMessage(
       conversationId: stored.conversationId,
       conversationKey: key,
@@ -1181,6 +1246,7 @@ class AppState extends ChangeNotifier {
         messageCounter: decrypted.messageCounter,
         previousMessageHash: decrypted.previousMessageHash,
         messageHash: decrypted.messageHash,
+        requiresDeviceSignature: deviceSignatureVerified,
       );
       final currentSeq = _cloudLastSeq[stored.conversationId] ?? 0;
       if (stored.seq > currentSeq) {
@@ -1226,6 +1292,7 @@ class AppState extends ChangeNotifier {
           senderDeviceId: senderDeviceId,
           lastCounter: decrypted.messageCounter!,
           lastMessageHash: decrypted.messageHash,
+          requiresDeviceSignature: deviceSignatureVerified,
         );
       }
     }
@@ -1291,6 +1358,7 @@ class AppState extends ChangeNotifier {
     if (key == null) {
       throw StateError('Brak klucza rozmowy cloud.');
     }
+    final deviceKey = await _ensureCloudDeviceKey();
     final streamState = _cloudReplayStateFor(
       conversationId: conversationId,
       senderUserId: session.userId,
@@ -1306,6 +1374,7 @@ class AppState extends ChangeNotifier {
       messageCounter: messageCounter,
       previousMessageHash: previousMessageHash,
       conversationKey: key,
+      deviceKey: deviceKey,
       payload: payload,
     );
     final messageId = requiredString(encrypted, 'messageId');
@@ -1334,6 +1403,7 @@ class AppState extends ChangeNotifier {
       senderDeviceId: session.deviceId,
       lastCounter: messageCounter,
       lastMessageHash: _cloudCrypto.cloudMessageHash(encrypted),
+      requiresDeviceSignature: true,
     );
     _updateMessage(
       contact.userId,
@@ -2349,6 +2419,7 @@ class AppState extends ChangeNotifier {
     _identity = null;
     _cloudSession = null;
     _cloudVault = null;
+    _cloudDeviceKey = null;
     _cloudClient = null;
     _ownProfile = null;
     _relaySettings = null;
@@ -2371,6 +2442,7 @@ class AppState extends ChangeNotifier {
     _pendingCloudReplayMessages.clear();
     _cloudGapFetches.clear();
     _cloudSendQueues.clear();
+    _cloudDeviceKey = null;
     _cloudUsers.clear();
     _deviceSyncTimer?.cancel();
     _pendingInviteHandshakeContacts.clear();
@@ -4246,6 +4318,42 @@ class AppState extends ChangeNotifier {
     )];
   }
 
+  Future<bool> _verifyCloudMessageDeviceSignature({
+    required String senderUserId,
+    required String senderDeviceId,
+    required Map<String, dynamic> payload,
+  }) async {
+    if (!_cloudCrypto.hasDeviceSignature(payload) || senderDeviceId.isEmpty) {
+      return false;
+    }
+    final session = _cloudSession;
+    if (session == null) return false;
+
+    String identityPublicKey = '';
+    if (senderUserId == session.userId) {
+      identityPublicKey = _cloudVault?.identityPublicKey ?? '';
+    } else {
+      final contact = _contactById(senderUserId);
+      identityPublicKey = contact?.signingPublicKey ?? '';
+      if (identityPublicKey.isEmpty) {
+        for (final user in _cloudUsers) {
+          if (user.userId == senderUserId) {
+            identityPublicKey = user.identityPublicKey;
+            break;
+          }
+        }
+      }
+    }
+    if (identityPublicKey.isEmpty) return false;
+    return _cloudCrypto.verifyDeviceMessageSignature(
+      accountId: senderUserId,
+      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
+      identityPublicKey: identityPublicKey,
+      senderDeviceId: senderDeviceId,
+      payload: payload,
+    );
+  }
+
   _CloudReplayDecision _checkCloudMessageReplayState({
     required CloudStoredMessage stored,
     required CloudConversation conversation,
@@ -4310,6 +4418,7 @@ class AppState extends ChangeNotifier {
     required int? messageCounter,
     required String previousMessageHash,
     required String messageHash,
+    required bool requiresDeviceSignature,
   }) async {
     if (messageCounter == null || senderDeviceId.isEmpty) return;
     final existing = _cloudReplayStateFor(
@@ -4326,6 +4435,7 @@ class AppState extends ChangeNotifier {
           senderDeviceId: senderDeviceId,
           lastCounter: messageCounter,
           lastMessageHash: messageHash,
+          requiresDeviceSignature: requiresDeviceSignature,
         );
       }
       return;
@@ -4340,6 +4450,7 @@ class AppState extends ChangeNotifier {
       senderDeviceId: senderDeviceId,
       lastCounter: messageCounter,
       lastMessageHash: messageHash,
+      requiresDeviceSignature: requiresDeviceSignature,
     );
   }
 
@@ -4409,9 +4520,15 @@ class AppState extends ChangeNotifier {
     required String senderDeviceId,
     required int lastCounter,
     required String lastMessageHash,
+    bool requiresDeviceSignature = false,
   }) async {
     final session = _cloudSession;
     if (session == null || senderDeviceId.isEmpty) return;
+    final existing = _cloudReplayStateFor(
+      conversationId: conversationId,
+      senderUserId: senderUserId,
+      senderDeviceId: senderDeviceId,
+    );
     final state = CloudMessageReplayState(
       accountId: session.userId,
       conversationId: conversationId,
@@ -4419,6 +4536,8 @@ class AppState extends ChangeNotifier {
       senderDeviceId: senderDeviceId,
       lastCounter: lastCounter,
       lastMessageHash: lastMessageHash,
+      requiresDeviceSignature: requiresDeviceSignature ||
+          (existing?.requiresDeviceSignature ?? false),
     );
     _cloudReplayStates[state.key] = state;
     await _saveCloudReplayStates();

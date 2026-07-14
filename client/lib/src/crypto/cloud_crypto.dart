@@ -51,6 +51,8 @@ class CloudCrypto {
   static const messageChainProtocol = 'secure-chat/message-chain/v1';
   static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v2';
   static const identityRotationProtocol = 'secure-p2p-identity-rotation/v1';
+  static const deviceCertificateProtocol = 'secure-chat/device-certificate/v1';
+  static const deviceMessageProtocol = 'secure-chat/device-message/v1';
 
   final AesGcm _aead = AesGcm.with256bits();
   final X25519 _x25519 = X25519();
@@ -153,6 +155,60 @@ class CloudCrypto {
       identityPrivateKey: identityPrivateKeyBase64,
       identityPublicKey: identityPublicKeyBase64,
       keyAgreementPublicKeySignature: signature,
+    );
+  }
+
+  Future<CloudDeviceKeyMaterial> createDeviceKeyMaterial({
+    required CloudVault vault,
+    required String accountId,
+    required String serverOrigin,
+    required String deviceId,
+  }) async {
+    if (vault.identityPrivateKey.isEmpty || vault.identityPublicKey.isEmpty) {
+      throw StateError(
+        'Brak klucza tozsamosci konta do podpisania certyfikatu urzadzenia.',
+      );
+    }
+    final deviceKeyPair = await _ed25519.newKeyPair();
+    final devicePrivateBytes = await deviceKeyPair.extractPrivateKeyBytes();
+    final devicePublicKey = await deviceKeyPair.extractPublicKey();
+    final devicePublicKeyBase64 = b64(devicePublicKey.bytes);
+    final createdAt = DateTime.now().toUtc();
+    const deviceEpoch = 1;
+    final signature = await _ed25519.sign(
+      _deviceCertificateBytes(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: deviceId,
+        deviceSigningPublicKey: devicePublicKeyBase64,
+        deviceEpoch: deviceEpoch,
+        createdAt: createdAt,
+      ),
+      keyPair: SimpleKeyPairData(
+        unb64(vault.identityPrivateKey),
+        publicKey: SimplePublicKey(
+          unb64(vault.identityPublicKey),
+          type: KeyPairType.ed25519,
+        ),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    final certificate = CloudDeviceCertificate(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
+      deviceId: deviceId,
+      deviceSigningPublicKey: devicePublicKeyBase64,
+      deviceEpoch: deviceEpoch,
+      createdAt: createdAt,
+      signature: b64(signature.bytes),
+    );
+    return CloudDeviceKeyMaterial(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
+      deviceId: deviceId,
+      deviceSigningPrivateKey: b64(devicePrivateBytes),
+      deviceSigningPublicKey: devicePublicKeyBase64,
+      certificate: certificate,
     );
   }
 
@@ -311,6 +367,93 @@ class CloudCrypto {
     }
   }
 
+  Future<bool> verifyDeviceCertificate({
+    required String accountId,
+    required String serverOrigin,
+    required String identityPublicKey,
+    required CloudDeviceCertificate certificate,
+  }) async {
+    if (certificate.accountId != accountId ||
+        certificate.serverOrigin != serverOrigin ||
+        certificate.deviceId.isEmpty ||
+        certificate.deviceSigningPublicKey.isEmpty ||
+        certificate.signature.isEmpty ||
+        certificate.deviceEpoch < 1) {
+      return false;
+    }
+    try {
+      return _ed25519.verify(
+        _deviceCertificateBytes(
+          accountId: certificate.accountId,
+          serverOrigin: certificate.serverOrigin,
+          deviceId: certificate.deviceId,
+          deviceSigningPublicKey: certificate.deviceSigningPublicKey,
+          deviceEpoch: certificate.deviceEpoch,
+          createdAt: certificate.createdAt,
+        ),
+        signature: Signature(
+          unb64(certificate.signature),
+          publicKey: SimplePublicKey(
+            unb64(identityPublicKey),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool hasDeviceSignature(Map<String, dynamic> payload) {
+    return payload['deviceCertificate'] is Map &&
+        payload['deviceSignature'] is String &&
+        (payload['deviceSignature'] as String).isNotEmpty;
+  }
+
+  Future<bool> verifyDeviceMessageSignature({
+    required String accountId,
+    required String serverOrigin,
+    required String identityPublicKey,
+    required String senderDeviceId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final rawCertificate = payload['deviceCertificate'];
+    final signature = payload['deviceSignature'];
+    if (rawCertificate is! Map || signature is! String || signature.isEmpty) {
+      return false;
+    }
+    try {
+      final certificate = CloudDeviceCertificate.fromJson(
+        rawCertificate.cast<String, dynamic>(),
+      );
+      if (certificate.deviceId != senderDeviceId) return false;
+      final certificateValid = await verifyDeviceCertificate(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        identityPublicKey: identityPublicKey,
+        certificate: certificate,
+      );
+      if (!certificateValid) return false;
+
+      final unsignedEnvelope = Map<String, dynamic>.of(payload)
+        ..remove('deviceCertificate')
+        ..remove('deviceSignature');
+      final digest = _deviceMessageDigest(unsignedEnvelope);
+      return _ed25519.verify(
+        digest,
+        signature: Signature(
+          unb64(signature),
+          publicKey: SimplePublicKey(
+            unb64(certificate.deviceSigningPublicKey),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   bool isNextIdentityRotation({
     required IdentityRotationProof? previousProof,
     required IdentityRotationProof nextProof,
@@ -455,6 +598,38 @@ class CloudCrypto {
     });
   }
 
+  Uint8List _deviceCertificateBytes({
+    required String accountId,
+    required String serverOrigin,
+    required String deviceId,
+    required String deviceSigningPublicKey,
+    required int deviceEpoch,
+    required DateTime createdAt,
+  }) {
+    return canonicalJsonBytes({
+      'v': 1,
+      'protocol': deviceCertificateProtocol,
+      'accountId': accountId,
+      'serverOrigin': serverOrigin,
+      'deviceId': deviceId,
+      'deviceSigningPublicKey': deviceSigningPublicKey,
+      'deviceEpoch': deviceEpoch,
+      'createdAt': createdAt.toUtc().toIso8601String(),
+    });
+  }
+
+  Uint8List _deviceMessageDigest(Map<String, dynamic> unsignedEnvelope) {
+    return Uint8List.fromList(
+      crypto_hash.sha256
+          .convert(canonicalJsonBytes({
+            'v': 1,
+            'protocol': deviceMessageProtocol,
+            'envelope': unsignedEnvelope,
+          }))
+          .bytes,
+    );
+  }
+
   Future<Map<String, dynamic>> encryptVault(
     CloudVault vault,
     String vaultKey,
@@ -573,6 +748,7 @@ class CloudCrypto {
     required int messageCounter,
     required String previousMessageHash,
     required String conversationKey,
+    required CloudDeviceKeyMaterial deviceKey,
     required PlainPayload payload,
   }) async {
     final messageId = _uuid.v4();
@@ -580,6 +756,7 @@ class CloudCrypto {
     final aad = {
       'v': 1,
       'protocol': messageProtocol,
+      'protocolVersion': 2,
       'conversationId': conversationId,
       'messageId': messageId,
       'senderUserId': senderUserId,
@@ -603,7 +780,7 @@ class CloudCrypto {
       nonce: nonce,
       aad: canonicalJsonBytes(aad),
     );
-    return {
+    final unsignedEnvelope = {
       'v': 1,
       'protocol': messageProtocol,
       'messageId': messageId,
@@ -612,6 +789,22 @@ class CloudCrypto {
       'ciphertext': b64(box.cipherText),
       'mac': b64(box.mac.bytes),
       'compression': 'zlib',
+    };
+    final signature = await _ed25519.sign(
+      _deviceMessageDigest(unsignedEnvelope),
+      keyPair: SimpleKeyPairData(
+        unb64(deviceKey.deviceSigningPrivateKey),
+        publicKey: SimplePublicKey(
+          unb64(deviceKey.deviceSigningPublicKey),
+          type: KeyPairType.ed25519,
+        ),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    return {
+      ...unsignedEnvelope,
+      'deviceCertificate': deviceKey.certificate.toJson(),
+      'deviceSignature': b64(signature.bytes),
     };
   }
 
