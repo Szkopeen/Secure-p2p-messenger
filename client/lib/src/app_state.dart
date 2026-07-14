@@ -88,6 +88,7 @@ class AppState extends ChangeNotifier {
   CloudSession? _cloudSession;
   CloudVault? _cloudVault;
   CloudDeviceKeyMaterial? _cloudDeviceKey;
+  CloudDeviceList? _ownCloudDeviceList;
   CloudApiClient? _cloudClient;
   StreamSubscription<CloudEvent>? _cloudSubscription;
   UserProfile? _ownProfile;
@@ -374,6 +375,7 @@ class AppState extends ChangeNotifier {
     _cloudSession = session;
     _cloudVault = vault;
     _cloudDeviceKey = null;
+    _ownCloudDeviceList = null;
     _cloudClient = CloudApiClient(
       serverUrl: session.serverUrl,
       token: session.token,
@@ -791,6 +793,7 @@ class AppState extends ChangeNotifier {
       signingPublicKey: user.identityPublicKey,
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature,
       identityRotationProof: user.identityRotationProof?.toJson(),
+      deviceList: user.deviceList?.toJson(),
     );
   }
 
@@ -818,6 +821,49 @@ class AppState extends ChangeNotifier {
         'Podpis klucza uzytkownika ${user.displayName} jest niepoprawny. Nie rozpoczynam rozmowy.',
       );
     }
+    await _verifiedCloudUserDeviceList(user);
+  }
+
+  Future<CloudDeviceList?> _verifiedCloudUserDeviceList(
+    CloudPublicUser user,
+  ) async {
+    final list = user.deviceList;
+    if (list == null) return null;
+    var valid = await _cloudCrypto.verifyDeviceList(
+      accountId: user.userId,
+      serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
+      identityPublicKey: user.identityPublicKey,
+      deviceList: list,
+    );
+    final proof = user.identityRotationProof;
+    if (!valid && proof?.oldIdentityPublicKey.isNotEmpty == true) {
+      valid = await _cloudCrypto.verifyDeviceList(
+        accountId: user.userId,
+        serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
+        identityPublicKey: proof!.oldIdentityPublicKey,
+        deviceList: list,
+      );
+    }
+    if (!valid) {
+      throw StateError(
+        'Lista urzadzen uzytkownika ${user.displayName} ma niepoprawny podpis.',
+      );
+    }
+    return list;
+  }
+
+  bool _isAcceptableDeviceListUpdate(
+    CloudDeviceList? previous,
+    CloudDeviceList? next,
+  ) {
+    if (next == null) return true;
+    if (previous == null) return true;
+    if (next.deviceListEpoch < previous.deviceListEpoch) return false;
+    if (next.deviceListEpoch == previous.deviceListEpoch) {
+      return next.deviceListHash == previous.deviceListHash;
+    }
+    if (next.deviceListEpoch != previous.deviceListEpoch + 1) return false;
+    return next.previousDeviceListHash == previous.deviceListHash;
   }
 
   Future<void> _assertContactKeyBundle(Contact contact) async {
@@ -838,6 +884,30 @@ class AppState extends ChangeNotifier {
         'Podpis klucza kontaktu ${contact.displayName} jest niepoprawny.',
       );
     }
+    final deviceList = CloudDeviceList.fromOptionalJson(contact.deviceList);
+    if (deviceList != null) {
+      var listValid = await _cloudCrypto.verifyDeviceList(
+        accountId: contact.userId,
+        serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
+        identityPublicKey: contact.signingPublicKey!,
+        deviceList: deviceList,
+      );
+      final proof =
+          IdentityRotationProof.fromOptionalJson(contact.identityRotationProof);
+      if (!listValid && proof?.oldIdentityPublicKey.isNotEmpty == true) {
+        listValid = await _cloudCrypto.verifyDeviceList(
+          accountId: contact.userId,
+          serverOrigin: _cloudSignatureOrigin(_cloudSession!.serverUrl),
+          identityPublicKey: proof!.oldIdentityPublicKey,
+          deviceList: deviceList,
+        );
+      }
+      if (!listValid) {
+        throw StateError(
+          'Lista urzadzen kontaktu ${contact.displayName} jest niepoprawna.',
+        );
+      }
+    }
   }
 
   Future<void> _mergeVerifiedCloudUserIntoContact(
@@ -845,6 +915,14 @@ class AppState extends ChangeNotifier {
     CloudPublicUser peer,
   ) async {
     await _assertCloudUserKeyBundle(peer);
+    final nextDeviceList = await _verifiedCloudUserDeviceList(peer);
+    final previousDeviceList =
+        CloudDeviceList.fromOptionalJson(existing.deviceList);
+    if (!_isAcceptableDeviceListUpdate(previousDeviceList, nextDeviceList)) {
+      throw StateError(
+        'Serwer zwrocil cofnieta albo rozwidlona liste urzadzen dla ${existing.displayName}.',
+      );
+    }
     if (existing.signingPublicKey?.isNotEmpty != true &&
         existing.identityPublicKey == peer.keyAgreementPublicKey) {
       final index = _contacts.indexWhere((item) => item.userId == peer.userId);
@@ -852,10 +930,24 @@ class AppState extends ChangeNotifier {
         _contacts[index] = existing.copyWith(
           signingPublicKey: peer.identityPublicKey,
           keyAgreementPublicKeySignature: peer.keyAgreementPublicKeySignature,
+          deviceList: nextDeviceList?.toJson(),
         );
         await _store.saveContacts(_contacts);
       }
       return;
+    }
+
+    if (nextDeviceList != null &&
+        jsonEncode(nextDeviceList.toJson()) !=
+            jsonEncode(previousDeviceList?.toJson())) {
+      final index = _contacts.indexWhere((item) => item.userId == peer.userId);
+      if (index >= 0) {
+        _contacts[index] = existing.copyWith(
+          displayName: peer.displayName,
+          deviceList: nextDeviceList.toJson(),
+        );
+        await _store.saveContacts(_contacts);
+      }
     }
 
     if (existing.signingPublicKey != peer.identityPublicKey ||
@@ -905,6 +997,7 @@ class AppState extends ChangeNotifier {
       signingPublicKey: peer.identityPublicKey,
       keyAgreementPublicKeySignature: peer.keyAgreementPublicKeySignature,
       identityRotationProof: proof.toJson(),
+      deviceList: peer.deviceList?.toJson(),
     );
     await _store.saveContacts(_contacts);
     _setStatus(
@@ -950,6 +1043,7 @@ class AppState extends ChangeNotifier {
       signingPublicKey: contact.signingPublicKey,
       keyAgreementPublicKeySignature: contact.keyAgreementPublicKeySignature,
       identityRotationProof: proof.toJson(),
+      deviceList: contact.deviceList,
     );
     await _store.saveContacts(_contacts);
     _setStatus(
@@ -1071,17 +1165,39 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _publishCloudKeyBundle() async {
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await _publishCloudKeyBundleOnce();
+        return;
+      } catch (error) {
+        if (attempt == 0 &&
+            error.toString().contains('Lista urzadzen zostala zmieniona')) {
+          _ownCloudDeviceList = null;
+          continue;
+        }
+        rethrow;
+      }
+    }
+  }
+
+  Future<void> _publishCloudKeyBundleOnce() async {
     final client = _cloudClient;
     final vault = _cloudVault;
     if (client == null || vault == null) return;
     final deviceKey = await _ensureCloudDeviceKey();
+    final deviceListState = await _ensureCloudDeviceList(deviceKey);
     await client.updateKeyBundle(
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
       identityPublicKey: vault.identityPublicKey,
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
       deviceCertificate: deviceKey.certificate.toJson(),
+      deviceList: deviceListState.list.toJson(),
+      deviceListHash: deviceListState.list.deviceListHash,
+      expectedDeviceListEpoch: deviceListState.expectedEpoch,
+      expectedDeviceListHash: deviceListState.expectedHash,
       identityRotationProof: vault.identityRotationProof?.toJson(),
     );
+    _ownCloudDeviceList = deviceListState.list;
   }
 
   Future<CloudDeviceKeyMaterial> _ensureCloudDeviceKey() async {
@@ -1117,6 +1233,91 @@ class AppState extends ChangeNotifier {
     _cloudDeviceKey = created;
     await _store.saveCloudDeviceKey(created);
     return created;
+  }
+
+  Future<
+      ({
+        CloudDeviceList list,
+        int expectedEpoch,
+        String expectedHash,
+      })> _ensureCloudDeviceList(CloudDeviceKeyMaterial deviceKey) async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    final client = _cloudClient;
+    if (session == null || vault == null || client == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    final origin = _cloudSignatureOrigin(session.serverUrl);
+    final current = await client.currentUser();
+    final previous = current.deviceList;
+    var previousSignedByCurrentIdentity = false;
+    if (previous != null) {
+      previousSignedByCurrentIdentity = await _cloudCrypto.verifyDeviceList(
+        accountId: session.userId,
+        serverOrigin: origin,
+        identityPublicKey: vault.identityPublicKey,
+        deviceList: previous,
+      );
+      var valid = previousSignedByCurrentIdentity;
+      final proof = vault.identityRotationProof;
+      if (!valid && proof?.oldIdentityPublicKey.isNotEmpty == true) {
+        valid = await _cloudCrypto.verifyDeviceList(
+          accountId: session.userId,
+          serverOrigin: origin,
+          identityPublicKey: proof!.oldIdentityPublicKey,
+          deviceList: previous,
+        );
+      }
+      if (!valid) {
+        throw StateError('Serwer zwrocil niepoprawna liste urzadzen konta.');
+      }
+    }
+
+    final expectedEpoch = previous?.deviceListEpoch ?? 0;
+    final expectedHash = previous?.deviceListHash ?? '';
+    final entry =
+        _cloudCrypto.deviceListEntryForCertificate(deviceKey.certificate);
+    if (previous != null) {
+      if (previous.isRevoked(deviceKey.deviceId)) {
+        throw StateError('To urzadzenie jest uniewaznione na liscie konta.');
+      }
+      final existing = previous.activeDevice(deviceKey.deviceId);
+      if (existing != null) {
+        if (existing.deviceSigningPublicKey != entry.deviceSigningPublicKey ||
+            existing.certificateHash != entry.certificateHash) {
+          throw StateError(
+            'Lista urzadzen zawiera inny klucz dla tego deviceId.',
+          );
+        }
+        if (previousSignedByCurrentIdentity) {
+          _ownCloudDeviceList = previous;
+          return (
+            list: previous,
+            expectedEpoch: expectedEpoch,
+            expectedHash: expectedHash,
+          );
+        }
+      }
+    }
+
+    final devices = <CloudDeviceListEntry>[
+      ...?previous?.devices,
+      if (previous?.activeDevice(deviceKey.deviceId) == null) entry,
+    ]..sort((a, b) => a.deviceId.compareTo(b.deviceId));
+    final signed = await _cloudCrypto.signDeviceList(
+      vault: vault,
+      accountId: session.userId,
+      serverOrigin: origin,
+      previousList: previous,
+      devices: devices,
+      revokedDevices: previous?.revokedDevices ?? const [],
+    );
+    _ownCloudDeviceList = signed;
+    return (
+      list: signed,
+      expectedEpoch: expectedEpoch,
+      expectedHash: expectedHash,
+    );
   }
 
   Future<void> rotateCloudIdentity() async {
@@ -1442,6 +1643,7 @@ class AppState extends ChangeNotifier {
                 existing?.keyAgreementPublicKeySignature,
         identityRotationProof:
             contact.identityRotationProof ?? existing?.identityRotationProof,
+        deviceList: contact.deviceList ?? existing?.deviceList,
         avatarMimeType: existing?.avatarMimeType ?? contact.avatarMimeType,
         avatarBytesBase64:
             existing?.avatarBytesBase64 ?? contact.avatarBytesBase64,
@@ -1493,6 +1695,7 @@ class AppState extends ChangeNotifier {
           keyAgreementPublicKeySignature:
               contact.keyAgreementPublicKeySignature,
           identityRotationProof: contact.identityRotationProof,
+          deviceList: contact.deviceList,
         );
         await _store.saveContacts(_contacts);
       }
@@ -2420,6 +2623,7 @@ class AppState extends ChangeNotifier {
     _cloudSession = null;
     _cloudVault = null;
     _cloudDeviceKey = null;
+    _ownCloudDeviceList = null;
     _cloudClient = null;
     _ownProfile = null;
     _relaySettings = null;
@@ -2443,6 +2647,7 @@ class AppState extends ChangeNotifier {
     _cloudGapFetches.clear();
     _cloudSendQueues.clear();
     _cloudDeviceKey = null;
+    _ownCloudDeviceList = null;
     _cloudUsers.clear();
     _deviceSyncTimer?.cancel();
     _pendingInviteHandshakeContacts.clear();
@@ -3950,6 +4155,7 @@ class AppState extends ChangeNotifier {
                 : contact.keyAgreementPublicKeySignature,
         identityRotationProof:
             existing.identityRotationProof ?? contact.identityRotationProof,
+        deviceList: existing.deviceList ?? contact.deviceList,
         avatarMimeType: useIncomingProfile
             ? contact.avatarMimeType
             : existing.avatarMimeType,
@@ -4329,29 +4535,65 @@ class AppState extends ChangeNotifier {
     final session = _cloudSession;
     if (session == null) return false;
 
-    String identityPublicKey = '';
+    final identityPublicKeys = <String>[];
+    CloudDeviceList? deviceList;
     if (senderUserId == session.userId) {
-      identityPublicKey = _cloudVault?.identityPublicKey ?? '';
+      final key = _cloudVault?.identityPublicKey ?? '';
+      if (key.isNotEmpty) identityPublicKeys.add(key);
+      deviceList = _ownCloudDeviceList;
     } else {
       final contact = _contactById(senderUserId);
-      identityPublicKey = contact?.signingPublicKey ?? '';
-      if (identityPublicKey.isEmpty) {
+      final key = contact?.signingPublicKey ?? '';
+      if (key.isNotEmpty) identityPublicKeys.add(key);
+      final proof = IdentityRotationProof.fromOptionalJson(
+          contact?.identityRotationProof);
+      if (proof?.oldIdentityPublicKey.isNotEmpty == true) {
+        identityPublicKeys.add(proof!.oldIdentityPublicKey);
+      }
+      deviceList = CloudDeviceList.fromOptionalJson(contact?.deviceList);
+      if (identityPublicKeys.isEmpty) {
         for (final user in _cloudUsers) {
           if (user.userId == senderUserId) {
-            identityPublicKey = user.identityPublicKey;
+            if (user.identityPublicKey.isNotEmpty) {
+              identityPublicKeys.add(user.identityPublicKey);
+            }
+            deviceList = user.deviceList;
             break;
           }
         }
       }
     }
-    if (identityPublicKey.isEmpty) return false;
-    return _cloudCrypto.verifyDeviceMessageSignature(
-      accountId: senderUserId,
-      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
-      identityPublicKey: identityPublicKey,
-      senderDeviceId: senderDeviceId,
-      payload: payload,
-    );
+    if (identityPublicKeys.isEmpty) return false;
+    var signatureValid = false;
+    for (final identityPublicKey in identityPublicKeys.toSet()) {
+      signatureValid = await _cloudCrypto.verifyDeviceMessageSignature(
+        accountId: senderUserId,
+        serverOrigin: _cloudSignatureOrigin(session.serverUrl),
+        identityPublicKey: identityPublicKey,
+        senderDeviceId: senderDeviceId,
+        payload: payload,
+      );
+      if (signatureValid) break;
+    }
+    if (!signatureValid) return false;
+
+    if (deviceList != null) {
+      final rawCertificate = payload['deviceCertificate'];
+      if (rawCertificate is! Map) return false;
+      final certificate = CloudDeviceCertificate.fromJson(
+        rawCertificate.cast<String, dynamic>(),
+      );
+      final activeDevice = deviceList.activeDevice(senderDeviceId);
+      if (activeDevice == null || deviceList.isRevoked(senderDeviceId)) {
+        return false;
+      }
+      if (activeDevice.deviceSigningPublicKey !=
+              certificate.deviceSigningPublicKey ||
+          activeDevice.certificateHash != certificate.certificateHash) {
+        return false;
+      }
+    }
+    return true;
   }
 
   _CloudReplayDecision _checkCloudMessageReplayState({
@@ -4591,6 +4833,7 @@ class AppState extends ChangeNotifier {
       signingPublicKey: contact.signingPublicKey,
       keyAgreementPublicKeySignature: contact.keyAgreementPublicKeySignature,
       identityRotationProof: contact.identityRotationProof,
+      deviceList: contact.deviceList,
       avatarMimeType: profile.avatarMimeType,
       avatarBytesBase64: profile.avatarBytesBase64,
       profileUpdatedAt: incomingUpdatedAt ?? DateTime.now().toUtc(),

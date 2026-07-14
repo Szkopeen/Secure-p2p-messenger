@@ -321,6 +321,90 @@ void main() {
         isFalse,
       );
     });
+
+    test('podpisana lista urzadzen tworzy monotoniczny lancuch', () async {
+      final crypto = CloudCrypto();
+      final vault = await crypto.createVault(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+      );
+      final firstDevice = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-a',
+      );
+      final firstList = await crypto.signDeviceList(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        previousList: null,
+        devices: [
+          crypto.deviceListEntryForCertificate(firstDevice.certificate),
+        ],
+        revokedDevices: const [],
+      );
+
+      final secondDevice = await crypto.createDeviceKeyMaterial(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceId: 'device-b',
+      );
+      final secondList = await crypto.signDeviceList(
+        vault: vault,
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        previousList: firstList,
+        devices: [
+          ...firstList.devices,
+          crypto.deviceListEntryForCertificate(secondDevice.certificate),
+        ],
+        revokedDevices: const [],
+      );
+
+      expect(
+        await crypto.verifyDeviceList(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          deviceList: firstList,
+        ),
+        isTrue,
+      );
+      expect(secondList.deviceListEpoch, 2);
+      expect(secondList.previousDeviceListHash, firstList.deviceListHash);
+      expect(
+        await crypto.verifyDeviceList(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          deviceList: secondList,
+        ),
+        isTrue,
+      );
+
+      final tampered = CloudDeviceList(
+        accountId: secondList.accountId,
+        serverOrigin: secondList.serverOrigin,
+        deviceListEpoch: secondList.deviceListEpoch,
+        previousDeviceListHash: secondList.previousDeviceListHash,
+        identityRotationEpoch: secondList.identityRotationEpoch,
+        devices: [secondList.devices.last],
+        revokedDevices: secondList.revokedDevices,
+        signature: secondList.signature,
+        updatedAt: secondList.updatedAt,
+      );
+      expect(
+        await crypto.verifyDeviceList(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          identityPublicKey: vault.identityPublicKey,
+          deviceList: tampered,
+        ),
+        isFalse,
+      );
+    });
   });
 
   group('Podpisana tozsamosc', () {

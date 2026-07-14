@@ -69,6 +69,14 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Klient blokuje downgrade podpisanego strumienia: jezeli dany strumien
   `rozmowa + nadawca + urzadzenie` przeszedl na podpisy urzadzen, kolejne
   wiadomosci bez poprawnego podpisu sa odrzucane.
+- Dodano podpisana, wersjonowana liste urzadzen konta:
+  `deviceListEpoch`, `previousDeviceListHash`, aktywne urzadzenia,
+  uniewaznione urzadzenia i podpis aktualna tozsamoscia Ed25519 konta.
+- Klient przypina przy kontakcie ostatni zaakceptowany epoch/hash listy
+  urzadzen i odrzuca rollback albo rozwidlona galez listy.
+- Backend zapisuje liste urzadzen z mechanizmem compare-and-swap na
+  `expectedDeviceListEpoch` i `expectedDeviceListHash`, zeby dwie rownolegle
+  aktualizacje nie nadpisywaly sie po cichu.
 
 Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
 pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
@@ -89,8 +97,9 @@ sekretem.
 6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; backend
    przejsciowo przyjmuje tez format legacy bez licznikow, zeby aktualizacja
    serwera nie odciela starszych klientow.
-7. Podpisy urzadzen nie maja jeszcze pelnego cyklu zycia: brakuje podpisanej
-   listy urzadzen, uniewazniania urzadzen i ochrony listy przed rollbackiem.
+7. Podpisana lista urzadzen nie ma jeszcze kompletnego UI do uniewazniania
+   urzadzen, wylogowania konkretnej sesji i rotacji kluczy rozmow po usunieciu
+   urzadzenia.
 8. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
 9. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
@@ -103,8 +112,8 @@ sekretem.
 1. Wdrozyc OPAQUE albo inny protokol logowania, w ktorym serwer nie otrzymuje
    sekretu pozwalajacego odszyfrowac vault.
 2. Dodac key transparency log dla publicznych tozsamosci Ed25519.
-3. Dodac podpisana liste urzadzen, uniewaznianie konkretnych urzadzen i ochrone
-   przed cofaniem tej listy.
+3. Dodac UI i API do uniewazniania konkretnych urzadzen, wylogowania ich sesji
+   oraz wykluczania ich z kolejnych aktualizacji vaultu.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.
 

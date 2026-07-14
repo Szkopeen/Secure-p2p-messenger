@@ -161,6 +161,10 @@ class CloudApiClient {
     required String identityPublicKey,
     required String keyAgreementPublicKeySignature,
     Map<String, dynamic>? deviceCertificate,
+    Map<String, dynamic>? deviceList,
+    String? deviceListHash,
+    int? expectedDeviceListEpoch,
+    String? expectedDeviceListHash,
     Map<String, dynamic>? identityRotationProof,
   }) async {
     await _put('/v2/keys', {
@@ -168,9 +172,20 @@ class CloudApiClient {
       'identityPublicKey': identityPublicKey,
       'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
       if (deviceCertificate != null) 'deviceCertificate': deviceCertificate,
+      if (deviceList != null) 'deviceList': deviceList,
+      if (deviceListHash != null) 'deviceListHash': deviceListHash,
+      if (expectedDeviceListEpoch != null)
+        'expectedDeviceListEpoch': expectedDeviceListEpoch,
+      if (expectedDeviceListHash != null)
+        'expectedDeviceListHash': expectedDeviceListHash,
       if (identityRotationProof != null)
         'identityRotationProof': identityRotationProof,
     });
+  }
+
+  Future<CloudPublicUser> currentUser() async {
+    final raw = await _get('/v2/session');
+    return CloudPublicUser.fromJson(asStringKeyMap(raw['user'], 'user'));
   }
 
   Future<List<CloudConversation>> conversations() async {

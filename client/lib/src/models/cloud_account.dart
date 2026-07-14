@@ -58,6 +58,7 @@ class CloudPublicUser {
     required this.identityPublicKey,
     required this.keyAgreementPublicKeySignature,
     this.deviceCertificates = const {},
+    this.deviceList,
     this.identityRotationProof,
   });
 
@@ -68,6 +69,7 @@ class CloudPublicUser {
   final String identityPublicKey;
   final String keyAgreementPublicKeySignature;
   final Map<String, CloudDeviceCertificate> deviceCertificates;
+  final CloudDeviceList? deviceList;
   final IdentityRotationProof? identityRotationProof;
 
   factory CloudPublicUser.fromJson(Map<String, dynamic> json) {
@@ -95,6 +97,7 @@ class CloudPublicUser {
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String? ?? '',
       deviceCertificates: devices,
+      deviceList: CloudDeviceList.fromOptionalJson(json['deviceList']),
       identityRotationProof:
           IdentityRotationProof.fromOptionalJson(json['identityRotationProof']),
     );
@@ -122,6 +125,7 @@ class CloudDeviceCertificate {
 
   Map<String, dynamic> toJson() => {
         'v': 1,
+        'protocol': 'secure-chat/device-list/v1',
         'accountId': accountId,
         'serverOrigin': serverOrigin,
         'deviceId': deviceId,
@@ -149,6 +153,179 @@ class CloudDeviceCertificate {
   static CloudDeviceCertificate? fromOptionalJson(Object? value) {
     if (value is Map) {
       return CloudDeviceCertificate.fromJson(value.cast<String, dynamic>());
+    }
+    return null;
+  }
+
+  String get certificateHash =>
+      crypto_hash.sha256.convert(canonicalJsonBytes(toJson())).toString();
+}
+
+class CloudDeviceListEntry {
+  const CloudDeviceListEntry({
+    required this.deviceId,
+    required this.deviceSigningPublicKey,
+    required this.certificateHash,
+    required this.addedAt,
+    required this.deviceEpoch,
+  });
+
+  final String deviceId;
+  final String deviceSigningPublicKey;
+  final String certificateHash;
+  final DateTime addedAt;
+  final int deviceEpoch;
+
+  Map<String, dynamic> toJson() => {
+        'deviceId': deviceId,
+        'deviceSigningPublicKey': deviceSigningPublicKey,
+        'certificateHash': certificateHash,
+        'addedAt': addedAt.toUtc().toIso8601String(),
+        'deviceEpoch': deviceEpoch,
+      };
+
+  factory CloudDeviceListEntry.fromJson(Map<String, dynamic> json) {
+    return CloudDeviceListEntry(
+      deviceId: requiredString(json, 'deviceId'),
+      deviceSigningPublicKey: requiredString(json, 'deviceSigningPublicKey'),
+      certificateHash: requiredString(json, 'certificateHash'),
+      addedAt: DateTime.tryParse(json['addedAt']?.toString() ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      deviceEpoch: json['deviceEpoch'] is int
+          ? json['deviceEpoch'] as int
+          : int.tryParse(json['deviceEpoch']?.toString() ?? '') ?? 1,
+    );
+  }
+}
+
+class CloudRevokedDevice {
+  const CloudRevokedDevice({
+    required this.deviceId,
+    required this.revokedDeviceEpoch,
+    required this.revokedAt,
+    required this.reasonCode,
+  });
+
+  final String deviceId;
+  final int revokedDeviceEpoch;
+  final DateTime revokedAt;
+  final String reasonCode;
+
+  Map<String, dynamic> toJson() => {
+        'deviceId': deviceId,
+        'revokedDeviceEpoch': revokedDeviceEpoch,
+        'revokedAt': revokedAt.toUtc().toIso8601String(),
+        'reasonCode': reasonCode,
+      };
+
+  factory CloudRevokedDevice.fromJson(Map<String, dynamic> json) {
+    return CloudRevokedDevice(
+      deviceId: requiredString(json, 'deviceId'),
+      revokedDeviceEpoch: json['revokedDeviceEpoch'] is int
+          ? json['revokedDeviceEpoch'] as int
+          : int.tryParse(json['revokedDeviceEpoch']?.toString() ?? '') ?? 1,
+      revokedAt: DateTime.tryParse(json['revokedAt']?.toString() ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      reasonCode: json['reasonCode'] as String? ?? 'unknown',
+    );
+  }
+}
+
+class CloudDeviceList {
+  const CloudDeviceList({
+    required this.accountId,
+    required this.serverOrigin,
+    required this.deviceListEpoch,
+    required this.previousDeviceListHash,
+    required this.identityRotationEpoch,
+    required this.devices,
+    required this.revokedDevices,
+    required this.signature,
+    required this.updatedAt,
+  });
+
+  final String accountId;
+  final String serverOrigin;
+  final int deviceListEpoch;
+  final String previousDeviceListHash;
+  final int identityRotationEpoch;
+  final List<CloudDeviceListEntry> devices;
+  final List<CloudRevokedDevice> revokedDevices;
+  final String signature;
+  final DateTime updatedAt;
+
+  String get deviceListHash =>
+      crypto_hash.sha256.convert(canonicalJsonBytes(toJson())).toString();
+
+  Map<String, dynamic> toJson() => {
+        'v': 1,
+        'accountId': accountId,
+        'serverOrigin': serverOrigin,
+        'deviceListEpoch': deviceListEpoch,
+        'previousDeviceListHash': previousDeviceListHash,
+        'identityRotationEpoch': identityRotationEpoch,
+        'devices': devices.map((device) => device.toJson()).toList(),
+        'revokedDevices':
+            revokedDevices.map((device) => device.toJson()).toList(),
+        'signature': signature,
+        'updatedAt': updatedAt.toUtc().toIso8601String(),
+      };
+
+  Map<String, dynamic> signedPayload() => {
+        'v': 1,
+        'protocol': 'secure-chat/device-list/v1',
+        'accountId': accountId,
+        'serverOrigin': serverOrigin,
+        'deviceListEpoch': deviceListEpoch,
+        'previousDeviceListHash': previousDeviceListHash,
+        'identityRotationEpoch': identityRotationEpoch,
+        'devices': devices.map((device) => device.toJson()).toList(),
+        'revokedDevices':
+            revokedDevices.map((device) => device.toJson()).toList(),
+        'updatedAt': updatedAt.toUtc().toIso8601String(),
+      };
+
+  CloudDeviceListEntry? activeDevice(String deviceId) {
+    for (final device in devices) {
+      if (device.deviceId == deviceId) return device;
+    }
+    return null;
+  }
+
+  bool isRevoked(String deviceId) {
+    return revokedDevices.any((device) => device.deviceId == deviceId);
+  }
+
+  factory CloudDeviceList.fromJson(Map<String, dynamic> json) {
+    return CloudDeviceList(
+      accountId: requiredString(json, 'accountId'),
+      serverOrigin: requiredString(json, 'serverOrigin'),
+      deviceListEpoch: json['deviceListEpoch'] is int
+          ? json['deviceListEpoch'] as int
+          : int.tryParse(json['deviceListEpoch']?.toString() ?? '') ?? 1,
+      previousDeviceListHash: json['previousDeviceListHash'] as String? ?? '',
+      identityRotationEpoch: json['identityRotationEpoch'] is int
+          ? json['identityRotationEpoch'] as int
+          : int.tryParse(json['identityRotationEpoch']?.toString() ?? '') ?? 0,
+      devices: ((json['devices'] as List?) ?? const [])
+          .map((item) => CloudDeviceListEntry.fromJson(
+                (item as Map).cast<String, dynamic>(),
+              ))
+          .toList(growable: false),
+      revokedDevices: ((json['revokedDevices'] as List?) ?? const [])
+          .map((item) => CloudRevokedDevice.fromJson(
+                (item as Map).cast<String, dynamic>(),
+              ))
+          .toList(growable: false),
+      signature: requiredString(json, 'signature'),
+      updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+    );
+  }
+
+  static CloudDeviceList? fromOptionalJson(Object? value) {
+    if (value is Map) {
+      return CloudDeviceList.fromJson(value.cast<String, dynamic>());
     }
     return null;
   }

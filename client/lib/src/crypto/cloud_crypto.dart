@@ -53,6 +53,7 @@ class CloudCrypto {
   static const identityRotationProtocol = 'secure-p2p-identity-rotation/v1';
   static const deviceCertificateProtocol = 'secure-chat/device-certificate/v1';
   static const deviceMessageProtocol = 'secure-chat/device-message/v1';
+  static const deviceListProtocol = 'secure-chat/device-list/v1';
 
   final AesGcm _aead = AesGcm.with256bits();
   final X25519 _x25519 = X25519();
@@ -404,6 +405,104 @@ class CloudCrypto {
     }
   }
 
+  Future<CloudDeviceList> signDeviceList({
+    required CloudVault vault,
+    required String accountId,
+    required String serverOrigin,
+    required CloudDeviceList? previousList,
+    required List<CloudDeviceListEntry> devices,
+    required List<CloudRevokedDevice> revokedDevices,
+  }) async {
+    if (vault.identityPrivateKey.isEmpty || vault.identityPublicKey.isEmpty) {
+      throw StateError('Brak klucza tozsamosci do podpisania listy urzadzen.');
+    }
+    final updatedAt = DateTime.now().toUtc();
+    final deviceListEpoch = (previousList?.deviceListEpoch ?? 0) + 1;
+    final previousDeviceListHash = previousList?.deviceListHash ?? '';
+    final identityRotationEpoch =
+        vault.identityRotationProof?.rotationEpoch ?? 0;
+    final signature = await _ed25519.sign(
+      canonicalJsonBytes(_deviceListPayload(
+        accountId: accountId,
+        serverOrigin: serverOrigin,
+        deviceListEpoch: deviceListEpoch,
+        previousDeviceListHash: previousDeviceListHash,
+        identityRotationEpoch: identityRotationEpoch,
+        devices: devices,
+        revokedDevices: revokedDevices,
+        updatedAt: updatedAt,
+      )),
+      keyPair: SimpleKeyPairData(
+        unb64(vault.identityPrivateKey),
+        publicKey: SimplePublicKey(
+          unb64(vault.identityPublicKey),
+          type: KeyPairType.ed25519,
+        ),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    return CloudDeviceList(
+      accountId: accountId,
+      serverOrigin: serverOrigin,
+      deviceListEpoch: deviceListEpoch,
+      previousDeviceListHash: previousDeviceListHash,
+      identityRotationEpoch: identityRotationEpoch,
+      devices: devices,
+      revokedDevices: revokedDevices,
+      signature: b64(signature.bytes),
+      updatedAt: updatedAt,
+    );
+  }
+
+  Future<bool> verifyDeviceList({
+    required String accountId,
+    required String serverOrigin,
+    required String identityPublicKey,
+    required CloudDeviceList deviceList,
+  }) async {
+    if (deviceList.accountId != accountId ||
+        deviceList.serverOrigin != serverOrigin ||
+        deviceList.deviceListEpoch < 1 ||
+        deviceList.signature.isEmpty) {
+      return false;
+    }
+    final seenDevices = <String>{};
+    for (final device in deviceList.devices) {
+      if (!seenDevices.add(device.deviceId) ||
+          device.deviceSigningPublicKey.isEmpty ||
+          device.certificateHash.isEmpty ||
+          device.deviceEpoch < 1) {
+        return false;
+      }
+    }
+    try {
+      return _ed25519.verify(
+        canonicalJsonBytes(deviceList.signedPayload()),
+        signature: Signature(
+          unb64(deviceList.signature),
+          publicKey: SimplePublicKey(
+            unb64(identityPublicKey),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  CloudDeviceListEntry deviceListEntryForCertificate(
+    CloudDeviceCertificate certificate,
+  ) {
+    return CloudDeviceListEntry(
+      deviceId: certificate.deviceId,
+      deviceSigningPublicKey: certificate.deviceSigningPublicKey,
+      certificateHash: certificate.certificateHash,
+      addedAt: certificate.createdAt,
+      deviceEpoch: certificate.deviceEpoch,
+    );
+  }
+
   bool hasDeviceSignature(Map<String, dynamic> payload) {
     return payload['deviceCertificate'] is Map &&
         payload['deviceSignature'] is String &&
@@ -628,6 +727,31 @@ class CloudCrypto {
           }))
           .bytes,
     );
+  }
+
+  Map<String, dynamic> _deviceListPayload({
+    required String accountId,
+    required String serverOrigin,
+    required int deviceListEpoch,
+    required String previousDeviceListHash,
+    required int identityRotationEpoch,
+    required List<CloudDeviceListEntry> devices,
+    required List<CloudRevokedDevice> revokedDevices,
+    required DateTime updatedAt,
+  }) {
+    return {
+      'v': 1,
+      'protocol': deviceListProtocol,
+      'accountId': accountId,
+      'serverOrigin': serverOrigin,
+      'deviceListEpoch': deviceListEpoch,
+      'previousDeviceListHash': previousDeviceListHash,
+      'identityRotationEpoch': identityRotationEpoch,
+      'devices': devices.map((device) => device.toJson()).toList(),
+      'revokedDevices':
+          revokedDevices.map((device) => device.toJson()).toList(),
+      'updatedAt': updatedAt.toUtc().toIso8601String(),
+    };
   }
 
   Future<Map<String, dynamic>> encryptVault(

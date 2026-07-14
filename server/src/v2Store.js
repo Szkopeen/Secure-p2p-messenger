@@ -57,6 +57,54 @@ function isValidDeviceCertificate(value) {
     value.signature.length >= 16;
 }
 
+function isValidDeviceList(value) {
+  if (!isObject(value) ||
+      value.v !== 1 ||
+      (value.protocol !== undefined && value.protocol !== 'secure-chat/device-list/v1') ||
+      typeof value.accountId !== 'string' ||
+      value.accountId.length < 16 ||
+      typeof value.serverOrigin !== 'string' ||
+      value.serverOrigin.length < 8 ||
+      !Number.isInteger(value.deviceListEpoch) ||
+      value.deviceListEpoch < 1 ||
+      typeof value.previousDeviceListHash !== 'string' ||
+      !Number.isInteger(value.identityRotationEpoch) ||
+      value.identityRotationEpoch < 0 ||
+      !Array.isArray(value.devices) ||
+      !Array.isArray(value.revokedDevices) ||
+      typeof value.signature !== 'string' ||
+      value.signature.length < 16 ||
+      typeof value.updatedAt !== 'string') {
+    return false;
+  }
+  for (const device of value.devices) {
+    if (!isObject(device) ||
+        typeof device.deviceId !== 'string' ||
+        device.deviceId.length < 8 ||
+        typeof device.deviceSigningPublicKey !== 'string' ||
+        device.deviceSigningPublicKey.length < 16 ||
+        typeof device.certificateHash !== 'string' ||
+        device.certificateHash.length < 16 ||
+        typeof device.addedAt !== 'string' ||
+        !Number.isInteger(device.deviceEpoch) ||
+        device.deviceEpoch < 1) {
+      return false;
+    }
+  }
+  for (const device of value.revokedDevices) {
+    if (!isObject(device) ||
+        typeof device.deviceId !== 'string' ||
+        device.deviceId.length < 8 ||
+        !Number.isInteger(device.revokedDeviceEpoch) ||
+        device.revokedDeviceEpoch < 1 ||
+        typeof device.revokedAt !== 'string' ||
+        typeof device.reasonCode !== 'string') {
+      return false;
+    }
+  }
+  return true;
+}
+
 function validateCloudMessagePayload(payload, body, auth) {
   if (!isObject(payload)) return 'Brak zaszyfrowanego payloadu.';
   if (!isObject(payload.aad)) return 'Brak AAD wiadomosci.';
@@ -251,6 +299,8 @@ export class V2Store {
       identityPublicKey: user.identityPublicKey || '',
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
       devices,
+      deviceList: isValidDeviceList(user.deviceList) ? user.deviceList : null,
+      deviceListHash: typeof user.deviceListHash === 'string' ? user.deviceListHash : '',
       identityRotationProof: user.identityRotationProof || null,
       updatedAt: user.updatedAt
     };
@@ -451,6 +501,35 @@ export async function handleV2Http(store, req, res, url) {
           return sendJson(res, 400, { ok: false, error: 'Certyfikat urzadzenia nie zgadza sie z sesja.' });
         }
       }
+      if (body.deviceList !== undefined && body.deviceList !== null) {
+        if (!isValidDeviceList(body.deviceList)) {
+          return sendJson(res, 400, { ok: false, error: 'Niepoprawna lista urzadzen.' });
+        }
+        if (body.deviceList.accountId !== auth.user.userId) {
+          return sendJson(res, 400, { ok: false, error: 'Lista urzadzen nie zgadza sie z kontem.' });
+        }
+        if (typeof body.deviceListHash !== 'string' || body.deviceListHash.length < 16) {
+          return sendJson(res, 400, { ok: false, error: 'Brak hasha listy urzadzen.' });
+        }
+        const currentEpoch = Number.isInteger(auth.user.deviceList?.deviceListEpoch)
+          ? auth.user.deviceList.deviceListEpoch
+          : 0;
+        const currentHash = typeof auth.user.deviceListHash === 'string'
+          ? auth.user.deviceListHash
+          : '';
+        const expectedEpoch = Number.isInteger(body.expectedDeviceListEpoch)
+          ? body.expectedDeviceListEpoch
+          : currentEpoch;
+        const expectedHash = typeof body.expectedDeviceListHash === 'string'
+          ? body.expectedDeviceListHash
+          : currentHash;
+        if (expectedEpoch !== currentEpoch || expectedHash !== currentHash) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: 'Lista urzadzen zostala zmieniona przez inne urzadzenie. Odswiez stan i sprobuj ponownie.'
+          });
+        }
+      }
       auth.user.keyAgreementPublicKey = body.keyAgreementPublicKey;
       auth.user.identityPublicKey = body.identityPublicKey;
       auth.user.keyAgreementPublicKeySignature = body.keyAgreementPublicKeySignature;
@@ -465,6 +544,10 @@ export async function handleV2Http(store, req, res, url) {
           deviceSigningPublicKey: body.deviceCertificate.deviceSigningPublicKey,
           lastSeenAt: nowIso()
         };
+      }
+      if (isValidDeviceList(body.deviceList)) {
+        auth.user.deviceList = body.deviceList;
+        auth.user.deviceListHash = body.deviceListHash;
       }
       auth.user.updatedAt = nowIso();
       store.persistUsers();
