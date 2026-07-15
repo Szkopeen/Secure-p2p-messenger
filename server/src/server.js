@@ -1162,7 +1162,9 @@ wss.on('connection', (ws, request) => {
   ws.on('pong', () => { ws.isAlive = true; });
   const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
   if (requestUrl.pathname === '/v2/ws') {
-    handleV2WebSocket(v2Store, ws, request);
+    handleV2WebSocket(v2Store, ws, request, {
+      allowQueryToken: config.allowWebSocketTokenQuery
+    });
     return;
   }
 

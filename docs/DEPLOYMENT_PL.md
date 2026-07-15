@@ -32,7 +32,10 @@ curl http://127.0.0.1:8443/healthz
 
 ### TLS i publiczny adres
 
-Do testow w LAN mozesz uzyc `ws://ADRES_IP:8443`. Dla internetu uzywaj `wss://`, bo token relay i komunikacja z internetu powinny isc przez bezpieczny kanal TLS.
+Klient nie powinien laczyc sie przez `ws://ADRES_IP:8443` w LAN, bo stary tryb
+relay wysyla `RELAY_TOKEN` po zestawieniu WebSocket. `ws://` jest dozwolone
+wylacznie dla `localhost`, `127.0.0.1` albo `::1` podczas lokalnych testow.
+Dla LAN, Raspberry Pi i internetu uzywaj `wss://` przez Caddy/Nginx.
 
 Przyklad Caddy:
 
@@ -45,10 +48,16 @@ chat.example.com {
 }
 ```
 
-W aplikacji klienta wpisz wtedy:
+W starym trybie relay klienta wpisz wtedy:
 
 ```text
 wss://chat.example.com
+```
+
+W aktualnym trybie cloud w aplikacji wpisuj adres HTTPS:
+
+```text
+https://chat.example.com
 ```
 
 ### Zasady firewall/router
@@ -136,7 +145,10 @@ Artefakt bedzie w `build/linux/x64/release/bundle/`.
 
 ## 5. Hardening produkcyjny
 
-- Uzywaj `wss://` i aktualnego TLS.
+- Uzywaj `https://` dla cloud i `wss://` dla legacy relay, zawsze z aktualnym TLS.
+- Nie wlaczaj `ALLOW_WS_TOKEN_QUERY=true`, chyba ze robisz krotka migracje
+  starych klientow. Nowy klient wysyla token WebSocket w naglowku
+  `Authorization`.
 - Trzymaj relay za Caddy/nginx z automatycznym odnawianiem certyfikatu.
 - Uruchamiaj Node jako osobny, nieuprzywilejowany uzytkownik.
 - Monitoruj tylko metryki techniczne procesu, bez logowania payloadow.

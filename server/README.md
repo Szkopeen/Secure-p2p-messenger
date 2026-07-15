@@ -37,7 +37,13 @@ Ustaw osobno:
 ```bash
 RELAY_TOKEN=losowy-ciag-minimum-32-znaki
 ADMIN_TOKEN=drugi-losowy-ciag-minimum-32-znaki
+ALLOW_WS_TOKEN_QUERY=false
 ```
+
+`ALLOW_WS_TOKEN_QUERY=true` wlaczaj tylko awaryjnie na krotka migracje starych
+klientow. Nowy klient cloud wysyla token sesji WebSocket w naglowku
+`Authorization: Bearer`, zeby nie zostawiac bearer tokena w URL-ach i logach
+reverse proxy.
 
 ## Wdrozenie na Pi
 

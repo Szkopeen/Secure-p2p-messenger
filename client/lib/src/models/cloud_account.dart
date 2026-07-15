@@ -47,6 +47,28 @@ class CloudSession {
       vaultKey: requiredString(json, 'vaultKey'),
     );
   }
+
+  CloudSession copyWith({
+    String? serverUrl,
+    String? token,
+    String? userId,
+    String? username,
+    String? displayName,
+    String? deviceId,
+    String? vaultSalt,
+    String? vaultKey,
+  }) {
+    return CloudSession(
+      serverUrl: serverUrl ?? this.serverUrl,
+      token: token ?? this.token,
+      userId: userId ?? this.userId,
+      username: username ?? this.username,
+      displayName: displayName ?? this.displayName,
+      deviceId: deviceId ?? this.deviceId,
+      vaultSalt: vaultSalt ?? this.vaultSalt,
+      vaultKey: vaultKey ?? this.vaultKey,
+    );
+  }
 }
 
 class CloudPublicUser {

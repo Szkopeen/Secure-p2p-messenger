@@ -9,7 +9,12 @@ Zakladany wariant produkcyjny:
 - Publiczny dostep: domena, HTTPS/WSS przez Caddy.
 - Klient: Flutter budowany dla Windows, Android i Linux.
 
-Do testow lokalnych mozesz uruchomic relay bez domeny i TLS na `ws://ADRES_IP:8443`, ale do uzycia przez internet uzywaj `wss://`.
+Do testow lokalnych mozesz uruchomic serwer bez domeny i TLS tylko na
+`ws://localhost:8443`, `ws://127.0.0.1:8443` albo `http://localhost:8443`.
+Nie uzywaj `ws://ADRES_IP:8443` przez LAN, bo legacy relay przesyla
+`RELAY_TOKEN` po zestawieniu WebSocket. Dla Raspberry Pi, LAN i internetu uzywaj
+TLS przez Caddy, czyli `https://twoja-domena` w cloud albo `wss://twoja-domena`
+w starym relay.
 
 ## 1. Co przygotowac
 
@@ -232,7 +237,8 @@ journalctl -u secure-p2p-relay -f
 
 ## 8. Caddy i WSS
 
-Caddy daje automatyczny TLS i zamienia publiczne `wss://twoja-domena` na lokalne `ws://127.0.0.1:8443`.
+Caddy daje automatyczny TLS i zamienia publiczne `https://twoja-domena` /
+`wss://twoja-domena` na lokalne polaczenie do `127.0.0.1:8443`.
 
 Instalacja:
 
@@ -546,7 +552,8 @@ sudo systemctl status caddy
 
 Aplikacja nie laczy sie z relay:
 
-- Upewnij sie, ze wpisujesz `wss://chat.twojadomena.pl`, nie `https://`.
+- W aktualnym trybie cloud wpisuj `https://chat.twojadomena.pl`.
+- W starym trybie relay wpisuj `wss://chat.twojadomena.pl`, nie `ws://`.
 - Sprawdz, czy token w aplikacji jest identyczny jak `RELAY_TOKEN`.
 - Sprawdz czas systemowy na telefonie/komputerze.
 - Sprawdz firewall i przekierowanie portu `443/TCP`.

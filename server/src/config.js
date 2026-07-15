@@ -36,7 +36,11 @@ export const config = Object.freeze({
   rateLimitWindowMs: readInt('RATE_LIMIT_WINDOW_MS', 10_000, 1000, 60_000),
   maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 12, 1, 20),
   securityLogs: readBool('SECURITY_LOGS', false),
+<<<<<<< HEAD
   registrationMode: process.env.REGISTRATION_MODE || 'invite'
+=======
+  allowWebSocketTokenQuery: readBool('ALLOW_WS_TOKEN_QUERY', false)
+>>>>>>> d05055dac5556d4728d4819c8c85dac1f6b6c0f3
 });
 
 if (!['disabled', 'invite', 'open'].includes(config.registrationMode)) {

@@ -882,6 +882,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
   }
 }
 
+<<<<<<< HEAD
 export function handleV2WebSocket(store, ws, request) {
   const timer = setTimeout(() => ws.close(1008, 'Brak biletu WebSocket.'), 10_000);
   ws.once('message', (raw) => {
@@ -893,5 +894,33 @@ export function handleV2WebSocket(store, ws, request) {
     store.attachSocket(auth.user.userId, auth.session.deviceId, auth.sessionHash, ws);
     ws.send(JSON.stringify({ type: 'ready', userId: auth.user.userId, deviceId: auth.session.deviceId, serverTime: nowIso() }));
     ws.on('message', () => ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() })));
+=======
+export function handleV2WebSocket(store, ws, request, options = {}) {
+  const url = new URL(request.url || '/', 'http://127.0.0.1');
+  if (!options.allowQueryToken && url.searchParams.has('token')) {
+    ws.close(1008, 'Token WebSocket w URL jest wylaczony.');
+    return;
+  }
+  const headerToken = bearerToken(request);
+  const queryToken = options.allowQueryToken
+    ? url.searchParams.get('token') || ''
+    : '';
+  const token = headerToken || queryToken;
+  const fakeReq = { headers: { authorization: `Bearer ${token}` } };
+  const auth = store.auth(fakeReq);
+  if (!auth) {
+    ws.close(1008, 'Brak logowania.');
+    return;
+  }
+  store.attachSocket(auth.user.userId, auth.session.deviceId, auth.token, ws);
+  ws.send(JSON.stringify({
+    type: 'ready',
+    userId: auth.user.userId,
+    deviceId: auth.session.deviceId,
+    serverTime: nowIso()
+  }));
+  ws.on('message', () => {
+    ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() }));
+>>>>>>> d05055dac5556d4728d4819c8c85dac1f6b6c0f3
   });
 }

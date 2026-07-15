@@ -303,15 +303,15 @@ class AppState extends ChangeNotifier {
       identityPublicKey: vault.identityPublicKey,
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
       vaultSalt: vaultSalt,
-      vaultKey: vaultKey,
       encryptedVault: encryptedVault,
     );
+    final session = result.session.copyWith(vaultKey: vaultKey);
     vault = await _cloudCrypto.ensureSignedIdentity(
       vault,
-      accountId: result.session.userId,
-      serverOrigin: _cloudSignatureOrigin(result.session.serverUrl),
+      accountId: session.userId,
+      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
     );
-    await _activateCloudSession(result.session, vault);
+    await _activateCloudSession(session, vault);
     await _saveCloudVault();
     await _publishCloudKeyBundle();
     await connectCloud();
@@ -334,22 +334,12 @@ class AppState extends ChangeNotifier {
       password: password,
       deviceId: deviceId,
       deviceName: Platform.localHostname,
-      vaultKey: '',
     );
     final vaultKey = await _cloudCrypto.deriveVaultKey(
       vaultSecret: vaultSecret,
       salt: loginProbe.session.vaultSalt,
     );
-    final session = CloudSession(
-      serverUrl: loginProbe.session.serverUrl,
-      token: loginProbe.session.token,
-      userId: loginProbe.session.userId,
-      username: loginProbe.session.username,
-      displayName: loginProbe.session.displayName,
-      deviceId: loginProbe.session.deviceId,
-      vaultSalt: loginProbe.session.vaultSalt,
-      vaultKey: vaultKey,
-    );
+    final session = loginProbe.session.copyWith(vaultKey: vaultKey);
     final encryptedVault = loginProbe.encryptedVault;
     if (encryptedVault == null) {
       throw StateError('Konto nie ma vaulta z kluczami.');
