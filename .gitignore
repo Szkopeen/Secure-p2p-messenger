@@ -16,6 +16,7 @@ server/updates/manifest.json
 .flutter-plugins
 .flutter-plugins-dependencies
 build/
+client/vendor/
 
 # IDE / system
 .idea/
