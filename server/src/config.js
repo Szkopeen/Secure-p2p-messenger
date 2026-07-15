@@ -16,6 +16,12 @@ function readBool(name, fallback) {
   return ['1', 'true', 'yes', 'tak'].includes(raw.toLowerCase());
 }
 
+function readList(name, fallback = []) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  return raw.split(',').map((value) => value.trim()).filter(Boolean);
+}
+
 export const config = Object.freeze({
   host: process.env.HOST || '127.0.0.1',
   port: readInt('PORT', 8443, 1, 65535),
@@ -36,6 +42,7 @@ export const config = Object.freeze({
   rateLimitWindowMs: readInt('RATE_LIMIT_WINDOW_MS', 10_000, 1000, 60_000),
   maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 12, 1, 20),
   securityLogs: readBool('SECURITY_LOGS', false),
+  trustedProxies: readList('TRUSTED_PROXIES', ['127.0.0.1', '::1', '::ffff:127.0.0.1']),
   registrationMode:
     process.env.REGISTRATION_MODE?.trim().toLowerCase() || 'disabled'
 });

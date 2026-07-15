@@ -326,29 +326,47 @@ class AppState extends ChangeNotifier {
     );
     final vaultKey = await _cloudCrypto.deriveVaultKey(
       vaultSecret: vaultSecret,
-      salt: loginProbe.session.vaultSalt,
+      salt: loginProbe.vaultSalt,
     );
-    final session = loginProbe.session.copyWith(vaultKey: vaultKey);
     CloudVault vault;
-    try {
-      final encryptedVault = loginProbe.encryptedVault;
-      if (encryptedVault == null) {
-        throw StateError('Konto nie ma vaulta z kluczami.');
-      }
-      vault = await _cloudCrypto.ensureSignedIdentity(
-        await _cloudCrypto.decryptVault(encryptedVault, vaultKey),
-        accountId: session.userId,
-        serverOrigin: _cloudSignatureOrigin(session.serverUrl),
-      );
-    } catch (_) {
-      try {
-        await CloudApiClient(
-          serverUrl: normalizedServer,
-          token: loginProbe.session.token,
-        ).logout();
-      } catch (_) {}
-      rethrow;
+    final encryptedVault = loginProbe.encryptedVault;
+    if (encryptedVault == null) {
+      throw StateError('Konto nie ma vaulta z kluczami.');
     }
+    final pinnedVault = await _store.loadCloudVaultPin(loginProbe.userId);
+    if (pinnedVault != null) {
+      final pinnedEpoch = pinnedVault['epoch'] as int? ?? 0;
+      final pinnedHash = pinnedVault['hash']?.toString() ?? '';
+      if (loginProbe.vaultEpoch < pinnedEpoch ||
+          (loginProbe.vaultEpoch == pinnedEpoch &&
+              pinnedHash.isNotEmpty &&
+              pinnedHash != loginProbe.vaultHash)) {
+        throw StateError(
+            'Serwer probuje cofnac lub sforkowac zaszyfrowany vault.');
+      }
+    }
+    vault = await _cloudCrypto.ensureSignedIdentity(
+      await _cloudCrypto.decryptVault(encryptedVault, vaultKey),
+      accountId: loginProbe.userId,
+      serverOrigin: _cloudSignatureOrigin(normalizedServer),
+    );
+    final signature = await _cloudCrypto.signLoginChallenge(
+      vault: vault,
+      challenge: loginProbe.challenge,
+      userId: loginProbe.userId,
+      deviceId: loginProbe.deviceId,
+      expiresAtMs: loginProbe.challengeExpiresAtMs,
+    );
+    final completed = await probe.completeLogin(
+      pendingToken: loginProbe.pendingToken,
+      signature: signature,
+    );
+    final session = completed.session.copyWith(vaultKey: vaultKey);
+    await _store.saveCloudVaultPin(
+      loginProbe.userId,
+      loginProbe.vaultEpoch,
+      loginProbe.vaultHash,
+    );
     await _activateCloudSession(session, vault);
     await _saveCloudVault();
     await _publishCloudKeyBundle();
@@ -1137,7 +1155,8 @@ class AppState extends ChangeNotifier {
     if (client == null || vault == null || session == null) return;
     final encryptedVault =
         await _cloudCrypto.encryptVault(vault, session.vaultKey);
-    await client.saveVault(encryptedVault);
+    final version = await client.saveVault(encryptedVault);
+    await _store.saveCloudVaultPin(session.userId, version.epoch, version.hash);
   }
 
   Future<void> _publishCloudKeyBundle() async {
@@ -1396,8 +1415,50 @@ class AppState extends ChangeNotifier {
       identityRotationProof: vault.identityRotationProof?.toJson(),
     );
     _ownCloudDeviceList = signed;
-    _setStatus('Urzadzenie zostalo uniewaznione.');
+    await _rotateAllCloudConversationKeys();
+    _setStatus('Urzadzenie zostalo uniewaznione, a klucze rozmow obrocone.');
     notifyListeners();
+  }
+
+  Future<void> _rotateAllCloudConversationKeys() async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    final client = _cloudClient;
+    if (session == null || vault == null || client == null) return;
+    final updatedKeys = Map<String, String>.of(vault.conversationKeys);
+    for (final conversation in _cloudConversations.values) {
+      if (conversation.type != 'direct') continue;
+      final newKey = await _cloudCrypto.newConversationKey();
+      final envelopes = <String, dynamic>{};
+      for (final memberId in conversation.memberIds) {
+        final recipientKey = memberId == session.userId
+            ? vault.keyAgreementPublicKey
+            : _contactById(memberId)?.identityPublicKey;
+        if (recipientKey == null || recipientKey.isEmpty) {
+          throw StateError(
+              'Brak zweryfikowanego klucza czlonka $memberId do rotacji.');
+        }
+        envelopes[memberId] = await _cloudCrypto.wrapConversationKey(
+          vault: vault,
+          conversationId: conversation.conversationId,
+          keyEpoch: conversation.keyEpoch + 1,
+          senderUserId: session.userId,
+          senderDeviceId: session.deviceId,
+          recipientUserId: memberId,
+          recipientPublicKey: recipientKey,
+          conversationKey: newKey,
+        );
+      }
+      final rotated = await client.rotateConversationKey(
+        conversationId: conversation.conversationId,
+        expectedKeyEpoch: conversation.keyEpoch,
+        memberKeys: envelopes,
+      );
+      _cloudConversations[rotated.conversationId] = rotated;
+      updatedKeys[conversation.conversationId] = newKey;
+    }
+    _cloudVault = vault.copyWith(conversationKeys: updatedKeys);
+    await _saveCloudVault();
   }
 
   Future<String?> _ensureCloudConversationKey(
@@ -1413,10 +1474,18 @@ class AppState extends ChangeNotifier {
     final envelopeJson = envelope.cast<String, dynamic>();
     final senderUserId = envelopeJson['senderUserId']?.toString() ?? '';
     final senderPublicKey = envelopeJson['senderPublicKey']?.toString() ?? '';
+    final senderIdentityPublicKey =
+        envelopeJson['senderIdentityPublicKey']?.toString() ?? '';
+    if (envelopeJson['conversationId'] != conversation.conversationId ||
+        envelopeJson['keyEpoch'] != conversation.keyEpoch) {
+      throw StateError(
+          'Serwer podal kopertę klucza z innej rozmowy lub epoki.');
+    }
     if (senderUserId.isNotEmpty && senderUserId != session.userId) {
       final contact = _contactById(senderUserId);
       if (contact != null &&
           (contact.identityPublicKey != senderPublicKey ||
+              contact.signingPublicKey != senderIdentityPublicKey ||
               !_contactHasSignedIdentity(contact))) {
         throw StateError(
           'Klucz kontaktu ${contact.displayName} nie zgadza sie z zapisana, podpisana tozsamoscia. Zweryfikuj safety number przed rozmowa.',
@@ -1780,23 +1849,31 @@ class AppState extends ChangeNotifier {
     }
 
     final conversationKey = await _cloudCrypto.newConversationKey();
+    final conversationId = _uuid.v4();
     final memberKeys = <String, dynamic>{
       session.userId: await _cloudCrypto.wrapConversationKey(
         vault: vault,
+        conversationId: conversationId,
+        keyEpoch: 1,
         senderUserId: session.userId,
+        senderDeviceId: session.deviceId,
         recipientUserId: session.userId,
         recipientPublicKey: vault.keyAgreementPublicKey,
         conversationKey: conversationKey,
       ),
       contact.userId: await _cloudCrypto.wrapConversationKey(
         vault: vault,
+        conversationId: conversationId,
+        keyEpoch: 1,
         senderUserId: session.userId,
+        senderDeviceId: session.deviceId,
         recipientUserId: contact.userId,
         recipientPublicKey: contact.identityPublicKey,
         conversationKey: conversationKey,
       ),
     };
     final conversation = await client.createDirectConversation(
+      conversationId: conversationId,
       peerUserId: contact.userId,
       memberKeys: memberKeys,
     );

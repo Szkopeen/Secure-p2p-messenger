@@ -33,6 +33,7 @@ class SecureStore {
   static const _cloudSession = 'cloud.session.v1';
   static const _cloudDeviceKey = 'cloud.deviceKey.v1';
   static const _cloudReplayStates = 'cloud.messageReplay.v1';
+  static const _cloudVaultPins = 'cloud.vaultPins.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -178,6 +179,24 @@ class SecureStore {
 
   Future<void> clearCloudSession() {
     return _storage.delete(key: _cloudSession);
+  }
+
+  Future<Map<String, dynamic>?> loadCloudVaultPin(String accountId) async {
+    final raw = await _storage.read(key: _cloudVaultPins);
+    if (raw == null || raw.isEmpty) return null;
+    final pins = (jsonDecode(raw) as Map).cast<String, dynamic>();
+    final pin = pins[accountId];
+    return pin is Map ? pin.cast<String, dynamic>() : null;
+  }
+
+  Future<void> saveCloudVaultPin(
+      String accountId, int epoch, String hash) async {
+    final raw = await _storage.read(key: _cloudVaultPins);
+    final pins = raw == null || raw.isEmpty
+        ? <String, dynamic>{}
+        : (jsonDecode(raw) as Map).cast<String, dynamic>();
+    pins[accountId] = {'epoch': epoch, 'hash': hash};
+    await _storage.write(key: _cloudVaultPins, value: jsonEncode(pins));
   }
 
   Future<void> saveDirectoryEnabled(bool enabled) async {

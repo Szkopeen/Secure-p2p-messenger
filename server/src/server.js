@@ -18,6 +18,15 @@ const publicDirectory = new Map();
 const bannedUsers = new Set();
 const v2Store = new V2Store({ dataDir: config.v2DataDir });
 
+function clientIp(req) {
+  const remote = req.socket.remoteAddress || '';
+  if (!config.trustedProxies.includes(remote)) return remote;
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded !== 'string') return remote;
+  const first = forwarded.split(',')[0].trim();
+  return /^[0-9a-fA-F:.]+$/.test(first) ? first : remote;
+}
+
 loadKnownUsers();
 loadProfiles();
 loadOfflineQueues();
@@ -750,6 +759,7 @@ function handleAdminRequest(req, res, url) {
 }
 
 const httpServer = http.createServer((req, res) => {
+  req.clientIp = clientIp(req);
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   if (url.pathname === '/healthz') {
     sendJson(res, 200, { ok: true, time: new Date().toISOString() });

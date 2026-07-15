@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { SqliteStateStore } from './sqliteStore.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.:@-]{3,64}$/;
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -8,6 +9,8 @@ const AUTH_MAX_BODY_BYTES = 32 * 1024;
 const MAX_MESSAGE_PAGE = 500;
 const DEFAULT_MESSAGE_PAGE = 100;
 const MAX_MEMBER_KEY_BYTES = 16 * 1024;
+const MAX_STORED_MESSAGE_BYTES = 1024 * 1024;
+const MAX_MESSAGES_PER_CONVERSATION = 100_000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30 * 1000;
 const WS_TICKET_MAX_GLOBAL = 10_000;
@@ -17,8 +20,13 @@ const WS_TICKET_MAX_PER_WINDOW = 30;
 const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_MAX_ATTEMPTS = 10;
 const AUTH_MAX_KEYS = 5000;
+const PENDING_LOGIN_TTL_MS = 2 * 60 * 1000;
+const PENDING_LOGIN_MAX_GLOBAL = 5000;
+const MAX_CONCURRENT_KDF = 4;
 const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
 const authAttempts = new Map();
+let activeKdfOperations = 0;
+const kdfWaiters = [];
 
 function nowIso() {
   return new Date().toISOString();
@@ -225,15 +233,41 @@ function writeJson(file, value) {
   fs.renameSync(tmp, file);
 }
 
-function scryptAsync(password, salt) {
-  return new Promise((resolve, reject) => crypto.scrypt(String(password), salt, 64, {
-    N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024
-  }, (error, key) => error ? reject(error) : resolve(key)));
+async function scryptAsync(password, salt) {
+  if (activeKdfOperations >= MAX_CONCURRENT_KDF) {
+    await new Promise((resolve) => kdfWaiters.push(resolve));
+  }
+  activeKdfOperations += 1;
+  try {
+    return await new Promise((resolve, reject) => crypto.scrypt(String(password), salt, 64, {
+      N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024
+    }, (error, key) => error ? reject(error) : resolve(key)));
+  } finally {
+    activeKdfOperations -= 1;
+    kdfWaiters.shift()?.();
+  }
+}
+
+function ed25519PublicKey(rawBase64) {
+  const raw = Buffer.from(rawBase64, 'base64');
+  if (raw.length !== 32) throw new Error('Niepoprawny klucz Ed25519.');
+  const prefix = Buffer.from('302a300506032b6570032100', 'hex');
+  return crypto.createPublicKey({ key: Buffer.concat([prefix, raw]), format: 'der', type: 'spki' });
+}
+
+function loginChallengePayload(pending) {
+  return Buffer.from(JSON.stringify({
+    protocol: 'secure-chat/login-challenge/v1',
+    challenge: pending.challenge,
+    userId: pending.userId,
+    deviceId: pending.deviceId,
+    expiresAtMs: pending.expiresAtMs
+  }), 'utf8');
 }
 
 function allowAuthAttempt(req, username) {
   const now = Date.now();
-  const ip = req.socket?.remoteAddress || 'unknown';
+  const ip = req.clientIp || req.socket?.remoteAddress || 'unknown';
   const key = `${ip}:${normalizeUsername(username)}`;
   const live = (authAttempts.get(key) || []).filter((time) => time > now - AUTH_WINDOW_MS);
   if (live.length >= AUTH_MAX_ATTEMPTS) return false;
@@ -298,7 +332,16 @@ function validateMemberKeys(memberKeys, memberIds) {
     if (Buffer.byteLength(JSON.stringify(envelope), 'utf8') > MAX_MEMBER_KEY_BYTES) {
       return 'Koperta memberKeys jest za duza.';
     }
-    if (envelope.recipientUserId !== undefined && envelope.recipientUserId !== memberId) {
+    const requiredStrings = ['algorithm', 'conversationId', 'senderUserId', 'senderDeviceId',
+      'recipientUserId', 'senderPublicKey', 'senderIdentityPublicKey', 'nonce', 'ciphertext', 'mac', 'signature'];
+    if (envelope.v !== 1 || envelope.protocolVersion !== 1 || !Number.isInteger(envelope.keyEpoch) || envelope.keyEpoch < 1 ||
+        requiredStrings.some((field) => typeof envelope[field] !== 'string' || envelope[field].length === 0)) {
+      return 'Koperta memberKeys nie spelnia schematu secure-chat/member-key/v1.';
+    }
+    if (envelope.algorithm !== 'X25519-HKDF-SHA256-AES-256-GCM') {
+      return 'Nieobslugiwany algorytm koperty memberKeys.';
+    }
+    if (envelope.recipientUserId !== memberId) {
       return 'Odbiorca koperty memberKeys nie zgadza sie z kluczem mapy.';
     }
   }
@@ -324,36 +367,95 @@ export class V2Store {
   constructor({ dataDir }) {
     this.dataDir = path.resolve(dataDir);
     fs.mkdirSync(this.dataDir, { recursive: true });
+    this.database = new SqliteStateStore(this.dataDir);
     this.usersFile = path.join(this.dataDir, 'users.json');
     this.sessionsFile = path.join(this.dataDir, 'sessions.json');
     this.conversationsFile = path.join(this.dataDir, 'conversations.json');
     this.messagesFile = path.join(this.dataDir, 'messages.json');
-    this.users = readJson(this.usersFile, { v: 1, users: {} });
-    this.sessions = readJson(this.sessionsFile, { v: 1, sessions: {} });
-    this.conversations = readJson(this.conversationsFile, { v: 1, conversations: {} });
-    this.messages = readJson(this.messagesFile, { v: 1, messages: {} });
+    this.users = this.database.hasState('users')
+      ? this.database.readState('users', null)
+      : readJson(this.usersFile, { v: 1, users: {} });
+    this.sessions = this.database.hasState('sessions')
+      ? this.database.readState('sessions', null)
+      : readJson(this.sessionsFile, { v: 1, sessions: {} });
+    this.conversations = this.database.hasState('conversations')
+      ? this.database.readState('conversations', null)
+      : readJson(this.conversationsFile, { v: 1, conversations: {} });
+    this.messages = fs.existsSync(this.messagesFile)
+      ? readJson(this.messagesFile, { v: 1, messages: {} })
+      : { v: 1, messages: {} };
+    this.database.importLegacyMessages(this.messages.messages);
+    this.database.writeState('users', this.users);
+    this.database.writeState('sessions', this.sessions);
+    this.database.writeState('conversations', this.conversations);
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
     this.accountQueues = new Map();
     this.wsTickets = new Map();
     this.wsTicketAttempts = new Map();
+    this.pendingLogins = new Map();
     this.pruneSessions();
   }
 
+  prunePendingLogins() {
+    const now = Date.now();
+    for (const [hash, pending] of this.pendingLogins.entries()) {
+      if (!pending || pending.expiresAtMs <= now) this.pendingLogins.delete(hash);
+    }
+  }
+
+  createPendingLogin(user, deviceId, deviceName) {
+    this.prunePendingLogins();
+    if (this.pendingLogins.size >= PENDING_LOGIN_MAX_GLOBAL) return null;
+    const token = crypto.randomBytes(32).toString('base64url');
+    const pending = {
+      userId: user.userId,
+      deviceId,
+      deviceName: String(deviceName || 'Urzadzenie').slice(0, 80),
+      challenge: crypto.randomBytes(32).toString('base64url'),
+      expiresAtMs: Date.now() + PENDING_LOGIN_TTL_MS
+    };
+    this.pendingLogins.set(tokenHash(token), pending);
+    return { token, ...pending };
+  }
+
+  completePendingLogin(token, signature) {
+    this.prunePendingLogins();
+    const hash = tokenHash(token);
+    const pending = this.pendingLogins.get(hash);
+    this.pendingLogins.delete(hash);
+    if (!pending) return null;
+    const user = this.users.users[pending.userId];
+    if (!user || typeof signature !== 'string') return null;
+    let valid = false;
+    try {
+      valid = crypto.verify(null, loginChallengePayload(pending), ed25519PublicKey(user.identityPublicKey), Buffer.from(signature, 'base64'));
+    } catch {
+      valid = false;
+    }
+    if (!valid) return null;
+    const session = this.createSession(user, pending.deviceId, pending.deviceName);
+    return { user, session, deviceId: pending.deviceId };
+  }
+
   persistUsers() {
-    writeJson(this.usersFile, this.users);
+    this.database.writeState('users', this.users);
   }
 
   persistSessions() {
-    writeJson(this.sessionsFile, this.sessions);
+    this.database.writeState('sessions', this.sessions);
   }
 
   persistConversations() {
-    writeJson(this.conversationsFile, this.conversations);
+    this.database.writeState('conversations', this.conversations);
   }
 
-  persistMessages() {
-    writeJson(this.messagesFile, this.messages);
+  persistMessages(message) {
+    this.database.appendMessage(message);
+  }
+
+  persistMessageAndConversation(message) {
+    this.database.appendMessageAndUpdateConversations(message, this.conversations);
   }
 
   pruneSessions() {
@@ -474,10 +576,11 @@ export class V2Store {
   }
 
   messagesForConversation(conversationId, afterSeq = 0, limit = DEFAULT_MESSAGE_PAGE) {
-    return (this.messages.messages[conversationId] || [])
-      .filter((message) => message.seq > afterSeq)
-      .sort((a, b) => a.seq - b.seq)
-      .slice(0, Math.min(MAX_MESSAGE_PAGE, Math.max(1, limit)));
+    return this.database.readMessages(
+      conversationId,
+      afterSeq,
+      Math.min(MAX_MESSAGE_PAGE, Math.max(1, limit))
+    );
   }
 
   broadcast(userIds, event) {
@@ -734,20 +837,37 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         return sendJson(res, 401, { ok: false, error: 'Niepoprawny login albo haslo.' });
       }
       const deviceId = String(body.deviceId || randomId());
-      let session;
-      try {
-        session = store.createSession(user, deviceId, body.deviceName);
-      } catch (error) {
-        return sendJson(res, 403, { ok: false, error: String(error.message || error) });
+      if (isDeviceRevoked(user, deviceId)) {
+        return sendJson(res, 403, { ok: false, error: 'Urzadzenie zostalo uniewaznione.' });
       }
+      const pending = store.createPendingLogin(user, deviceId, body.deviceName);
+      if (!pending) return sendJson(res, 503, { ok: false, error: 'Serwer obsluguje zbyt wiele logowan.' });
       return sendJson(res, 200, {
         ok: true,
-        token: session.token,
-        expiresAt: session.expiresAt,
+        pendingToken: pending.token,
+        challenge: pending.challenge,
+        challengeExpiresAtMs: pending.expiresAtMs,
         user: store.publicUser(user),
         deviceId,
         vaultSalt: user.vaultSalt,
-        encryptedVault: user.encryptedVault
+        encryptedVault: user.encryptedVault,
+        vaultEpoch: Number.isInteger(user.vaultEpoch) ? user.vaultEpoch : 0,
+        vaultHash: typeof user.vaultHash === 'string' ? user.vaultHash : ''
+      });
+    }
+
+    if (method === 'POST' && url.pathname === '/v2/login/complete') {
+      const body = await readBody(req, AUTH_MAX_BODY_BYTES);
+      const completed = store.completePendingLogin(String(body.pendingToken || ''), body.signature);
+      if (!completed) return sendJson(res, 401, { ok: false, error: 'Niepoprawne lub wygasle potwierdzenie vaultu.' });
+      return sendJson(res, 200, {
+        ok: true,
+        token: completed.session.token,
+        expiresAt: completed.session.expiresAt,
+        user: store.publicUser(completed.user),
+        deviceId: completed.deviceId,
+        vaultSalt: completed.user.vaultSalt,
+        encryptedVault: completed.user.encryptedVault
       });
     }
 
@@ -924,14 +1044,28 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       const peer = store.users.users[peerUserId];
       if (!peer) return sendJson(res, 404, { ok: false, error: 'Nie ma takiego uzytkownika.' });
       const memberIds = [auth.user.userId, peerUserId].sort();
+      const requestedConversationId = String(body.conversationId || '');
+      if (!SAFE_ID.test(requestedConversationId)) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny identyfikator rozmowy.' });
+      }
       const memberKeysError = validateMemberKeys(body.memberKeys || {}, memberIds);
       if (memberKeysError) return sendJson(res, 400, { ok: false, error: memberKeysError });
+      if (Object.keys(body.memberKeys || {}).length !== memberIds.length) {
+        return sendJson(res, 400, { ok: false, error: 'Tworzenie rozmowy wymaga koperty dla kazdego czlonka.' });
+      }
+      for (const envelope of Object.values(body.memberKeys)) {
+        if (envelope.conversationId !== requestedConversationId || envelope.senderUserId !== auth.user.userId ||
+            envelope.senderDeviceId !== auth.session.deviceId) {
+          return sendJson(res, 400, { ok: false, error: 'Kontekst koperty memberKeys nie zgadza sie z sesja lub rozmowa.' });
+        }
+      }
       let conversation = store.conversationForMembers(memberIds, 'direct');
       if (!conversation) {
         conversation = {
-          conversationId: randomId(),
+          conversationId: requestedConversationId,
           type: 'direct',
           memberIds,
+          keyEpoch: 1,
           memberKeys: isObject(body.memberKeys) ? body.memberKeys : {},
           createdAt: nowIso(),
           updatedAt: nowIso()
@@ -949,6 +1083,39 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         store.persistConversations();
       }
       return sendJson(res, 200, { ok: true, conversation });
+    }
+
+    if (method === 'PUT' && parts.length === 4 && parts[0] === 'v2' &&
+        parts[1] === 'conversations' && parts[3] === 'keys') {
+      const conversationId = parts[2];
+      const body = await readBody(req);
+      return await store.withAccountLock(`conversation:${conversationId}`, async () => {
+        const conversation = store.conversations.conversations[conversationId];
+        if (!conversation || !conversation.memberIds.includes(auth.user.userId)) {
+          return sendJson(res, 404, { ok: false, error: 'Nie ma takiej rozmowy.' });
+        }
+        const currentEpoch = Number.isInteger(conversation.keyEpoch) ? conversation.keyEpoch : 1;
+        if (body.expectedKeyEpoch !== currentEpoch) {
+          return sendJson(res, 409, { ok: false, error: 'Klucz rozmowy zostal juz obrocony.' });
+        }
+        const memberKeysError = validateMemberKeys(body.memberKeys, conversation.memberIds);
+        if (memberKeysError) return sendJson(res, 400, { ok: false, error: memberKeysError });
+        if (Object.keys(body.memberKeys).length !== conversation.memberIds.length) {
+          return sendJson(res, 400, { ok: false, error: 'Rotacja wymaga koperty dla kazdego czlonka.' });
+        }
+        for (const envelope of Object.values(body.memberKeys)) {
+          if (envelope.conversationId !== conversationId || envelope.keyEpoch !== currentEpoch + 1 ||
+              envelope.senderUserId !== auth.user.userId || envelope.senderDeviceId !== auth.session.deviceId) {
+            return sendJson(res, 400, { ok: false, error: 'Niepoprawny kontekst rotacji klucza.' });
+          }
+        }
+        conversation.memberKeys = body.memberKeys;
+        conversation.keyEpoch = currentEpoch + 1;
+        conversation.updatedAt = nowIso();
+        store.persistConversations();
+        store.broadcast(conversation.memberIds, { type: 'conversation', conversation, securityEvent: 'key_rotated' });
+        return sendJson(res, 200, { ok: true, conversation });
+      });
     }
 
     if (method === 'GET' && url.pathname === '/v2/messages') {
@@ -971,6 +1138,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
     if (method === 'POST' && url.pathname === '/v2/messages') {
       const body = await readBody(req);
       const conversationId = String(body.conversationId || '');
+      return await store.withAccountLock(`conversation:${conversationId}`, async () => {
       const conversation = store.conversations.conversations[conversationId];
       if (!conversation || !conversation.memberIds.includes(auth.user.userId)) {
         return sendJson(res, 404, { ok: false, error: 'Nie ma takiej rozmowy.' });
@@ -979,8 +1147,14 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (payloadError) {
         return sendJson(res, 400, { ok: false, error: payloadError });
       }
+      if (Buffer.byteLength(JSON.stringify(body.payload), 'utf8') > MAX_STORED_MESSAGE_BYTES) {
+        return sendJson(res, 413, { ok: false, error: 'Wiadomosc jest za duza.' });
+      }
+      if (store.database.messageCount(conversationId) >= MAX_MESSAGES_PER_CONVERSATION) {
+        return sendJson(res, 507, { ok: false, error: 'Rozmowa osiagnela limit przechowywania.' });
+      }
       const list = store.messages.messages[conversationId] || [];
-      const seq = list.length === 0 ? 1 : list[list.length - 1].seq + 1;
+      const seq = store.database.nextMessageSequence(conversationId);
       const message = {
         messageId: String(body.messageId || randomId()),
         conversationId,
@@ -993,10 +1167,10 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       list.push(message);
       store.messages.messages[conversationId] = list;
       conversation.updatedAt = message.createdAt;
-      store.persistMessages();
-      store.persistConversations();
+      store.persistMessageAndConversation(message);
       store.broadcast(conversation.memberIds, { type: 'message', message });
       return sendJson(res, 200, { ok: true, message });
+      });
     }
 
     return sendJson(res, 404, { ok: false, error: 'Nieznany endpoint v2.' });

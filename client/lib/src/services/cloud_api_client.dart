@@ -14,6 +14,36 @@ class CloudAuthResult {
   final Map<String, dynamic>? encryptedVault;
 }
 
+class CloudPendingLogin {
+  const CloudPendingLogin({
+    required this.pendingToken,
+    required this.challenge,
+    required this.challengeExpiresAtMs,
+    required this.userId,
+    required this.deviceId,
+    required this.vaultSalt,
+    required this.encryptedVault,
+    required this.vaultEpoch,
+    required this.vaultHash,
+  });
+
+  final String pendingToken;
+  final String challenge;
+  final int challengeExpiresAtMs;
+  final String userId;
+  final String deviceId;
+  final String vaultSalt;
+  final Map<String, dynamic>? encryptedVault;
+  final int vaultEpoch;
+  final String vaultHash;
+}
+
+class VaultVersion {
+  const VaultVersion({required this.epoch, required this.hash});
+  final int epoch;
+  final String hash;
+}
+
 abstract class CloudEvent {
   const CloudEvent();
 }
@@ -126,7 +156,7 @@ class CloudApiClient {
     return _authResult(raw, serverUrl);
   }
 
-  Future<CloudAuthResult> login({
+  Future<CloudPendingLogin> login({
     required String username,
     required String password,
     required String deviceId,
@@ -137,6 +167,29 @@ class CloudApiClient {
       'password': password,
       'deviceId': deviceId,
       'deviceName': deviceName,
+    });
+    final user = asStringKeyMap(raw['user'], 'user');
+    final vault = raw['encryptedVault'];
+    return CloudPendingLogin(
+      pendingToken: requiredString(raw, 'pendingToken'),
+      challenge: requiredString(raw, 'challenge'),
+      challengeExpiresAtMs: requiredInt(raw, 'challengeExpiresAtMs'),
+      userId: requiredString(user, 'userId'),
+      deviceId: requiredString(raw, 'deviceId'),
+      vaultSalt: requiredString(raw, 'vaultSalt'),
+      encryptedVault: vault is Map ? vault.cast<String, dynamic>() : null,
+      vaultEpoch: raw['vaultEpoch'] as int? ?? 0,
+      vaultHash: raw['vaultHash'] as String? ?? '',
+    );
+  }
+
+  Future<CloudAuthResult> completeLogin({
+    required String pendingToken,
+    required String signature,
+  }) async {
+    final raw = await _post('/v2/login/complete', {
+      'pendingToken': pendingToken,
+      'signature': signature,
     });
     return _authResult(raw, serverUrl);
   }
@@ -159,13 +212,17 @@ class CloudApiClient {
     return null;
   }
 
-  Future<void> saveVault(Map<String, dynamic> encryptedVault) async {
+  Future<VaultVersion> saveVault(Map<String, dynamic> encryptedVault) async {
     final current = await _get('/v2/vault');
-    await _put('/v2/vault', {
+    final saved = await _put('/v2/vault', {
       'encryptedVault': encryptedVault,
       'expectedVaultEpoch': current['vaultEpoch'] as int? ?? 0,
       'expectedVaultHash': current['vaultHash'] as String? ?? '',
     });
+    return VaultVersion(
+      epoch: requiredInt(saved, 'vaultEpoch'),
+      hash: requiredString(saved, 'vaultHash'),
+    );
   }
 
   Future<void> updateKeyBundle({
@@ -212,11 +269,27 @@ class CloudApiClient {
   }
 
   Future<CloudConversation> createDirectConversation({
+    required String conversationId,
     required String peerUserId,
     required Map<String, dynamic> memberKeys,
   }) async {
     final raw = await _post('/v2/conversations/direct', {
+      'conversationId': conversationId,
       'peerUserId': peerUserId,
+      'memberKeys': memberKeys,
+    });
+    return CloudConversation.fromJson(
+      asStringKeyMap(raw['conversation'], 'conversation'),
+    );
+  }
+
+  Future<CloudConversation> rotateConversationKey({
+    required String conversationId,
+    required int expectedKeyEpoch,
+    required Map<String, dynamic> memberKeys,
+  }) async {
+    final raw = await _put('/v2/conversations/$conversationId/keys', {
+      'expectedKeyEpoch': expectedKeyEpoch,
       'memberKeys': memberKeys,
     });
     return CloudConversation.fromJson(

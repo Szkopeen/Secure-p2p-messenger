@@ -32,10 +32,13 @@ Future<void> cleanupTempMediaFiles({
         !entity.path
             .split(Platform.pathSeparator)
             .last
-            .startsWith('secure_chat_preview_')) continue;
+            .startsWith('secure_chat_preview_')) {
+      continue;
+    }
     try {
-      if ((await entity.stat()).modified.isBefore(cutoff))
+      if ((await entity.stat()).modified.isBefore(cutoff)) {
         await entity.delete();
+      }
     } catch (_) {}
   }
 }

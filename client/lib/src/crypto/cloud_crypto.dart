@@ -9,6 +9,9 @@ import 'package:uuid/uuid.dart';
 import '../models/cloud_account.dart';
 import '../models/message.dart';
 import 'codec.dart';
+import 'bounded_zlib.dart';
+
+const _maxDecompressedMessageBytes = 16 * 1024 * 1024;
 
 class CloudDecryptedMessage {
   const CloudDecryptedMessage({
@@ -798,7 +801,10 @@ class CloudCrypto {
 
   Future<Map<String, dynamic>> wrapConversationKey({
     required CloudVault vault,
+    required String conversationId,
+    required int keyEpoch,
     required String senderUserId,
+    required String senderDeviceId,
     required String recipientUserId,
     required String recipientPublicKey,
     required String conversationKey,
@@ -822,15 +828,57 @@ class CloudCrypto {
       nonce: nonce,
       aad: aad,
     );
-    return {
+    final unsigned = <String, dynamic>{
       'v': 1,
+      'protocolVersion': 1,
+      'algorithm': 'X25519-HKDF-SHA256-AES-256-GCM',
+      'conversationId': conversationId,
+      'keyEpoch': keyEpoch,
       'senderUserId': senderUserId,
+      'senderDeviceId': senderDeviceId,
       'recipientUserId': recipientUserId,
       'senderPublicKey': vault.keyAgreementPublicKey,
+      'senderIdentityPublicKey': vault.identityPublicKey,
       'nonce': b64(box.nonce),
       'ciphertext': b64(box.cipherText),
       'mac': b64(box.mac.bytes),
     };
+    final signature = await _ed25519.sign(
+      canonicalJsonBytes(unsigned),
+      keyPair: SimpleKeyPairData(
+        unb64(vault.identityPrivateKey),
+        publicKey: SimplePublicKey(unb64(vault.identityPublicKey),
+            type: KeyPairType.ed25519),
+        type: KeyPairType.ed25519,
+      ),
+    );
+    return {...unsigned, 'signature': b64(signature.bytes)};
+  }
+
+  Future<String> signLoginChallenge({
+    required CloudVault vault,
+    required String challenge,
+    required String userId,
+    required String deviceId,
+    required int expiresAtMs,
+  }) async {
+    final keyPair = SimpleKeyPairData(
+      unb64(vault.identityPrivateKey),
+      publicKey: SimplePublicKey(
+        unb64(vault.identityPublicKey),
+        type: KeyPairType.ed25519,
+      ),
+      type: KeyPairType.ed25519,
+    );
+    final payload = utf8Bytes(jsonEncode({
+      'protocol': 'secure-chat/login-challenge/v1',
+      'challenge': challenge,
+      'userId': userId,
+      'deviceId': deviceId,
+      'expiresAtMs': expiresAtMs,
+    }));
+    final signature = await _ed25519.sign(payload, keyPair: keyPair);
+    return b64(signature.bytes);
   }
 
   Future<String> unwrapConversationKey({
@@ -840,6 +888,25 @@ class CloudCrypto {
   }) async {
     final senderUserId = requiredString(envelope, 'senderUserId');
     final senderPublicKey = requiredString(envelope, 'senderPublicKey');
+    if (requiredString(envelope, 'recipientUserId') != localUserId ||
+        requiredInt(envelope, 'protocolVersion') != 1 ||
+        requiredInt(envelope, 'keyEpoch') < 1) {
+      throw StateError('Koperta klucza rozmowy ma niepoprawny kontekst.');
+    }
+    final unsigned = Map<String, dynamic>.of(envelope)..remove('signature');
+    final signatureValid = await _ed25519.verify(
+      canonicalJsonBytes(unsigned),
+      signature: Signature(
+        unb64(requiredString(envelope, 'signature')),
+        publicKey: SimplePublicKey(
+          unb64(requiredString(envelope, 'senderIdentityPublicKey')),
+          type: KeyPairType.ed25519,
+        ),
+      ),
+    );
+    if (!signatureValid) {
+      throw StateError('Niepoprawny podpis koperty klucza rozmowy.');
+    }
     final wrappingKey = await _deriveWrappingKey(
       vault: vault,
       otherPublicKey: senderPublicKey,
@@ -896,6 +963,7 @@ class CloudCrypto {
       'createdAt': createdAt,
       'payload': payload.toJson(),
     }));
+    aad['plaintextBytes'] = clear.length;
     final compressed = ZLibEncoder().encode(clear);
     final nonce = secureRandomBytes(12);
     final box = await _aead.encrypt(
@@ -976,7 +1044,19 @@ class CloudCrypto {
       secretKey: SecretKey(unb64(conversationKey)),
       aad: canonicalJsonBytes(aad),
     );
-    final clearBytes = ZLibDecoder().decodeBytes(compressed);
+    final expectedPlaintextBytes = aad['plaintextBytes'];
+    if (expectedPlaintextBytes is! int ||
+        expectedPlaintextBytes < 0 ||
+        expectedPlaintextBytes > _maxDecompressedMessageBytes) {
+      throw const FormatException('Niepoprawny rozmiar plaintextu w AAD.');
+    }
+    final clearBytes = boundedZlibDecode(
+      compressed,
+      maxBytes: expectedPlaintextBytes,
+    );
+    if (clearBytes.length != expectedPlaintextBytes) {
+      throw const FormatException('Rozmiar plaintextu nie zgadza sie z AAD.');
+    }
     final clear = asStringKeyMap(
       jsonDecode(utf8.decode(clearBytes)),
       'cloudMessage',

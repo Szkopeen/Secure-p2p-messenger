@@ -131,6 +131,53 @@ void main() {
     });
   });
 
+  group('Podpisane koperty kluczy rozmowy', () {
+    test('wiaza klucz z rozmowa, epoka, urzadzeniem i odbiorca', () async {
+      final crypto = CloudCrypto();
+      final alice = await crypto.createVault(
+        accountId: 'uuid-alice',
+        serverOrigin: serverOrigin,
+      );
+      final bob = await crypto.createVault(
+        accountId: 'uuid-bob',
+        serverOrigin: serverOrigin,
+      );
+      final key = await crypto.newConversationKey();
+      final envelope = await crypto.wrapConversationKey(
+        vault: alice,
+        conversationId: 'conversation-1',
+        keyEpoch: 2,
+        senderUserId: 'uuid-alice',
+        senderDeviceId: 'device-a',
+        recipientUserId: 'uuid-bob',
+        recipientPublicKey: bob.keyAgreementPublicKey,
+        conversationKey: key,
+      );
+
+      expect(envelope['conversationId'], 'conversation-1');
+      expect(envelope['keyEpoch'], 2);
+      expect(
+        await crypto.unwrapConversationKey(
+          vault: bob,
+          localUserId: 'uuid-bob',
+          envelope: envelope,
+        ),
+        key,
+      );
+
+      final tampered = Map<String, dynamic>.of(envelope)
+        ..['conversationId'] = 'conversation-2';
+      expect(
+        () => crypto.unwrapConversationKey(
+          vault: bob,
+          localUserId: 'uuid-bob',
+          envelope: tampered,
+        ),
+        throwsStateError,
+      );
+    });
+  });
+
   group('Anty-replay wiadomosci', () {
     test('licznik i hash poprzedniej wiadomosci sa chronione przez AAD',
         () async {
