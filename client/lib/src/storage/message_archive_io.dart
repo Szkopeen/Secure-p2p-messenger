@@ -9,9 +9,8 @@ import '../models/message.dart';
 import 'secure_store.dart';
 
 class MessageArchive {
-  MessageArchive({
-    required SecureStore secureStore,
-  }) : _secureStore = secureStore;
+  MessageArchive({required SecureStore secureStore})
+    : _secureStore = secureStore;
 
   static const _aad = 'secure-p2p-local-message-archive/v1';
 
@@ -40,12 +39,15 @@ class MessageArchive {
           jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
       final items = decoded['messages'] as List<dynamic>? ?? const [];
       return items
-          .map((item) =>
-              ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
+          .map(
+            (item) =>
+                ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
+          )
           .toList(growable: false);
-    } catch (_) {
-      // Przy zmianie klucza albo uszkodzeniu pliku nie pokazujemy plaintextu ani stack trace.
-      return [];
+    } catch (error) {
+      throw StateError(
+        'Lokalne archiwum jest uszkodzone albo zaszyfrowane innym kluczem: $error',
+      );
     }
   }
 
@@ -66,7 +68,9 @@ class MessageArchive {
       aad: utf8Bytes(_aad),
     );
 
-    await file.writeAsString(
+    final temporary = File('${file.path}.tmp');
+    final previous = File('${file.path}.previous');
+    await temporary.writeAsString(
       jsonEncode({
         'v': 1,
         'algorithm': 'AES-256-GCM',
@@ -76,6 +80,11 @@ class MessageArchive {
       }),
       flush: true,
     );
+    if (await file.exists()) {
+      if (await previous.exists()) await previous.delete();
+      await file.rename(previous.path);
+    }
+    await temporary.rename(file.path);
   }
 
   Future<void> delete() async {
@@ -99,6 +108,7 @@ class MessageArchive {
   Future<File> _archiveFile() async {
     final directory = await getApplicationSupportDirectory();
     return File(
-        '${directory.path}${Platform.pathSeparator}message_archive.enc.json');
+      '${directory.path}${Platform.pathSeparator}message_archive.enc.json',
+    );
   }
 }

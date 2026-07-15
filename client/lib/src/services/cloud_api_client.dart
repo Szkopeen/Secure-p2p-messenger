@@ -8,10 +8,7 @@ import '../crypto/codec.dart';
 import '../models/cloud_account.dart';
 
 class CloudAuthResult {
-  const CloudAuthResult({
-    required this.session,
-    required this.encryptedVault,
-  });
+  const CloudAuthResult({required this.session, required this.encryptedVault});
 
   final CloudSession session;
   final Map<String, dynamic>? encryptedVault;
@@ -44,10 +41,7 @@ class CloudProblem extends CloudEvent {
 }
 
 class CloudApiClient {
-  CloudApiClient({
-    required this.serverUrl,
-    this.token,
-  });
+  CloudApiClient({required this.serverUrl, this.token});
 
   final String serverUrl;
   final String? token;
@@ -65,7 +59,8 @@ class CloudApiClient {
       'ws' => 'http',
       'http' || 'https' => base.scheme,
       _ => throw ArgumentError(
-          'Adres serwera musi zaczynac sie od https:// albo http://.'),
+        'Adres serwera musi zaczynac sie od https:// albo http://.',
+      ),
     };
     _assertSafeTransport(scheme, base.host);
     return base.replace(
@@ -83,13 +78,14 @@ class CloudApiClient {
       'http' => 'ws',
       'ws' || 'wss' => base.scheme,
       _ => throw ArgumentError(
-          'Adres serwera musi zaczynac sie od https:// albo http://.'),
+        'Adres serwera musi zaczynac sie od https:// albo http://.',
+      ),
     };
     _assertSafeTransport(scheme, base.host);
     return base.replace(
       scheme: scheme,
       path: '/v2/ws',
-      queryParameters: {'token': token ?? ''},
+      queryParameters: null,
       fragment: null,
     );
   }
@@ -140,8 +136,10 @@ class CloudApiClient {
     final raw = await _get('/v2/users');
     final items = raw['users'] as List? ?? const [];
     return items
-        .map((item) =>
-            CloudPublicUser.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) =>
+              CloudPublicUser.fromJson((item as Map).cast<String, dynamic>()),
+        )
         .toList(growable: false);
   }
 
@@ -153,7 +151,12 @@ class CloudApiClient {
   }
 
   Future<void> saveVault(Map<String, dynamic> encryptedVault) async {
-    await _put('/v2/vault', {'encryptedVault': encryptedVault});
+    final current = await _get('/v2/vault');
+    await _put('/v2/vault', {
+      'encryptedVault': encryptedVault,
+      'expectedVaultEpoch': current['vaultEpoch'] as int? ?? 0,
+      'expectedVaultHash': current['vaultHash'] as String? ?? '',
+    });
   }
 
   Future<void> updateKeyBundle({
@@ -192,8 +195,10 @@ class CloudApiClient {
     final raw = await _get('/v2/conversations');
     final items = raw['conversations'] as List? ?? const [];
     return items
-        .map((item) =>
-            CloudConversation.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) =>
+              CloudConversation.fromJson((item as Map).cast<String, dynamic>()),
+        )
         .toList(growable: false);
   }
 
@@ -220,8 +225,11 @@ class CloudApiClient {
     });
     final items = raw['messages'] as List? ?? const [];
     return items
-        .map((item) =>
-            CloudStoredMessage.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) => CloudStoredMessage.fromJson(
+            (item as Map).cast<String, dynamic>(),
+          ),
+        )
         .toList(growable: false);
   }
 
@@ -243,13 +251,26 @@ class CloudApiClient {
   Future<void> connectEvents() async {
     if (token == null || token!.isEmpty) return;
     await disconnectEvents();
+    final ticketResponse = await _post('/v2/ws-ticket', const {});
+    final ticket = requiredString(ticketResponse, 'ticket');
     _channel = WebSocketChannel.connect(_wsUri());
     _subscription = _channel!.stream.listen(
       _handleEvent,
       onError: (Object error) => _events.add(CloudProblem(error.toString())),
-      onDone: () => _events
-          .add(const CloudProblem('Polaczenie cloud zostalo zamkniete.')),
+      onDone: () => _events.add(
+        const CloudProblem('Polaczenie cloud zostalo zamkniete.'),
+      ),
     );
+    _channel!.sink.add(jsonEncode({'type': 'authenticate', 'ticket': ticket}));
+  }
+
+  Future<void> logout() async {
+    if (token == null || token!.isEmpty) return;
+    await _post('/v2/logout', const {});
+  }
+
+  Future<void> revokeAllSessions() async {
+    await _post('/v2/sessions/revoke-all', const {});
   }
 
   Future<void> disconnectEvents() async {
@@ -332,7 +353,8 @@ class CloudApiClient {
       final json = (decoded as Map).cast<String, dynamic>();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw StateError(
-            json['error']?.toString() ?? 'HTTP ${response.statusCode}');
+          json['error']?.toString() ?? 'HTTP ${response.statusCode}',
+        );
       }
       if (json['ok'] == false) {
         throw StateError(json['error']?.toString() ?? 'Blad serwera.');

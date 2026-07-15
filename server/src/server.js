@@ -1118,7 +1118,7 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (url.pathname === '/v2' || url.pathname.startsWith('/v2/')) {
-    handleV2Http(v2Store, req, res, url);
+    handleV2Http(v2Store, req, res, url, { registrationMode: config.registrationMode });
     return;
   }
 
@@ -1147,6 +1147,9 @@ const httpServer = http.createServer((req, res) => {
   res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
   res.end('Not found');
 });
+httpServer.headersTimeout = 10_000;
+httpServer.requestTimeout = 30_000;
+httpServer.keepAliveTimeout = 5_000;
 
 const wss = new WebSocketServer({
   server: httpServer,
@@ -1155,11 +1158,17 @@ const wss = new WebSocketServer({
 });
 
 wss.on('connection', (ws, request) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
   if (requestUrl.pathname === '/v2/ws') {
     handleV2WebSocket(v2Store, ws, request);
     return;
   }
+
+  // Protokol v1 ze wspolnym RELAY_TOKEN jest bezwarunkowo wylaczony.
+  ws.close(1008, 'Legacy relay zostal usuniety. Uzyj /v2/ws.');
+  return;
 
   const state = {
     authenticated: false,
@@ -1240,6 +1249,11 @@ wss.on('connection', (ws, request) => {
 const heartbeat = setInterval(() => {
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) {
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
       client.ping();
     }
   }

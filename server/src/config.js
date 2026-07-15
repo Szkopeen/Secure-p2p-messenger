@@ -17,9 +17,8 @@ function readBool(name, fallback) {
 }
 
 export const config = Object.freeze({
-  host: process.env.HOST || '0.0.0.0',
+  host: process.env.HOST || '127.0.0.1',
   port: readInt('PORT', 8443, 1, 65535),
-  relayToken: process.env.RELAY_TOKEN || '',
   adminToken: process.env.ADMIN_TOKEN || '',
   maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', 16 * 1024 * 1024, 1024, 64 * 1024 * 1024),
   offlineQueueTtlMs: readInt('OFFLINE_QUEUE_TTL_MS', 7 * 24 * 60 * 60 * 1000, 60_000, 30 * 24 * 60 * 60 * 1000),
@@ -36,11 +35,12 @@ export const config = Object.freeze({
   rateLimitMessages: readInt('RATE_LIMIT_MESSAGES', 80, 1, 500),
   rateLimitWindowMs: readInt('RATE_LIMIT_WINDOW_MS', 10_000, 1000, 60_000),
   maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 12, 1, 20),
-  securityLogs: readBool('SECURITY_LOGS', false)
+  securityLogs: readBool('SECURITY_LOGS', false),
+  registrationMode: process.env.REGISTRATION_MODE || 'invite'
 });
 
-if (config.relayToken.length < 32) {
-  throw new Error('RELAY_TOKEN musi miec minimum 32 znaki losowego sekretu.');
+if (!['disabled', 'invite', 'open'].includes(config.registrationMode)) {
+  throw new Error('REGISTRATION_MODE musi miec wartosc disabled, invite albo open.');
 }
 
 if (config.adminToken && config.adminToken.length < 32) {

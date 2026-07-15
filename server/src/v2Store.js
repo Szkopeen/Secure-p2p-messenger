@@ -4,8 +4,16 @@ import path from 'node:path';
 import { URL } from 'node:url';
 
 const SAFE_ID = /^[a-zA-Z0-9_.:@-]{3,64}$/;
-const MAX_BODY_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const AUTH_MAX_BODY_BYTES = 32 * 1024;
+const MAX_MESSAGE_PAGE = 500;
+const DEFAULT_MESSAGE_PAGE = 100;
+const MAX_MEMBER_KEY_BYTES = 16 * 1024;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const WS_TICKET_TTL_MS = 30 * 1000;
+const AUTH_WINDOW_MS = 60 * 1000;
+const AUTH_MAX_ATTEMPTS = 10;
+const authAttempts = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -200,8 +208,8 @@ function readJson(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
     return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
+  } catch (error) {
+    throw new Error(`Nie mozna bezpiecznie odczytac stanu ${file}: ${error.message}`);
   }
 }
 
@@ -212,13 +220,25 @@ function writeJson(file, value) {
   fs.renameSync(tmp, file);
 }
 
-function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url')) {
-  const hash = crypto.scryptSync(String(password), salt, 64, {
-    N: 16384,
-    r: 8,
-    p: 1,
-    maxmem: 64 * 1024 * 1024
-  });
+function scryptAsync(password, salt) {
+  return new Promise((resolve, reject) => crypto.scrypt(String(password), salt, 64, {
+    N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024
+  }, (error, key) => error ? reject(error) : resolve(key)));
+}
+
+function allowAuthAttempt(req, username) {
+  const now = Date.now();
+  const ip = req.socket?.remoteAddress || 'unknown';
+  const key = `${ip}:${normalizeUsername(username)}`;
+  const live = (authAttempts.get(key) || []).filter((time) => time > now - AUTH_WINDOW_MS);
+  if (live.length >= AUTH_MAX_ATTEMPTS) return false;
+  live.push(now);
+  authAttempts.set(key, live);
+  return true;
+}
+
+async function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url')) {
+  const hash = await scryptAsync(password, salt);
   return {
     algorithm: 'scrypt',
     salt,
@@ -227,26 +247,46 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('base64ur
   };
 }
 
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
   if (!stored || stored.algorithm !== 'scrypt') return false;
-  const candidate = hashPassword(password, stored.salt);
+  const candidate = await hashPassword(password, stored.salt);
   const expected = Buffer.from(stored.hash, 'base64url');
   const actual = Buffer.from(candidate.hash, 'base64url');
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
-async function readBody(req) {
+async function readBody(req, maxBytes = DEFAULT_MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       throw new Error('Payload jest za duzy.');
     }
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function tokenHash(token) {
+  return crypto.createHash('sha256').update(String(token), 'utf8').digest('base64url');
+}
+
+function validateMemberKeys(memberKeys, memberIds) {
+  if (!isObject(memberKeys)) return 'memberKeys musi byc obiektem.';
+  const allowed = new Set(memberIds);
+  for (const [memberId, envelope] of Object.entries(memberKeys)) {
+    if (!allowed.has(memberId)) return 'memberKeys zawiera uzytkownika spoza rozmowy.';
+    if (!isObject(envelope)) return 'Koperta memberKeys musi byc obiektem.';
+    if (Buffer.byteLength(JSON.stringify(envelope), 'utf8') > MAX_MEMBER_KEY_BYTES) {
+      return 'Koperta memberKeys jest za duza.';
+    }
+    if (envelope.recipientUserId !== undefined && envelope.recipientUserId !== memberId) {
+      return 'Odbiorca koperty memberKeys nie zgadza sie z kluczem mapy.';
+    }
+  }
+  return null;
 }
 
 function sendJson(res, status, payload) {
@@ -278,6 +318,7 @@ export class V2Store {
     this.messages = readJson(this.messagesFile, { v: 1, messages: {} });
     this.liveSockets = new Map();
     this.accountQueues = new Map();
+    this.wsTickets = new Map();
     this.pruneSessions();
   }
 
@@ -300,9 +341,9 @@ export class V2Store {
   pruneSessions() {
     const now = Date.now();
     let changed = false;
-    for (const [token, session] of Object.entries(this.sessions.sessions)) {
+    for (const [hash, session] of Object.entries(this.sessions.sessions)) {
       if (!session || session.expiresAtMs <= now) {
-        delete this.sessions.sessions[token];
+        delete this.sessions.sessions[hash];
         changed = true;
       }
     }
@@ -355,8 +396,8 @@ export class V2Store {
       deviceName: String(deviceName || 'Urzadzenie').slice(0, 80),
       lastSeenAt: nowIso()
     };
-    this.sessions.sessions[token] = {
-      token,
+    const hash = tokenHash(token);
+    this.sessions.sessions[hash] = {
       userId: user.userId,
       deviceId,
       createdAt: nowIso(),
@@ -370,12 +411,13 @@ export class V2Store {
   auth(req) {
     this.pruneSessions();
     const token = bearerToken(req);
-    const session = this.sessions.sessions[token];
+    const hash = tokenHash(token);
+    const session = this.sessions.sessions[hash];
     if (!session) return null;
     const user = this.users.users[session.userId];
     if (!user) return null;
     if (isDeviceRevoked(user, session.deviceId)) {
-      delete this.sessions.sessions[token];
+      delete this.sessions.sessions[hash];
       this.persistSessions();
       return null;
     }
@@ -384,7 +426,7 @@ export class V2Store {
       user.devices[session.deviceId].lastSeenAt = nowIso();
       this.persistUsers();
     }
-    return { token, session, user };
+    return { tokenHash: hash, session, user };
   }
 
   conversationForMembers(memberIds, type = 'direct') {
@@ -402,10 +444,11 @@ export class V2Store {
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
-  messagesForConversation(conversationId, afterSeq = 0) {
+  messagesForConversation(conversationId, afterSeq = 0, limit = DEFAULT_MESSAGE_PAGE) {
     return (this.messages.messages[conversationId] || [])
       .filter((message) => message.seq > afterSeq)
-      .sort((a, b) => a.seq - b.seq);
+      .sort((a, b) => a.seq - b.seq)
+      .slice(0, Math.min(MAX_MESSAGE_PAGE, Math.max(1, limit)));
   }
 
   broadcast(userIds, event) {
@@ -421,9 +464,9 @@ export class V2Store {
     }
   }
 
-  attachSocket(userId, deviceId, token, ws) {
+  attachSocket(userId, deviceId, sessionHash, ws) {
     ws._secureP2pDeviceId = deviceId;
-    ws._secureP2pToken = token;
+    ws._secureP2pSessionHash = sessionHash;
     const sockets = this.liveSockets.get(userId) || new Set();
     sockets.add(ws);
     this.liveSockets.set(userId, sockets);
@@ -433,13 +476,39 @@ export class V2Store {
     });
   }
 
+  issueWsTicket(auth) {
+    const ticket = crypto.randomBytes(32).toString('base64url');
+    this.wsTickets.set(tokenHash(ticket), {
+      sessionHash: auth.tokenHash,
+      expiresAtMs: Date.now() + WS_TICKET_TTL_MS
+    });
+    return ticket;
+  }
+
+  consumeWsTicket(ticket) {
+    const hash = tokenHash(ticket);
+    const entry = this.wsTickets.get(hash);
+    this.wsTickets.delete(hash);
+    if (!entry || entry.expiresAtMs < Date.now()) return null;
+    const session = this.sessions.sessions[entry.sessionHash];
+    const user = session && this.users.users[session.userId];
+    if (!session || !user || isDeviceRevoked(user, session.deviceId)) return null;
+    return { sessionHash: entry.sessionHash, session, user };
+  }
+
+  revokeSession(sessionHash) {
+    const existed = delete this.sessions.sessions[sessionHash];
+    if (existed) this.persistSessions();
+    return existed;
+  }
+
   revokeDeviceSessions(userId, deviceIds) {
     const revoked = new Set(deviceIds);
     if (revoked.size === 0) return;
     let changed = false;
-    for (const [token, session] of Object.entries(this.sessions.sessions)) {
+    for (const [hash, session] of Object.entries(this.sessions.sessions)) {
       if (session.userId === userId && revoked.has(session.deviceId)) {
-        delete this.sessions.sessions[token];
+        delete this.sessions.sessions[hash];
         changed = true;
       }
     }
@@ -469,14 +538,18 @@ export class V2Store {
   }
 }
 
-export async function handleV2Http(store, req, res, url) {
+export async function handleV2Http(store, req, res, url, options = {}) {
   try {
     const method = req.method || 'GET';
     const parts = url.pathname.split('/').filter(Boolean);
 
     if (method === 'POST' && url.pathname === '/v2/register') {
-      const body = await readBody(req);
+      if ((options.registrationMode || 'invite') !== 'open') {
+        return sendJson(res, 403, { ok: false, error: 'Rejestracja publiczna jest wylaczona.' });
+      }
+      const body = await readBody(req, AUTH_MAX_BODY_BYTES);
       const username = normalizeUsername(body.username);
+      if (!allowAuthAttempt(req, username)) return sendJson(res, 429, { ok: false, error: 'Sprobuj ponownie pozniej.' });
       const password = String(body.password || '');
       const deviceId = String(body.deviceId || randomId());
       if (!safeUsername(username)) return sendJson(res, 400, { ok: false, error: 'Niepoprawna nazwa konta.' });
@@ -497,7 +570,7 @@ export async function handleV2Http(store, req, res, url) {
         userId,
         username,
         displayName: String(body.displayName || username).slice(0, 80),
-        password: hashPassword(password),
+        password: await hashPassword(password),
         vaultSalt: typeof body.vaultSalt === 'string' && body.vaultSalt.length >= 16
           ? body.vaultSalt
           : crypto.randomBytes(16).toString('base64url'),
@@ -530,9 +603,10 @@ export async function handleV2Http(store, req, res, url) {
     }
 
     if (method === 'POST' && url.pathname === '/v2/login') {
-      const body = await readBody(req);
+      const body = await readBody(req, AUTH_MAX_BODY_BYTES);
+      if (!allowAuthAttempt(req, body.username)) return sendJson(res, 429, { ok: false, error: 'Sprobuj ponownie pozniej.' });
       const user = store.userByName(body.username);
-      if (!user || !verifyPassword(String(body.password || ''), user.password)) {
+      if (!user || !await verifyPassword(String(body.password || ''), user.password)) {
         return sendJson(res, 401, { ok: false, error: 'Niepoprawny login albo haslo.' });
       }
       const deviceId = String(body.deviceId || randomId());
@@ -558,6 +632,23 @@ export async function handleV2Http(store, req, res, url) {
 
     if (method === 'GET' && url.pathname === '/v2/session') {
       return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user), deviceId: auth.session.deviceId });
+    }
+
+    if (method === 'POST' && url.pathname === '/v2/logout') {
+      store.revokeSession(auth.tokenHash);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (method === 'POST' && url.pathname === '/v2/sessions/revoke-all') {
+      for (const [hash, session] of Object.entries(store.sessions.sessions)) {
+        if (session.userId === auth.user.userId) delete store.sessions.sessions[hash];
+      }
+      store.persistSessions();
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (method === 'POST' && url.pathname === '/v2/ws-ticket') {
+      return sendJson(res, 200, { ok: true, ticket: store.issueWsTicket(auth), expiresInSeconds: 30 });
     }
 
     if (method === 'GET' && url.pathname === '/v2/users') {
@@ -615,12 +706,12 @@ export async function handleV2Http(store, req, res, url) {
         const currentHash = typeof auth.user.deviceListHash === 'string'
           ? auth.user.deviceListHash
           : '';
-        const expectedEpoch = Number.isInteger(body.expectedDeviceListEpoch)
-          ? body.expectedDeviceListEpoch
-          : currentEpoch;
-        const expectedHash = typeof body.expectedDeviceListHash === 'string'
-          ? body.expectedDeviceListHash
-          : currentHash;
+        if (!Number.isInteger(body.expectedDeviceListEpoch) ||
+            typeof body.expectedDeviceListHash !== 'string') {
+          return sendJson(res, 400, { ok: false, error: 'Aktualizacja listy urzadzen wymaga expectedDeviceListEpoch i expectedDeviceListHash.' });
+        }
+        const expectedEpoch = body.expectedDeviceListEpoch;
+        const expectedHash = body.expectedDeviceListHash;
         if (expectedEpoch !== currentEpoch || expectedHash !== currentHash) {
           return sendJson(res, 409, {
             ok: false,
@@ -664,11 +755,28 @@ export async function handleV2Http(store, req, res, url) {
       if (!isObject(body.encryptedVault)) {
         return sendJson(res, 400, { ok: false, error: 'Brak zaszyfrowanego vaulta.' });
       }
-      auth.user.encryptedVault = body.encryptedVault;
-      auth.user.updatedAt = nowIso();
-      store.persistUsers();
-      store.broadcast([auth.user.userId], { type: 'vault_updated', updatedAt: auth.user.updatedAt });
-      return sendJson(res, 200, { ok: true });
+      return await store.withAccountLock(auth.user.userId, async () => {
+        const user = store.users.users[auth.user.userId];
+        const currentEpoch = Number.isInteger(user.vaultEpoch) ? user.vaultEpoch : 0;
+        const currentHash = typeof user.vaultHash === 'string' ? user.vaultHash : '';
+        if (!Number.isInteger(body.expectedVaultEpoch) || typeof body.expectedVaultHash !== 'string') {
+          return sendJson(res, 400, { ok: false, error: 'Zapis vaultu wymaga expectedVaultEpoch i expectedVaultHash.' });
+        }
+        if (body.expectedVaultEpoch !== currentEpoch || body.expectedVaultHash !== currentHash) {
+          return sendJson(res, 409, { ok: false, error: 'Vault zostal zmieniony przez inne urzadzenie.' });
+        }
+        const serialized = JSON.stringify(body.encryptedVault);
+        if (Buffer.byteLength(serialized, 'utf8') > DEFAULT_MAX_BODY_BYTES) {
+          return sendJson(res, 413, { ok: false, error: 'Vault jest za duzy.' });
+        }
+        user.encryptedVault = body.encryptedVault;
+        user.vaultEpoch = currentEpoch + 1;
+        user.vaultHash = crypto.createHash('sha256').update(serialized).digest('base64url');
+        user.updatedAt = nowIso();
+        store.persistUsers();
+        store.broadcast([user.userId], { type: 'vault_updated', vaultEpoch: user.vaultEpoch, vaultHash: user.vaultHash });
+        return sendJson(res, 200, { ok: true, vaultEpoch: user.vaultEpoch, vaultHash: user.vaultHash });
+      });
     }
 
     if (method === 'GET' && url.pathname === '/v2/vault') {
@@ -676,6 +784,8 @@ export async function handleV2Http(store, req, res, url) {
         ok: true,
         vaultSalt: auth.user.vaultSalt,
         encryptedVault: auth.user.encryptedVault
+        ,vaultEpoch: Number.isInteger(auth.user.vaultEpoch) ? auth.user.vaultEpoch : 0
+        ,vaultHash: typeof auth.user.vaultHash === 'string' ? auth.user.vaultHash : ''
       });
     }
 
@@ -689,6 +799,8 @@ export async function handleV2Http(store, req, res, url) {
       const peer = store.users.users[peerUserId];
       if (!peer) return sendJson(res, 404, { ok: false, error: 'Nie ma takiego uzytkownika.' });
       const memberIds = [auth.user.userId, peerUserId].sort();
+      const memberKeysError = validateMemberKeys(body.memberKeys || {}, memberIds);
+      if (memberKeysError) return sendJson(res, 400, { ok: false, error: memberKeysError });
       let conversation = store.conversationForMembers(memberIds, 'direct');
       if (!conversation) {
         conversation = {
@@ -721,9 +833,13 @@ export async function handleV2Http(store, req, res, url) {
         return sendJson(res, 404, { ok: false, error: 'Nie ma takiej rozmowy.' });
       }
       const afterSeq = Number.parseInt(url.searchParams.get('afterSeq') || '0', 10);
+      const requestedLimit = Number.parseInt(url.searchParams.get('limit') || String(DEFAULT_MESSAGE_PAGE), 10);
+      const limit = Number.isFinite(requestedLimit) ? Math.min(MAX_MESSAGE_PAGE, Math.max(1, requestedLimit)) : DEFAULT_MESSAGE_PAGE;
+      const messages = store.messagesForConversation(conversationId, Number.isFinite(afterSeq) ? afterSeq : 0, limit);
       return sendJson(res, 200, {
         ok: true,
-        messages: store.messagesForConversation(conversationId, Number.isFinite(afterSeq) ? afterSeq : 0)
+        messages,
+        nextAfterSeq: messages.length === limit ? messages[messages.length - 1].seq : null
       });
     }
 
@@ -760,27 +876,22 @@ export async function handleV2Http(store, req, res, url) {
 
     return sendJson(res, 404, { ok: false, error: 'Nieznany endpoint v2.' });
   } catch (error) {
-    return sendJson(res, 500, { ok: false, error: String(error.message || error) });
+    const requestId = crypto.randomUUID();
+    console.error(JSON.stringify({ requestId, error: String(error?.stack || error) }));
+    return sendJson(res, 500, { ok: false, error: 'INTERNAL_ERROR', requestId });
   }
 }
 
 export function handleV2WebSocket(store, ws, request) {
-  const url = new URL(request.url || '/', 'http://127.0.0.1');
-  const token = url.searchParams.get('token') || '';
-  const fakeReq = { headers: { authorization: `Bearer ${token}` } };
-  const auth = store.auth(fakeReq);
-  if (!auth) {
-    ws.close(1008, 'Brak logowania.');
-    return;
-  }
-  store.attachSocket(auth.user.userId, auth.session.deviceId, auth.token, ws);
-  ws.send(JSON.stringify({
-    type: 'ready',
-    userId: auth.user.userId,
-    deviceId: auth.session.deviceId,
-    serverTime: nowIso()
-  }));
-  ws.on('message', () => {
-    ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() }));
+  const timer = setTimeout(() => ws.close(1008, 'Brak biletu WebSocket.'), 10_000);
+  ws.once('message', (raw) => {
+    clearTimeout(timer);
+    let message;
+    try { message = JSON.parse(String(raw)); } catch { ws.close(1008, 'Niepoprawne uwierzytelnienie.'); return; }
+    const auth = message?.type === 'authenticate' ? store.consumeWsTicket(message.ticket) : null;
+    if (!auth) { ws.close(1008, 'Niepoprawny lub zuzyty bilet.'); return; }
+    store.attachSocket(auth.user.userId, auth.session.deviceId, auth.sessionHash, ws);
+    ws.send(JSON.stringify({ type: 'ready', userId: auth.user.userId, deviceId: auth.session.deviceId, serverTime: nowIso() }));
+    ws.on('message', () => ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() })));
   });
 }
