@@ -20,6 +20,8 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 
 - Aktywny P2P/WebRTC zostal usuniety z klienta.
 - Haslo konta zostalo oddzielone od sekretu vaultu.
+- Haslo konta nadal jest wysylane do serwera w celu logowania, ale przez
+  wymuszony HTTPS poza localhostem i nie sluzy do odszyfrowania vaultu.
 - Sekret vaultu jest uzywany lokalnie do wyprowadzenia klucza vaultu i nie jest
   wysylany do API.
 - Klient wymaga HTTPS/WSS poza localhostem.
@@ -69,6 +71,12 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Klient blokuje downgrade podpisanego strumienia: jezeli dany strumien
   `rozmowa + nadawca + urzadzenie` przeszedl na podpisy urzadzen, kolejne
   wiadomosci bez poprawnego podpisu sa odrzucane.
+- Token sesji cloud WebSocket zostal przeniesiony z query stringu URL do
+  naglowka `Authorization: Bearer`. Backend domyslnie odrzuca
+  `/v2/ws?token=...`, a stary fallback mozna wlaczyc tylko jawnie przez
+  `ALLOW_WS_TOKEN_QUERY=true` na czas migracji.
+- Legacy relay wymaga `wss://` poza `localhost`, `127.0.0.1` i `::1`, zeby
+  `RELAY_TOKEN` nie byl wysylany plaintextem po sieci.
 - Dodano podpisana, wersjonowana liste urzadzen konta:
   `deviceListEpoch`, `previousDeviceListHash`, aktywne urzadzenia,
   uniewaznione urzadzenia i podpis aktualna tozsamoscia Ed25519 konta.

@@ -128,6 +128,10 @@ class RelayClient {
       throw ArgumentError(
           'Adres relay musi zaczynac sie od ws:// albo wss://.');
     }
+    final local = _isLocalRelayHost(uri.host);
+    if (uri.scheme != 'wss' && !(local && uri.scheme == 'ws')) {
+      throw ArgumentError('Poza localhostem relay musi uzywac wss://.');
+    }
 
     _channel = WebSocketChannel.connect(uri);
     _subscription = _channel!.stream.listen(
@@ -262,6 +266,11 @@ class RelayClient {
       throw StateError('Relay nie jest polaczony.');
     }
     channel.sink.add(jsonEncode(message));
+  }
+
+  bool _isLocalRelayHost(String host) {
+    final value = host.toLowerCase();
+    return value == 'localhost' || value == '127.0.0.1' || value == '::1';
   }
 
   void _handleRawMessage(dynamic raw) {

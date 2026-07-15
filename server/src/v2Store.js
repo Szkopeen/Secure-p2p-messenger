@@ -764,9 +764,17 @@ export async function handleV2Http(store, req, res, url) {
   }
 }
 
-export function handleV2WebSocket(store, ws, request) {
+export function handleV2WebSocket(store, ws, request, options = {}) {
   const url = new URL(request.url || '/', 'http://127.0.0.1');
-  const token = url.searchParams.get('token') || '';
+  if (!options.allowQueryToken && url.searchParams.has('token')) {
+    ws.close(1008, 'Token WebSocket w URL jest wylaczony.');
+    return;
+  }
+  const headerToken = bearerToken(request);
+  const queryToken = options.allowQueryToken
+    ? url.searchParams.get('token') || ''
+    : '';
+  const token = headerToken || queryToken;
   const fakeReq = { headers: { authorization: `Bearer ${token}` } };
   const auth = store.auth(fakeReq);
   if (!auth) {

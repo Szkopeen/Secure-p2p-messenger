@@ -36,7 +36,8 @@ export const config = Object.freeze({
   rateLimitMessages: readInt('RATE_LIMIT_MESSAGES', 80, 1, 500),
   rateLimitWindowMs: readInt('RATE_LIMIT_WINDOW_MS', 10_000, 1000, 60_000),
   maxConnectionsPerUser: readInt('MAX_CONNECTIONS_PER_USER', 12, 1, 20),
-  securityLogs: readBool('SECURITY_LOGS', false)
+  securityLogs: readBool('SECURITY_LOGS', false),
+  allowWebSocketTokenQuery: readBool('ALLOW_WS_TOKEN_QUERY', false)
 });
 
 if (config.relayToken.length < 32) {

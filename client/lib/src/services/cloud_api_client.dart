@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../crypto/codec.dart';
@@ -60,6 +61,7 @@ class CloudApiClient {
 
   Uri _httpUri(String path, [Map<String, String>? query]) {
     final base = Uri.parse(serverUrl.trim());
+    _assertNoUserInfo(base);
     final scheme = switch (base.scheme) {
       'wss' => 'https',
       'ws' => 'http',
@@ -68,16 +70,18 @@ class CloudApiClient {
           'Adres serwera musi zaczynac sie od https:// albo http://.'),
     };
     _assertSafeTransport(scheme, base.host);
-    return base.replace(
+    return Uri(
       scheme: scheme,
+      host: base.host,
+      port: base.hasPort ? base.port : null,
       path: path,
       queryParameters: query,
-      fragment: null,
     );
   }
 
   Uri _wsUri() {
     final base = Uri.parse(serverUrl.trim());
+    _assertNoUserInfo(base);
     final scheme = switch (base.scheme) {
       'https' => 'wss',
       'http' => 'ws',
@@ -86,11 +90,11 @@ class CloudApiClient {
           'Adres serwera musi zaczynac sie od https:// albo http://.'),
     };
     _assertSafeTransport(scheme, base.host);
-    return base.replace(
+    return Uri(
       scheme: scheme,
+      host: base.host,
+      port: base.hasPort ? base.port : null,
       path: '/v2/ws',
-      queryParameters: {'token': token ?? ''},
-      fragment: null,
     );
   }
 
@@ -103,7 +107,6 @@ class CloudApiClient {
     required String identityPublicKey,
     required String keyAgreementPublicKeySignature,
     required String vaultSalt,
-    required String vaultKey,
     required Map<String, dynamic> encryptedVault,
   }) async {
     final raw = await _post('/v2/register', {
@@ -117,7 +120,7 @@ class CloudApiClient {
       'vaultSalt': vaultSalt,
       'encryptedVault': encryptedVault,
     });
-    return _authResult(raw, serverUrl, vaultKey);
+    return _authResult(raw, serverUrl);
   }
 
   Future<CloudAuthResult> login({
@@ -125,7 +128,6 @@ class CloudApiClient {
     required String password,
     required String deviceId,
     required String deviceName,
-    required String vaultKey,
   }) async {
     final raw = await _post('/v2/login', {
       'username': username,
@@ -133,7 +135,7 @@ class CloudApiClient {
       'deviceId': deviceId,
       'deviceName': deviceName,
     });
-    return _authResult(raw, serverUrl, vaultKey);
+    return _authResult(raw, serverUrl);
   }
 
   Future<List<CloudPublicUser>> users() async {
@@ -243,7 +245,12 @@ class CloudApiClient {
   Future<void> connectEvents() async {
     if (token == null || token!.isEmpty) return;
     await disconnectEvents();
-    _channel = WebSocketChannel.connect(_wsUri());
+    _channel = IOWebSocketChannel.connect(
+      _wsUri(),
+      headers: {
+        HttpHeaders.authorizationHeader: 'Bearer $token',
+      },
+    );
     _subscription = _channel!.stream.listen(
       _handleEvent,
       onError: (Object error) => _events.add(CloudProblem(error.toString())),
@@ -346,7 +353,6 @@ class CloudApiClient {
   CloudAuthResult _authResult(
     Map<String, dynamic> raw,
     String serverUrl,
-    String vaultKey,
   ) {
     final user = asStringKeyMap(raw['user'], 'user');
     final session = CloudSession(
@@ -358,7 +364,7 @@ class CloudApiClient {
           user['displayName'] as String? ?? requiredString(user, 'username'),
       deviceId: requiredString(raw, 'deviceId'),
       vaultSalt: requiredString(raw, 'vaultSalt'),
-      vaultKey: vaultKey,
+      vaultKey: '',
     );
     final vault = raw['encryptedVault'];
     return CloudAuthResult(
@@ -373,6 +379,12 @@ class CloudApiClient {
     throw ArgumentError(
       'Poza localhostem polaczenie z serwerem musi uzywac HTTPS/WSS.',
     );
+  }
+
+  void _assertNoUserInfo(Uri uri) {
+    if (uri.userInfo.isNotEmpty) {
+      throw ArgumentError('Adres serwera nie moze zawierac loginu ani hasla.');
+    }
   }
 
   bool _isLocalDevelopmentHost(String host) {

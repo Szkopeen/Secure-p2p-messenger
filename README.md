@@ -82,8 +82,14 @@ Wykonane elementy zabezpieczen:
 
 - Tresc rozmow i plikow szyfrowana po stronie klienta.
 - Haslo konta i sekret vaultu sa rozdzielone.
+- Haslo konta jest wysylane do serwera jako haslo logowania, ale tylko przez
+  HTTPS poza localhostem. Nie jest uzywane jako sekret vaultu.
 - Sekret vaultu nie jest wysylany do API.
 - Klient wymaga HTTPS/WSS poza localhostem.
+- Token sesji cloud WebSocket jest wysylany w naglowku `Authorization: Bearer`,
+  a nie w query stringu URL.
+- Backend domyslnie odrzuca `/v2/ws?token=...`; awaryjny fallback da sie
+  wlaczyc tylko przez `ALLOW_WS_TOKEN_QUERY=true` na czas migracji.
 - Kazde konto ma trwala tozsamosc Ed25519.
 - Klucz X25519 do opakowywania kluczy rozmow jest podpisany tozsamoscia
   Ed25519.
@@ -118,7 +124,7 @@ Wykonane elementy zabezpieczen:
   porownania safety number poza serwerem.
 - Nie ma jeszcze publicznego key transparency logu.
 - Nie ma jeszcze OPAQUE ani innego protokolu logowania, ktory kryptograficznie
-  ukrywa sekret logowania przed aktywnie zlosliwym serwerem.
+  ukrywa haslo logowania przed aktywnie zlosliwym serwerem.
 - Nie ma jeszcze Double Ratchet ani MLS, wiec forward secrecy i
   post-compromise security sa ograniczone.
 - Uniewaznienie urzadzenia blokuje nowe wiadomosci i sesje, ale pelne odciecie
@@ -147,6 +153,7 @@ PORT=8443
 RELAY_TOKEN=losowy-token-minimum-32-znaki
 ADMIN_TOKEN=losowy-token-admin-minimum-32-znaki
 MAX_CONNECTIONS_PER_USER=12
+ALLOW_WS_TOKEN_QUERY=false
 V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
 UPDATE_MANIFEST_FILE=/opt/secure-p2p/app/server/updates/manifest.json
 UPDATE_FILES_DIR=/opt/secure-p2p/app/server/updates/files
@@ -290,4 +297,3 @@ Nie mowic jeszcze:
 - Ze jest anonimowy.
 - Ze nadaje sie dla sygnalistow, prawnikow, lekarzy, finansow lub danych
   regulowanych.
-
