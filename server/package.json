@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js",
+    "check": "node scripts/check-conflicts.js && node --check src/config.js && node --check src/v2Store.js && node --check src/server.js",
     "admin:users": "node scripts/admin-users.js",
     "generate-update-key": "node scripts/generate-update-signing-key.js",
     "publish-update": "node scripts/publish-update.js"

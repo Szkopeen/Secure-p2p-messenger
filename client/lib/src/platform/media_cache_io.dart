@@ -32,8 +32,7 @@ Future<void> cleanupTempMediaFiles({
         !entity.path
             .split(Platform.pathSeparator)
             .last
-            .startsWith('secure_chat_preview_'))
-      continue;
+            .startsWith('secure_chat_preview_')) continue;
     try {
       if ((await entity.stat()).modified.isBefore(cutoff))
         await entity.delete();
@@ -42,6 +41,8 @@ Future<void> cleanupTempMediaFiles({
 }
 
 Future<void> deleteTempMediaFile(String path) async {
-  final file = File(path);
-  if (await file.exists()) await file.delete();
+  try {
+    final file = File(path);
+    if (await file.exists()) await file.delete();
+  } catch (_) {}
 }

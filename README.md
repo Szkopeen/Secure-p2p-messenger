@@ -86,10 +86,8 @@ Wykonane elementy zabezpieczen:
   HTTPS poza localhostem. Nie jest uzywane jako sekret vaultu.
 - Sekret vaultu nie jest wysylany do API.
 - Klient wymaga HTTPS/WSS poza localhostem.
-- Token sesji cloud WebSocket jest wysylany w naglowku `Authorization: Bearer`,
-  a nie w query stringu URL.
-- Backend domyslnie odrzuca `/v2/ws?token=...`; awaryjny fallback da sie
-  wlaczyc tylko przez `ALLOW_WS_TOKEN_QUERY=true` na czas migracji.
+- WebSocket cloud uzywa krotko zyjacego, jednorazowego ticketu z `/v2/ws-ticket`.
+- Dlugotrwaly token sesji nie trafia do URL WebSocket ani do naglowkow handshake.
 - Kazde konto ma trwala tozsamosc Ed25519.
 - Klucz X25519 do opakowywania kluczy rozmow jest podpisany tozsamoscia
   Ed25519.
@@ -150,10 +148,9 @@ Najwazniejsze zmienne:
 ```bash
 HOST=127.0.0.1
 PORT=8443
-RELAY_TOKEN=losowy-token-minimum-32-znaki
+REGISTRATION_MODE=disabled
 ADMIN_TOKEN=losowy-token-admin-minimum-32-znaki
 MAX_CONNECTIONS_PER_USER=12
-ALLOW_WS_TOKEN_QUERY=false
 V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
 UPDATE_MANIFEST_FILE=/opt/secure-p2p/app/server/updates/manifest.json
 UPDATE_FILES_DIR=/opt/secure-p2p/app/server/updates/files
@@ -270,7 +267,7 @@ cd /opt/secure-p2p/app/server
 sudo -u securep2p -H npm --prefix /opt/secure-p2p/app/server run admin:users -- list
 ```
 
-Usuniecie konta z danych relay i dodanie go do banlisty:
+Usuniecie konta z danych administracyjnych i dodanie go do banlisty:
 
 ```bash
 sudo -u securep2p -H npm --prefix /opt/secure-p2p/app/server run admin:users -- delete USER_ID --yes

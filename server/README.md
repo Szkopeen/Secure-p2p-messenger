@@ -26,24 +26,22 @@ npm install
 npm start
 ```
 
-Wygenerowanie losowego tokena:
+Wygenerowanie losowego sekretu administratora:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
 
-Ustaw osobno:
+Ustaw co najmniej:
 
 ```bash
-RELAY_TOKEN=losowy-ciag-minimum-32-znaki
+REGISTRATION_MODE=disabled
 ADMIN_TOKEN=drugi-losowy-ciag-minimum-32-znaki
-ALLOW_WS_TOKEN_QUERY=false
 ```
 
-`ALLOW_WS_TOKEN_QUERY=true` wlaczaj tylko awaryjnie na krotka migracje starych
-klientow. Nowy klient cloud wysyla token sesji WebSocket w naglowku
-`Authorization: Bearer`, zeby nie zostawiac bearer tokena w URL-ach i logach
-reverse proxy.
+WebSocket `/v2/ws` nie przyjmuje dlugotrwalego tokenu w URL ani w naglowku.
+Klient najpierw pobiera krotko zyjacy, jednorazowy ticket przez `/v2/ws-ticket`,
+a potem wysyla go jako pierwsza ramke WebSocket.
 
 ## Wdrozenie na Pi
 
@@ -105,7 +103,7 @@ Podglad konkretnego userId:
 npm run admin:users -- show USER_ID
 ```
 
-Usuniecie konta z danych relay i dodanie userId do banlisty:
+Usuniecie konta z danych administracyjnych i dodanie userId do banlisty:
 
 ```bash
 npm run admin:users -- delete USER_ID --yes

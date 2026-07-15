@@ -28,6 +28,7 @@ import 'models/update_info.dart';
 import 'models/user_profile.dart';
 import 'network/relay_client.dart';
 import 'platform/file_exporter.dart';
+import 'platform/media_cache.dart';
 import 'security/update_signature_verifier.dart';
 import 'services/cloud_api_client.dart';
 import 'services/desktop_notifier.dart';
@@ -214,6 +215,7 @@ class AppState extends ChangeNotifier {
   Future<void> initialize() async {
     try {
       await _loadPackageInfo();
+      await cleanupTempMediaFiles(maxAge: Duration.zero);
       _cloudSession = await _store.loadCloudSession();
       _identity = null;
       _ownProfile = await _store.loadOwnProfile();
@@ -247,23 +249,10 @@ class AppState extends ChangeNotifier {
   Future<void> createIdentityAndConnect({
     required String userId,
     required String serverUrl,
-    required String relayToken,
+    required String legacyRelaySecret,
   }) async {
-    final normalizedUserId = userId.trim();
-    if (normalizedUserId.length < 3) {
-      throw ArgumentError('Identyfikator musi miec minimum 3 znaki.');
-    }
-
-    _identity ??= await _crypto.createIdentity(normalizedUserId);
-    await _store.saveIdentity(_identity!);
-
-    _relaySettings = RelaySettings(
-      serverUrl: serverUrl.trim(),
-      relayToken: relayToken.trim(),
-    );
-    await _store.saveRelaySettings(_relaySettings!);
-    await connectRelay();
-    unawaited(checkForUpdate(silent: true));
+    throw UnsupportedError(
+        'Stary tryb relay zostal usuniety. Uzyj konta cloud.');
   }
 
   Future<void> registerCloudAccount({
@@ -340,15 +329,26 @@ class AppState extends ChangeNotifier {
       salt: loginProbe.session.vaultSalt,
     );
     final session = loginProbe.session.copyWith(vaultKey: vaultKey);
-    final encryptedVault = loginProbe.encryptedVault;
-    if (encryptedVault == null) {
-      throw StateError('Konto nie ma vaulta z kluczami.');
+    CloudVault vault;
+    try {
+      final encryptedVault = loginProbe.encryptedVault;
+      if (encryptedVault == null) {
+        throw StateError('Konto nie ma vaulta z kluczami.');
+      }
+      vault = await _cloudCrypto.ensureSignedIdentity(
+        await _cloudCrypto.decryptVault(encryptedVault, vaultKey),
+        accountId: session.userId,
+        serverOrigin: _cloudSignatureOrigin(session.serverUrl),
+      );
+    } catch (_) {
+      try {
+        await CloudApiClient(
+          serverUrl: normalizedServer,
+          token: loginProbe.session.token,
+        ).logout();
+      } catch (_) {}
+      rethrow;
     }
-    final vault = await _cloudCrypto.ensureSignedIdentity(
-      await _cloudCrypto.decryptVault(encryptedVault, vaultKey),
-      accountId: session.userId,
-      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
-    );
     await _activateCloudSession(session, vault);
     await _saveCloudVault();
     await _publishCloudKeyBundle();
@@ -714,24 +714,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> connectRelay() async {
-    final identity = _identity;
-    final settings = _relaySettings;
-    if (identity == null || settings == null) return;
-
-    await _relaySubscription?.cancel();
-    await _relay?.disconnect();
-
-    _relayConnected = false;
-    _relayPresence.clear();
-    _presenceTimer?.cancel();
-    _sentDeviceSyncSnapshotThisRun = false;
-    _relay = RelayClient(settings: settings, identity: identity);
-
-    _relaySubscription = _relay!.events.listen(
-      (event) => unawaited(_handleRelayEvent(event)),
-    );
-    await _relay!.connect();
-    _setStatus('Laczenie z relay...');
+    throw UnsupportedError(
+        'Stary tryb relay zostal usuniety. Uzyj konta cloud.');
   }
 
   Future<void> connectCloud() async {
@@ -4405,6 +4389,7 @@ class AppState extends ChangeNotifier {
   Future<void> _ensurePackageInfoLoaded() async {
     if (_currentVersionLabel.isEmpty) {
       await _loadPackageInfo();
+      await cleanupTempMediaFiles(maxAge: Duration.zero);
     }
   }
 

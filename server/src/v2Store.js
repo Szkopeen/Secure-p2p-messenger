@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { URL } from 'node:url';
 
 const SAFE_ID = /^[a-zA-Z0-9_.:@-]{3,64}$/;
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -11,8 +10,14 @@ const DEFAULT_MESSAGE_PAGE = 100;
 const MAX_MEMBER_KEY_BYTES = 16 * 1024;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30 * 1000;
+const WS_TICKET_MAX_GLOBAL = 10_000;
+const WS_TICKET_MAX_PER_SESSION = 4;
+const WS_TICKET_WINDOW_MS = 60 * 1000;
+const WS_TICKET_MAX_PER_WINDOW = 30;
 const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_MAX_ATTEMPTS = 10;
+const AUTH_MAX_KEYS = 5000;
+const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
 const authAttempts = new Map();
 
 function nowIso() {
@@ -234,6 +239,17 @@ function allowAuthAttempt(req, username) {
   if (live.length >= AUTH_MAX_ATTEMPTS) return false;
   live.push(now);
   authAttempts.set(key, live);
+  if (authAttempts.size > AUTH_MAX_KEYS) {
+    for (const [attemptKey, attempts] of authAttempts.entries()) {
+      const stillLive = attempts.filter((time) => time > now - AUTH_WINDOW_MS);
+      if (stillLive.length === 0) authAttempts.delete(attemptKey);
+      else authAttempts.set(attemptKey, stillLive);
+    }
+    while (authAttempts.size > AUTH_MAX_KEYS) {
+      const oldestKey = authAttempts.keys().next().value;
+      authAttempts.delete(oldestKey);
+    }
+  }
   return true;
 }
 
@@ -317,8 +333,10 @@ export class V2Store {
     this.conversations = readJson(this.conversationsFile, { v: 1, conversations: {} });
     this.messages = readJson(this.messagesFile, { v: 1, messages: {} });
     this.liveSockets = new Map();
+    this.sessionSockets = new Map();
     this.accountQueues = new Map();
     this.wsTickets = new Map();
+    this.wsTicketAttempts = new Map();
     this.pruneSessions();
   }
 
@@ -344,6 +362,8 @@ export class V2Store {
     for (const [hash, session] of Object.entries(this.sessions.sessions)) {
       if (!session || session.expiresAtMs <= now) {
         delete this.sessions.sessions[hash];
+        this.closeSessionSockets(hash, 'session_expired');
+        this.revokeWsTicketsForSession(hash);
         changed = true;
       }
     }
@@ -401,6 +421,7 @@ export class V2Store {
       userId: user.userId,
       deviceId,
       createdAt: nowIso(),
+      lastSeenAtWriteMs: Date.now(),
       expiresAtMs
     };
     this.persistUsers();
@@ -418,13 +439,21 @@ export class V2Store {
     if (!user) return null;
     if (isDeviceRevoked(user, session.deviceId)) {
       delete this.sessions.sessions[hash];
+      this.closeSessionSockets(hash, 'device_revoked');
+      this.revokeWsTicketsForSession(hash);
       this.persistSessions();
       return null;
     }
     user.devices ||= {};
     if (user.devices[session.deviceId]) {
-      user.devices[session.deviceId].lastSeenAt = nowIso();
-      this.persistUsers();
+      const now = Date.now();
+      if (!Number.isFinite(session.lastSeenAtWriteMs) ||
+          now - session.lastSeenAtWriteMs >= LAST_SEEN_WRITE_INTERVAL_MS) {
+        user.devices[session.deviceId].lastSeenAt = nowIso();
+        session.lastSeenAtWriteMs = now;
+        this.persistUsers();
+        this.persistSessions();
+      }
     }
     return { tokenHash: hash, session, user };
   }
@@ -470,13 +499,26 @@ export class V2Store {
     const sockets = this.liveSockets.get(userId) || new Set();
     sockets.add(ws);
     this.liveSockets.set(userId, sockets);
+    const sessionSockets = this.sessionSockets.get(sessionHash) || new Set();
+    sessionSockets.add(ws);
+    this.sessionSockets.set(sessionHash, sessionSockets);
     ws.on('close', () => {
       sockets.delete(ws);
       if (sockets.size === 0) this.liveSockets.delete(userId);
+      sessionSockets.delete(ws);
+      if (sessionSockets.size === 0) this.sessionSockets.delete(sessionHash);
     });
   }
 
   issueWsTicket(auth) {
+    this.pruneWsTickets();
+    if (!this.allowWsTicketRequest(auth.tokenHash)) return null;
+    if (this.wsTickets.size >= WS_TICKET_MAX_GLOBAL) return null;
+    let activeForSession = 0;
+    for (const entry of this.wsTickets.values()) {
+      if (entry.sessionHash === auth.tokenHash) activeForSession += 1;
+    }
+    if (activeForSession >= WS_TICKET_MAX_PER_SESSION) return null;
     const ticket = crypto.randomBytes(32).toString('base64url');
     this.wsTickets.set(tokenHash(ticket), {
       sessionHash: auth.tokenHash,
@@ -486,6 +528,7 @@ export class V2Store {
   }
 
   consumeWsTicket(ticket) {
+    this.pruneWsTickets();
     const hash = tokenHash(ticket);
     const entry = this.wsTickets.get(hash);
     this.wsTickets.delete(hash);
@@ -496,10 +539,89 @@ export class V2Store {
     return { sessionHash: entry.sessionHash, session, user };
   }
 
+  pruneWsTickets() {
+    const now = Date.now();
+    for (const [hash, entry] of this.wsTickets.entries()) {
+      if (!entry || entry.expiresAtMs <= now || !this.sessions.sessions[entry.sessionHash]) {
+        this.wsTickets.delete(hash);
+      }
+    }
+    for (const [sessionHash, attempts] of this.wsTicketAttempts.entries()) {
+      const live = attempts.filter((time) => time > now - WS_TICKET_WINDOW_MS);
+      if (live.length === 0) this.wsTicketAttempts.delete(sessionHash);
+      else this.wsTicketAttempts.set(sessionHash, live);
+    }
+  }
+
+  allowWsTicketRequest(sessionHash) {
+    const now = Date.now();
+    const live = (this.wsTicketAttempts.get(sessionHash) || [])
+      .filter((time) => time > now - WS_TICKET_WINDOW_MS);
+    if (live.length >= WS_TICKET_MAX_PER_WINDOW) {
+      this.wsTicketAttempts.set(sessionHash, live);
+      return false;
+    }
+    live.push(now);
+    this.wsTicketAttempts.set(sessionHash, live);
+    return true;
+  }
+
+  revokeWsTicketsForSession(sessionHash) {
+    for (const [hash, entry] of this.wsTickets.entries()) {
+      if (entry.sessionHash === sessionHash) this.wsTickets.delete(hash);
+    }
+    this.wsTicketAttempts.delete(sessionHash);
+  }
+
+  closeSessionSockets(sessionHash, reason = 'session_revoked') {
+    const sockets = this.sessionSockets.get(sessionHash);
+    if (!sockets) return 0;
+    let closed = 0;
+    for (const ws of Array.from(sockets)) {
+      if (ws.readyState === 0 || ws.readyState === 1) {
+        ws.close(4001, reason);
+        closed += 1;
+      }
+    }
+    this.sessionSockets.delete(sessionHash);
+    return closed;
+  }
+
+  closeUserSockets(userId, reason = 'session_revoked') {
+    const sockets = this.liveSockets.get(userId);
+    if (!sockets) return 0;
+    let closed = 0;
+    for (const ws of Array.from(sockets)) {
+      if (ws.readyState === 0 || ws.readyState === 1) {
+        ws.close(4001, reason);
+        closed += 1;
+      }
+    }
+    this.liveSockets.delete(userId);
+    return closed;
+  }
+
   revokeSession(sessionHash) {
     const existed = delete this.sessions.sessions[sessionHash];
+    this.revokeWsTicketsForSession(sessionHash);
+    this.closeSessionSockets(sessionHash, 'session_revoked');
     if (existed) this.persistSessions();
     return existed;
+  }
+
+  revokeAllSessionsForUser(userId) {
+    let changed = false;
+    for (const [hash, session] of Object.entries(this.sessions.sessions)) {
+      if (session.userId === userId) {
+        delete this.sessions.sessions[hash];
+        this.revokeWsTicketsForSession(hash);
+        this.closeSessionSockets(hash, 'session_revoked');
+        changed = true;
+      }
+    }
+    this.closeUserSockets(userId, 'session_revoked');
+    if (changed) this.persistSessions();
+    return changed;
   }
 
   revokeDeviceSessions(userId, deviceIds) {
@@ -509,6 +631,8 @@ export class V2Store {
     for (const [hash, session] of Object.entries(this.sessions.sessions)) {
       if (session.userId === userId && revoked.has(session.deviceId)) {
         delete this.sessions.sessions[hash];
+        this.revokeWsTicketsForSession(hash);
+        this.closeSessionSockets(hash, 'device_revoked');
         changed = true;
       }
     }
@@ -640,15 +764,16 @@ export async function handleV2Http(store, req, res, url, options = {}) {
     }
 
     if (method === 'POST' && url.pathname === '/v2/sessions/revoke-all') {
-      for (const [hash, session] of Object.entries(store.sessions.sessions)) {
-        if (session.userId === auth.user.userId) delete store.sessions.sessions[hash];
-      }
-      store.persistSessions();
+      store.revokeAllSessionsForUser(auth.user.userId);
       return sendJson(res, 200, { ok: true });
     }
 
     if (method === 'POST' && url.pathname === '/v2/ws-ticket') {
-      return sendJson(res, 200, { ok: true, ticket: store.issueWsTicket(auth), expiresInSeconds: 30 });
+      const ticket = store.issueWsTicket(auth);
+      if (!ticket) {
+        return sendJson(res, 429, { ok: false, error: 'Za duzo aktywnych biletow WebSocket.' });
+      }
+      return sendJson(res, 200, { ok: true, ticket, expiresInSeconds: 30 });
     }
 
     if (method === 'GET' && url.pathname === '/v2/users') {
@@ -882,45 +1007,18 @@ export async function handleV2Http(store, req, res, url, options = {}) {
   }
 }
 
-<<<<<<< HEAD
 export function handleV2WebSocket(store, ws, request) {
   const timer = setTimeout(() => ws.close(1008, 'Brak biletu WebSocket.'), 10_000);
   ws.once('message', (raw) => {
     clearTimeout(timer);
     let message;
     try { message = JSON.parse(String(raw)); } catch { ws.close(1008, 'Niepoprawne uwierzytelnienie.'); return; }
-    const auth = message?.type === 'authenticate' ? store.consumeWsTicket(message.ticket) : null;
+    const auth = message?.type === 'auth' || message?.type === 'authenticate'
+      ? store.consumeWsTicket(message.ticket)
+      : null;
     if (!auth) { ws.close(1008, 'Niepoprawny lub zuzyty bilet.'); return; }
     store.attachSocket(auth.user.userId, auth.session.deviceId, auth.sessionHash, ws);
     ws.send(JSON.stringify({ type: 'ready', userId: auth.user.userId, deviceId: auth.session.deviceId, serverTime: nowIso() }));
     ws.on('message', () => ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() })));
-=======
-export function handleV2WebSocket(store, ws, request, options = {}) {
-  const url = new URL(request.url || '/', 'http://127.0.0.1');
-  if (!options.allowQueryToken && url.searchParams.has('token')) {
-    ws.close(1008, 'Token WebSocket w URL jest wylaczony.');
-    return;
-  }
-  const headerToken = bearerToken(request);
-  const queryToken = options.allowQueryToken
-    ? url.searchParams.get('token') || ''
-    : '';
-  const token = headerToken || queryToken;
-  const fakeReq = { headers: { authorization: `Bearer ${token}` } };
-  const auth = store.auth(fakeReq);
-  if (!auth) {
-    ws.close(1008, 'Brak logowania.');
-    return;
-  }
-  store.attachSocket(auth.user.userId, auth.session.deviceId, auth.token, ws);
-  ws.send(JSON.stringify({
-    type: 'ready',
-    userId: auth.user.userId,
-    deviceId: auth.session.deviceId,
-    serverTime: nowIso()
-  }));
-  ws.on('message', () => {
-    ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() }));
->>>>>>> d05055dac5556d4728d4819c8c85dac1f6b6c0f3
   });
 }

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../crypto/codec.dart';
@@ -41,6 +40,13 @@ class CloudProblem extends CloudEvent {
   final String message;
 }
 
+class MessagePage {
+  const MessagePage({required this.messages, required this.nextAfterSeq});
+
+  final List<CloudStoredMessage> messages;
+  final int? nextAfterSeq;
+}
+
 class CloudApiClient {
   CloudApiClient({required this.serverUrl, this.token});
 
@@ -50,6 +56,7 @@ class CloudApiClient {
       StreamController<CloudEvent>.broadcast();
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
+  Completer<void>? _connectReady;
 
   Stream<CloudEvent> get events => _events.stream;
 
@@ -61,8 +68,8 @@ class CloudApiClient {
       'ws' => 'http',
       'http' || 'https' => base.scheme,
       _ => throw ArgumentError(
-        'Adres serwera musi zaczynac sie od https:// albo http://.',
-      ),
+          'Adres serwera musi zaczynac sie od https:// albo http://.',
+        ),
     };
     _assertSafeTransport(scheme, base.host);
     return Uri(
@@ -82,8 +89,8 @@ class CloudApiClient {
       'http' => 'ws',
       'ws' || 'wss' => base.scheme,
       _ => throw ArgumentError(
-        'Adres serwera musi zaczynac sie od https:// albo http://.',
-      ),
+          'Adres serwera musi zaczynac sie od https:// albo http://.',
+        ),
     };
     _assertSafeTransport(scheme, base.host);
     return Uri(
@@ -91,11 +98,6 @@ class CloudApiClient {
       host: base.host,
       port: base.hasPort ? base.port : null,
       path: '/v2/ws',
-<<<<<<< HEAD
-      queryParameters: null,
-      fragment: null,
-=======
->>>>>>> d05055dac5556d4728d4819c8c85dac1f6b6c0f3
     );
   }
 
@@ -226,18 +228,48 @@ class CloudApiClient {
     required String conversationId,
     int afterSeq = 0,
   }) async {
+    final all = <CloudStoredMessage>[];
+    var cursor = afterSeq;
+    for (var pageCount = 0; pageCount < 50; pageCount += 1) {
+      final page = await messagePage(
+        conversationId: conversationId,
+        afterSeq: cursor,
+      );
+      if (page.messages.isEmpty) break;
+      all.addAll(page.messages);
+      final next = page.nextAfterSeq;
+      if (next == null) break;
+      if (next <= cursor) {
+        throw StateError('Serwer zwrocil niepoprawna paginacje wiadomosci.');
+      }
+      cursor = next;
+    }
+    return all;
+  }
+
+  Future<MessagePage> messagePage({
+    required String conversationId,
+    int afterSeq = 0,
+    int limit = 100,
+  }) async {
     final raw = await _get('/v2/messages', {
       'conversationId': conversationId,
       'afterSeq': afterSeq.toString(),
+      'limit': limit.toString(),
     });
     final items = raw['messages'] as List? ?? const [];
-    return items
+    final messages = items
         .map(
           (item) => CloudStoredMessage.fromJson(
             (item as Map).cast<String, dynamic>(),
           ),
         )
         .toList(growable: false);
+    final next = raw['nextAfterSeq'];
+    return MessagePage(
+      messages: messages,
+      nextAfterSeq: next is int ? next : int.tryParse(next?.toString() ?? ''),
+    );
   }
 
   Future<CloudStoredMessage> sendMessage({
@@ -258,26 +290,37 @@ class CloudApiClient {
   Future<void> connectEvents() async {
     if (token == null || token!.isEmpty) return;
     await disconnectEvents();
-<<<<<<< HEAD
     final ticketResponse = await _post('/v2/ws-ticket', const {});
     final ticket = requiredString(ticketResponse, 'ticket');
+    final ready = Completer<void>();
+    _connectReady = ready;
     _channel = WebSocketChannel.connect(_wsUri());
-=======
-    _channel = IOWebSocketChannel.connect(
-      _wsUri(),
-      headers: {
-        HttpHeaders.authorizationHeader: 'Bearer $token',
-      },
-    );
->>>>>>> d05055dac5556d4728d4819c8c85dac1f6b6c0f3
     _subscription = _channel!.stream.listen(
       _handleEvent,
-      onError: (Object error) => _events.add(CloudProblem(error.toString())),
-      onDone: () => _events.add(
-        const CloudProblem('Polaczenie cloud zostalo zamkniete.'),
-      ),
+      onError: (Object error) {
+        if (!ready.isCompleted) ready.completeError(error);
+        _events.add(CloudProblem(error.toString()));
+      },
+      onDone: () {
+        if (!ready.isCompleted) {
+          ready.completeError(
+            StateError('Polaczenie cloud zamknieto przed logowaniem.'),
+          );
+        }
+        _events.add(
+          const CloudProblem('Polaczenie cloud zostalo zamkniete.'),
+        );
+      },
     );
-    _channel!.sink.add(jsonEncode({'type': 'authenticate', 'ticket': ticket}));
+    _channel!.sink.add(jsonEncode({'type': 'auth', 'ticket': ticket}));
+    try {
+      await ready.future.timeout(const Duration(seconds: 10));
+    } catch (_) {
+      await disconnectEvents();
+      rethrow;
+    } finally {
+      if (identical(_connectReady, ready)) _connectReady = null;
+    }
   }
 
   Future<void> logout() async {
@@ -294,6 +337,7 @@ class CloudApiClient {
     await _channel?.sink.close();
     _subscription = null;
     _channel = null;
+    _connectReady = null;
   }
 
   Future<void> dispose() async {
@@ -306,6 +350,9 @@ class CloudApiClient {
       final json = jsonDecode(raw as String) as Map<String, dynamic>;
       switch (json['type']) {
         case 'ready':
+          if (_connectReady?.isCompleted == false) {
+            _connectReady?.complete();
+          }
           _events.add(const CloudReady());
           break;
         case 'message':

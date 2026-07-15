@@ -10,7 +10,7 @@ import 'secure_store.dart';
 
 class MessageArchive {
   MessageArchive({required SecureStore secureStore})
-    : _secureStore = secureStore;
+      : _secureStore = secureStore;
 
   static const _aad = 'secure-p2p-local-message-archive/v1';
 
@@ -19,36 +19,24 @@ class MessageArchive {
 
   Future<List<ChatMessage>> load() async {
     final file = await _archiveFile();
-    if (!await file.exists()) return [];
+    final previous = File('${file.path}.previous');
+    if (!await file.exists() && !await previous.exists()) return [];
 
     try {
-      final encrypted =
-          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-      final key = await _archiveSecretKey();
-      final box = SecretBox(
-        unb64(encrypted['ciphertext'] as String),
-        nonce: unb64(encrypted['nonce'] as String),
-        mac: Mac(unb64(encrypted['mac'] as String)),
-      );
-      final clearBytes = await _aead.decrypt(
-        box,
-        secretKey: key,
-        aad: utf8Bytes(_aad),
-      );
-      final decoded =
-          jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
-      final items = decoded['messages'] as List<dynamic>? ?? const [];
-      return items
-          .map(
-            (item) =>
-                ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
-          )
-          .toList(growable: false);
-    } catch (error) {
+      if (await file.exists()) return await _loadFromFile(file);
+    } catch (primaryError) {
+      if (await previous.exists()) {
+        try {
+          final recovered = await _loadFromFile(previous);
+          await previous.copy(file.path);
+          return recovered;
+        } catch (_) {}
+      }
       throw StateError(
-        'Lokalne archiwum jest uszkodzone albo zaszyfrowane innym kluczem: $error',
+        'Lokalne archiwum jest uszkodzone albo zaszyfrowane innym kluczem: $primaryError',
       );
     }
+    return _loadFromFile(previous);
   }
 
   Future<void> save(Iterable<ChatMessage> messages) async {
@@ -89,9 +77,38 @@ class MessageArchive {
 
   Future<void> delete() async {
     final file = await _archiveFile();
-    if (await file.exists()) {
-      await file.delete();
+    for (final candidate in [
+      file,
+      File('${file.path}.previous'),
+      File('${file.path}.tmp'),
+    ]) {
+      if (await candidate.exists()) {
+        await candidate.delete();
+      }
     }
+  }
+
+  Future<List<ChatMessage>> _loadFromFile(File file) async {
+    final encrypted =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    final key = await _archiveSecretKey();
+    final box = SecretBox(
+      unb64(encrypted['ciphertext'] as String),
+      nonce: unb64(encrypted['nonce'] as String),
+      mac: Mac(unb64(encrypted['mac'] as String)),
+    );
+    final clearBytes = await _aead.decrypt(
+      box,
+      secretKey: key,
+      aad: utf8Bytes(_aad),
+    );
+    final decoded = jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
+    final items = decoded['messages'] as List<dynamic>? ?? const [];
+    return items
+        .map(
+          (item) => ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
+        )
+        .toList(growable: false);
   }
 
   Future<SecretKey> _archiveSecretKey() async {

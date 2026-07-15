@@ -1,156 +1,64 @@
-# Instrukcja wdrozenia
+# Wdrozenie Secure Chat cloud-only
 
-## 1. Serwer Relay/Signaling
+Ten dokument opisuje aktualny tryb projektu: konto cloud, HTTPS/WSS przez reverse proxy i jednorazowe tickety WebSocket. Stary tryb relay ze wspolnym sekretem zostal usuniety z aktywnej sciezki serwera i klienta.
 
-Wymagania:
-
-- Node.js 20 lub nowszy
-- Publiczny adres IP albo domena wskazujaca na komputer domowy
-- Przekierowany port na routerze, np. `8443`
-- Docelowo TLS przez reverse proxy, np. Caddy albo nginx
-
-Uruchomienie:
-
-```powershell
-cd server
-Copy-Item .env.example .env
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-```
-
-Wklej wygenerowany sekret do `RELAY_TOKEN` w pliku `.env`.
-
-```powershell
-npm install
-npm start
-```
-
-Test zdrowia:
-
-```powershell
-curl http://127.0.0.1:8443/healthz
-```
-
-### TLS i publiczny adres
-
-Klient nie powinien laczyc sie przez `ws://ADRES_IP:8443` w LAN, bo stary tryb
-relay wysyla `RELAY_TOKEN` po zestawieniu WebSocket. `ws://` jest dozwolone
-wylacznie dla `localhost`, `127.0.0.1` albo `::1` podczas lokalnych testow.
-Dla LAN, Raspberry Pi i internetu uzywaj `wss://` przez Caddy/Nginx.
-
-Przyklad Caddy:
-
-```caddyfile
-chat.example.com {
-  reverse_proxy 127.0.0.1:8443
-  header {
-    -Server
-  }
-}
-```
-
-W starym trybie relay klienta wpisz wtedy:
-
-```text
-wss://chat.example.com
-```
-
-W aktualnym trybie cloud w aplikacji wpisuj adres HTTPS:
-
-```text
-https://chat.example.com
-```
-
-### Zasady firewall/router
-
-- Na komputerze z relay otworz tylko port reverse proxy, zwykle `443`.
-- Jesli nie uzywasz reverse proxy, przekieruj `8443/TCP` na komputer z serwerem.
-- Nie publikuj pliku `.env`.
-- `SECURITY_LOGS=false` zostaw wylaczone, jesli nie debugujesz polaczen.
-
-### Aktualizacje aplikacji
-
-Relay udostepnia tez najnowsze paczki aplikacji przez:
-
-```text
-https://twoja-domena/updates/manifest.json
-https://twoja-domena/updates/files/nazwa-pliku.zip
-```
-
-Do publikowania nowych wersji uzyj instrukcji `docs/AKTUALIZACJE_PL.md`.
-
-## 2. Klient Flutter
-
-Wymagania:
-
-- Flutter SDK
-- Dla Windows: Visual Studio z obciazeniem "Desktop development with C++"
-- Dla Androida: Android Studio, SDK i zaakceptowane licencje
-- Dla Linuxa: Flutter na Linuxie oraz pakiety developerskie GTK/CMake/Ninja
-
-Przygotowanie katalogow platform:
-
-```powershell
-cd client
-flutter create . --platforms=windows,android,linux
-flutter pub get
-```
-
-Uruchomienie developerskie:
-
-```powershell
-flutter run -d windows
-```
-
-Android:
-
-```powershell
-flutter doctor --android-licenses
-flutter build apk --release
-```
-
-Artefakt bedzie w `build/app/outputs/flutter-apk/app-release.apk`.
-
-Windows:
-
-```powershell
-flutter build windows --release
-```
-
-Artefakt bedzie w `build/windows/x64/runner/Release/`.
-
-Linux:
+## Minimalna konfiguracja `.env`
 
 ```bash
-flutter build linux --release
+HOST=127.0.0.1
+PORT=8443
+REGISTRATION_MODE=disabled
+ADMIN_TOKEN=TU_WKLEJ_LOSOWY_SEKRET_ADMIN_MINIMUM_32_ZNAKI
+MAX_PAYLOAD_BYTES=16777216
+MAX_CONNECTIONS_PER_USER=12
+V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
+UPDATE_MANIFEST_FILE=/opt/secure-p2p/app/server/updates/manifest.json
+UPDATE_FILES_DIR=/opt/secure-p2p/app/server/updates/files
 ```
 
-Artefakt bedzie w `build/linux/x64/release/bundle/`.
+`REGISTRATION_MODE=open` wlaczaj tylko na czas kontrolowanego tworzenia kont. Po utworzeniu kont testowych lub produkcyjnych wroc do `disabled`.
 
-## 3. Pierwsze uruchomienie
+## Reverse proxy
 
-1. Uruchom relay.
-2. Otworz klienta jako pierwszy uzytkownik, wpisz `userId`, adres relay i `RELAY_TOKEN`.
-3. Skopiuj swoj klucz publiczny z ekranu glownego.
-4. Powtorz na drugim urzadzeniu z innym `userId`.
-5. Dodajcie siebie nawzajem jako kontakty, wpisujac `userId` i klucz publiczny wymieniony poza aplikacja.
-6. Wyslij wiadomosc. Aplikacja zestawi handshake E2EE, sprobuje WebRTC P2P i w razie potrzeby uzyje relay jako zaszyfrowanego tunelu.
+Node.js powinien sluchac lokalnie na `127.0.0.1:8443`, a publiczny TLS powinien obslugiwac Caddy albo nginx.
 
-## 4. Najwazniejsze ograniczenia
+Przyklad przeplywu:
 
-- Relay ma ograniczona kolejke offline zaszyfrowanych pakietow. Nie przechowuje kluczy ani tresci jawnej.
-- Pliki sa trzymane w pamieci i maja domyslny limit 8 MB przed szyfrowaniem.
-- WebRTC bez wlasnego STUN/TURN moze nie przebic czesci NAT. Wtedy dziala relay fallback.
-- Klienci sa natywni: Android, Windows i Linux. Webowy wariant aplikacji nie jest utrzymywany.
-- Ten kod jest solidnym punktem startowym, ale przed zastosowaniem operacyjnym wymaga testow penetracyjnych, hardeningu hosta i audytu.
+```text
+https://chat.twojadomena.pl -> Caddy/nginx -> http://127.0.0.1:8443
+wss://chat.twojadomena.pl/v2/ws -> Caddy/nginx -> ws://127.0.0.1:8443/v2/ws
+```
 
-## 5. Hardening produkcyjny
+Klient laczy sie adresem `https://chat.twojadomena.pl`. Poza localhostem aplikacja wymaga HTTPS/WSS.
 
-- Uzywaj `https://` dla cloud i `wss://` dla legacy relay, zawsze z aktualnym TLS.
-- Nie wlaczaj `ALLOW_WS_TOKEN_QUERY=true`, chyba ze robisz krotka migracje
-  starych klientow. Nowy klient wysyla token WebSocket w naglowku
-  `Authorization`.
-- Trzymaj relay za Caddy/nginx z automatycznym odnawianiem certyfikatu.
-- Uruchamiaj Node jako osobny, nieuprzywilejowany uzytkownik.
-- Monitoruj tylko metryki techniczne procesu, bez logowania payloadow.
-- Regularnie aktualizuj Node, Flutter i zaleznosci.
-- Wymieniaj `RELAY_TOKEN`, gdy jakiekolwiek urzadzenie moglo zostac przejete.
+## WebSocket
+
+Klient nie wysyla dlugotrwalego tokenu sesji w URL ani w naglowku handshake. Przeplyw jest taki:
+
+1. zwykle zadanie HTTPS z `Authorization: Bearer` pobiera `/v2/ws-ticket`,
+2. serwer wydaje krotko zyjacy ticket,
+3. klient otwiera `/v2/ws`,
+4. pierwsza ramka WebSocket zawiera `{ "type": "auth", "ticket": "..." }`,
+5. serwer atomowo zuzywa ticket i odrzuca ponowne uzycie.
+
+## Smoke test
+
+1. Uruchom serwer i sprawdz `/healthz`.
+2. Tymczasowo ustaw `REGISTRATION_MODE=open` i utworz dwa konta.
+3. Ustaw `REGISTRATION_MODE=disabled` i zrestartuj usluge.
+4. Zaloguj dwa klienty przez adres HTTPS.
+5. Dodaj kontakt z listy uzytkownikow, porownaj safety number i wyslij wiadomosc.
+6. Zamknij klienta, uruchom ponownie i sprawdz lokalna historie.
+7. Zaloguj to samo konto na drugim urzadzeniu i sprawdz synchronizacje.
+8. Uniewaznij stare urzadzenie testowe i upewnij sie, ze traci sesje.
+
+## Diagnostyka
+
+```bash
+sudo systemctl status secure-p2p-relay --no-pager
+sudo journalctl -u secure-p2p-relay -n 100 --no-pager
+sudo systemctl status caddy --no-pager
+curl https://chat.twojadomena.pl/healthz
+```
+
+Nazwa uslugi systemd moze nadal zawierac `relay` historycznie, ale aktywny transport aplikacji to cloud API `/v2`.

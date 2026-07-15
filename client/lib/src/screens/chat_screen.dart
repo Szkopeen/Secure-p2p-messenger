@@ -1862,21 +1862,26 @@ class _VideoPreview extends StatelessWidget {
     final raw = payload.fileBytesBase64;
     if (raw == null || raw.isEmpty) return;
 
+    String? path;
     try {
-      final path = await writeTempMediaFile(
+      path = await writeTempMediaFile(
         fileName: payload.fileName ?? 'video.mp4',
         bytes: unb64(raw),
       );
       if (!context.mounted) return;
       await showDialog<void>(
         context: context,
-        builder: (context) => _VideoPlayerDialog(path: path),
+        builder: (context) => _VideoPlayerDialog(path: path!),
       );
     } catch (error) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(error.toString())),
       );
+    } finally {
+      if (path != null) {
+        await deleteTempMediaFile(path);
+      }
     }
   }
 }
@@ -1904,8 +1909,16 @@ class _VideoPlayerDialogState extends State<_VideoPlayerDialog> {
 
   @override
   void dispose() {
-    unawaited(_player.dispose());
+    unawaited(_disposePlayerAndMedia());
     super.dispose();
+  }
+
+  Future<void> _disposePlayerAndMedia() async {
+    try {
+      await _player.dispose();
+    } finally {
+      await deleteTempMediaFile(widget.path);
+    }
   }
 
   @override

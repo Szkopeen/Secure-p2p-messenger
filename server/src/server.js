@@ -6,19 +6,6 @@ import path from 'node:path';
 import process from 'node:process';
 import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './config.js';
-import {
-  safeJsonParse,
-  validateContactRequest,
-  validateDirectoryQuery,
-  validateDirectoryUpdate,
-  validateHello,
-  validatePresenceQuery,
-  validateProfileQuery,
-  validateProfileUpdate,
-  validateRelay,
-  validateSignal
-} from './protocol.js';
-import { SlidingWindowRateLimiter } from './rateLimiter.js';
 import { V2Store, handleV2Http, handleV2WebSocket } from './v2Store.js';
 
 const SAFE_USER_ID = /^[a-zA-Z0-9_.:@-]{3,128}$/;
@@ -41,7 +28,6 @@ function audit(message, fields = {}) {
   if (!config.securityLogs) return;
   const safeFields = { ...fields };
   delete safeFields.payload;
-  delete safeFields.relayToken;
   console.info(JSON.stringify({ time: new Date().toISOString(), message, ...safeFields }));
 }
 
@@ -566,26 +552,11 @@ function sanitizeDisplayName(value, fallback) {
   return trimmed.slice(0, 80);
 }
 
-function sendProfileToUser(userId, targetUserId) {
-  const profile = profiles.get(targetUserId);
-  if (!profile) return;
-  forwardToUser(userId, {
-    v: 1,
-    type: 'profile',
-    userId: targetUserId,
-    profile
-  });
-}
-
 function timingSafeSecretEquals(received, expectedSecret) {
   const expected = Buffer.from(expectedSecret, 'utf8');
   const actual = Buffer.from(String(received || ''), 'utf8');
   if (actual.length !== expected.length) return false;
   return crypto.timingSafeEqual(actual, expected);
-}
-
-function timingSafeTokenEquals(received) {
-  return timingSafeSecretEquals(received, config.relayToken);
 }
 
 function adminTokenFromRequest(req) {
@@ -598,11 +569,6 @@ function adminTokenFromRequest(req) {
 function isAuthorizedAdminRequest(req) {
   return Boolean(config.adminToken) &&
     timingSafeSecretEquals(adminTokenFromRequest(req), config.adminToken);
-}
-
-function send(ws, message) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify(message));
 }
 
 function sendJson(res, status, payload) {
@@ -783,333 +749,6 @@ function handleAdminRequest(req, res, url) {
   sendAdminError(res, 405, 'Nieobslugiwana operacja administratora.');
 }
 
-function closeWithError(ws, code, reason) {
-  try {
-    send(ws, { v: 1, type: 'error', code, reason });
-    ws.close(code, reason.slice(0, 120));
-  } catch {
-    ws.terminate();
-  }
-}
-
-function registerClient(state, ws) {
-  const existing = users.get(state.userId) || new Map();
-  if (existing.size >= config.maxConnectionsPerUser) {
-    closeWithError(ws, 1008, 'Za duzo aktywnych polaczen dla uzytkownika.');
-    return false;
-  }
-
-  existing.set(state.connectionId, { ws, state });
-  users.set(state.userId, existing);
-  return true;
-}
-
-function unregisterClient(state) {
-  if (!state.userId) return;
-  const existing = users.get(state.userId);
-  if (!existing) return;
-  existing.delete(state.connectionId);
-  if (existing.size === 0) users.delete(state.userId);
-}
-
-function forwardToUser(to, envelope, options = {}) {
-  const recipients = users.get(to);
-  if (!recipients || recipients.size === 0) {
-    return { deliveredConnections: 0, deliveredDeviceIds: [] };
-  }
-
-  let deliveredConnections = 0;
-  const deliveredDeviceIds = new Set();
-  for (const { ws, state } of recipients.values()) {
-    if (options.excludeConnectionId && state.connectionId === options.excludeConnectionId) {
-      continue;
-    }
-    if (ws.readyState === WebSocket.OPEN) {
-      send(ws, envelope);
-      deliveredConnections += 1;
-      if (state.deviceId) deliveredDeviceIds.add(state.deviceId);
-    }
-  }
-  return {
-    deliveredConnections,
-    deliveredDeviceIds: Array.from(deliveredDeviceIds)
-  };
-}
-
-function handleHello(ws, state, message) {
-  const error = validateHello(message);
-  if (error) {
-    closeWithError(ws, 1008, error);
-    return;
-  }
-
-  if (!timingSafeTokenEquals(message.relayToken)) {
-    audit('Nieudana autoryzacja relay', { userId: message.userId });
-    closeWithError(ws, 1008, 'Niepoprawna autoryzacja.');
-    return;
-  }
-
-  if (isBannedUser(message.userId)) {
-    audit('Odrzucono zablokowanego uzytkownika', { userId: message.userId });
-    closeWithError(ws, 1008, 'Konto jest zablokowane na tym relay.');
-    return;
-  }
-
-  state.authenticated = true;
-  state.userId = message.userId;
-  state.deviceId = message.deviceId;
-  state.identityPublicKey = message.identityPublicKey;
-
-  if (!registerClient(state, ws)) return;
-  rememberKnownUser(state);
-
-  audit('Polaczono klienta', { userId: state.userId, deviceId: state.deviceId });
-  send(ws, {
-    v: 1,
-    type: 'hello_ok',
-    connectionId: state.connectionId,
-    serverTime: new Date().toISOString(),
-    maxPayloadBytes: config.maxPayloadBytes
-  });
-  const flushed = flushOfflineQueue(state, ws);
-  if (flushed > 0) {
-    audit('Dostarczono kolejke offline', { userId: state.userId, delivered: flushed });
-  }
-}
-
-function handleRelay(ws, state, message) {
-  const error = validateRelay(message, state.userId);
-  if (error) {
-    send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_relay', reason: error });
-    return;
-  }
-
-  if (isBannedUser(message.to)) {
-    send(ws, { v: 1, type: 'error', id: message.id, code: 'recipient_banned', reason: 'Adresat jest zablokowany.' });
-    return;
-  }
-
-  const envelope = {
-    v: 1,
-    type: 'deliver',
-    kind: 'relay',
-    id: message.id,
-    from: state.userId,
-    to: message.to,
-    sentAt: new Date().toISOString(),
-    payload: message.payload
-  };
-
-  const ownDeviceRelay = message.to === state.userId;
-  const delivery = forwardToUser(message.to, envelope, {
-    excludeConnectionId: ownDeviceRelay ? state.connectionId : null
-  });
-  const deliveredDeviceIds = ownDeviceRelay
-    ? Array.from(new Set([state.deviceId, ...delivery.deliveredDeviceIds]))
-    : delivery.deliveredDeviceIds;
-  const queued = enqueueOffline(message.to, envelope, deliveredDeviceIds);
-  send(ws, {
-    v: 1,
-    type: 'sent',
-    id: message.id,
-    to: message.to,
-    transport: 'relay',
-    deliveredConnections: delivery.deliveredConnections,
-    queued
-  });
-}
-
-function handleSignal(ws, state, message) {
-  const error = validateSignal(message);
-  if (error) {
-    send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_signal', reason: error });
-    return;
-  }
-
-  if (isBannedUser(message.to)) {
-    send(ws, { v: 1, type: 'error', id: message.id, code: 'recipient_banned', reason: 'Adresat jest zablokowany.' });
-    return;
-  }
-
-  const envelope = {
-    v: 1,
-    type: 'deliver',
-    kind: 'signal',
-    id: message.id,
-    from: state.userId,
-    to: message.to,
-    signalType: message.signalType,
-    sentAt: new Date().toISOString(),
-    payload: message.payload
-  };
-
-  const delivery = forwardToUser(message.to, envelope);
-  const canQueueSignal =
-    message.signalType === 'crypto-handshake-init' ||
-    message.signalType === 'crypto-handshake-accept';
-  const queued =
-    delivery.deliveredConnections === 0 && canQueueSignal
-      ? enqueueOffline(message.to, envelope, delivery.deliveredDeviceIds)
-      : false;
-  send(ws, {
-    v: 1,
-    type: 'sent',
-    id: message.id,
-    to: message.to,
-    transport: 'signal',
-    deliveredConnections: delivery.deliveredConnections,
-    queued
-  });
-}
-
-function handlePresenceQuery(ws, message) {
-  const error = validatePresenceQuery(message);
-  if (error) {
-    send(ws, { v: 1, type: 'error', code: 'bad_presence', reason: error });
-    return;
-  }
-
-  const result = {};
-  for (const contact of message.contacts) {
-    result[contact] = users.has(contact);
-  }
-
-  send(ws, {
-    v: 1,
-    type: 'presence',
-    contacts: result,
-    serverTime: new Date().toISOString()
-  });
-}
-
-function directoryEntriesFor(requestingUserId) {
-  return Array.from(publicDirectory.values())
-    .filter((entry) => entry.userId !== requestingUserId && !isBannedUser(entry.userId))
-    .sort((left, right) => left.displayName.localeCompare(right.displayName))
-    .map((entry) => ({
-      ...entry,
-      online: users.has(entry.userId)
-    }));
-}
-
-function handleDirectoryUpdate(ws, state, message) {
-  const error = validateDirectoryUpdate(message);
-  if (error) {
-    send(ws, { v: 1, type: 'error', code: 'bad_directory_update', reason: error });
-    return;
-  }
-
-  if (!message.enabled) {
-    publicDirectory.delete(state.userId);
-    persistPublicDirectory();
-    send(ws, { v: 1, type: 'directory_updated', enabled: false });
-    return;
-  }
-
-  publicDirectory.set(state.userId, {
-    v: 1,
-    userId: state.userId,
-    displayName: sanitizeDisplayName(message.displayName, state.userId),
-    identityPublicKey: state.identityPublicKey,
-    updatedAt: new Date().toISOString()
-  });
-  persistPublicDirectory();
-  send(ws, { v: 1, type: 'directory_updated', enabled: true });
-}
-
-function handleDirectoryQuery(ws, state, message) {
-  const error = validateDirectoryQuery(message);
-  if (error) {
-    send(ws, { v: 1, type: 'error', code: 'bad_directory_query', reason: error });
-    return;
-  }
-  send(ws, {
-    v: 1,
-    type: 'directory',
-    entries: directoryEntriesFor(state.userId)
-  });
-}
-
-function handleContactRequest(ws, state, message) {
-  const error = validateContactRequest(message);
-  if (error) {
-    send(ws, { v: 1, type: 'error', id: message.id, code: 'bad_contact_request', reason: error });
-    return;
-  }
-
-  if (isBannedUser(message.to)) {
-    send(ws, { v: 1, type: 'error', id: message.id, code: 'recipient_banned', reason: 'Adresat jest zablokowany.' });
-    return;
-  }
-
-  const envelope = {
-    v: 1,
-    type: 'deliver',
-    kind: 'contact_request',
-    id: message.id,
-    from: state.userId,
-    to: message.to,
-    sentAt: new Date().toISOString(),
-    payload: {
-      v: 1,
-      displayName: sanitizeDisplayName(message.displayName, state.userId),
-      identityPublicKey: state.identityPublicKey
-    }
-  };
-
-  const delivery = forwardToUser(message.to, envelope);
-  const queued = enqueueOffline(message.to, envelope, delivery.deliveredDeviceIds);
-  send(ws, {
-    v: 1,
-    type: 'sent',
-    id: message.id,
-    to: message.to,
-    transport: 'contact_request',
-    deliveredConnections: delivery.deliveredConnections,
-    queued
-  });
-}
-
-function handleProfileUpdate(ws, state, message) {
-  const error = validateProfileUpdate(message, config.profileAvatarMaxBytes);
-  if (error) {
-    send(ws, { v: 1, type: 'error', code: 'bad_profile', reason: error });
-    return;
-  }
-
-  const profile = sanitizeProfile(message.profile);
-  profiles.set(state.userId, profile);
-  persistProfiles();
-  audit('Zaktualizowano profil publiczny', { userId: state.userId });
-
-  for (const [userId] of users.entries()) {
-    if (userId !== state.userId) {
-      sendProfileToUser(userId, state.userId);
-    }
-  }
-}
-
-function handleProfileQuery(ws, message) {
-  const error = validateProfileQuery(message);
-  if (error) {
-    send(ws, { v: 1, type: 'error', code: 'bad_profile_query', reason: error });
-    return;
-  }
-
-  const result = {};
-  for (const contact of message.contacts) {
-    const profile = profiles.get(contact);
-    if (profile) result[contact] = profile;
-  }
-
-  send(ws, {
-    v: 1,
-    type: 'profiles',
-    profiles: result,
-    serverTime: new Date().toISOString()
-  });
-}
-
 const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   if (url.pathname === '/healthz') {
@@ -1162,90 +801,11 @@ wss.on('connection', (ws, request) => {
   ws.on('pong', () => { ws.isAlive = true; });
   const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
   if (requestUrl.pathname === '/v2/ws') {
-    handleV2WebSocket(v2Store, ws, request, {
-      allowQueryToken: config.allowWebSocketTokenQuery
-    });
+    handleV2WebSocket(v2Store, ws, request);
     return;
   }
 
-  // Protokol v1 ze wspolnym RELAY_TOKEN jest bezwarunkowo wylaczony.
   ws.close(1008, 'Legacy relay zostal usuniety. Uzyj /v2/ws.');
-  return;
-
-  const state = {
-    authenticated: false,
-    connectionId: crypto.randomUUID(),
-    userId: null,
-    deviceId: null,
-    identityPublicKey: null,
-    limiter: new SlidingWindowRateLimiter(config.rateLimitMessages, config.rateLimitWindowMs),
-    remoteAddress: request.socket.remoteAddress
-  };
-
-  ws.on('message', (raw, isBinary) => {
-    if (!state.limiter.allow()) {
-      closeWithError(ws, 1008, 'Przekroczono limit liczby pakietow.');
-      return;
-    }
-
-    if (isBinary) {
-      closeWithError(ws, 1003, 'Serwer przyjmuje tylko JSON tekstowy.');
-      return;
-    }
-
-    const parsed = safeJsonParse(raw.toString('utf8'));
-    if (!parsed.ok) {
-      closeWithError(ws, 1007, parsed.error);
-      return;
-    }
-
-    const message = parsed.value;
-    if (!state.authenticated) {
-      handleHello(ws, state, message);
-      return;
-    }
-
-    switch (message.type) {
-      case 'relay':
-        handleRelay(ws, state, message);
-        break;
-      case 'signal':
-        handleSignal(ws, state, message);
-        break;
-      case 'presence_query':
-        handlePresenceQuery(ws, message);
-        break;
-      case 'directory_update':
-        handleDirectoryUpdate(ws, state, message);
-        break;
-      case 'directory_query':
-        handleDirectoryQuery(ws, state, message);
-        break;
-      case 'contact_request':
-        handleContactRequest(ws, state, message);
-        break;
-      case 'profile_update':
-        handleProfileUpdate(ws, state, message);
-        break;
-      case 'profile_query':
-        handleProfileQuery(ws, message);
-        break;
-      case 'ping':
-        send(ws, { v: 1, type: 'pong', serverTime: new Date().toISOString() });
-        break;
-      default:
-        send(ws, { v: 1, type: 'error', code: 'unknown_type', reason: 'Nieznany typ pakietu.' });
-    }
-  });
-
-  ws.on('close', () => {
-    unregisterClient(state);
-    audit('Rozlaczono klienta', { userId: state.userId, deviceId: state.deviceId });
-  });
-
-  ws.on('error', () => {
-    unregisterClient(state);
-  });
 });
 
 const heartbeat = setInterval(() => {

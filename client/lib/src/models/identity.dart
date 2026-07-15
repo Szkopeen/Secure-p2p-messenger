@@ -15,24 +15,16 @@ class IdentityKeyMaterial {
 }
 
 class RelaySettings {
-  const RelaySettings({
-    required this.serverUrl,
-    required this.relayToken,
-  });
+  const RelaySettings({required this.serverUrl});
 
   final String serverUrl;
-  final String relayToken;
 
   Map<String, dynamic> toJson() => {
         'serverUrl': serverUrl,
-        'relayToken': relayToken,
       };
 
   factory RelaySettings.fromJson(Map<String, dynamic> json) {
-    return RelaySettings(
-      serverUrl: json['serverUrl'] as String,
-      relayToken: json['relayToken'] as String,
-    );
+    return RelaySettings(serverUrl: json['serverUrl'] as String);
   }
 }
 

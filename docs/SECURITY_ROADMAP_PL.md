@@ -71,12 +71,10 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Klient blokuje downgrade podpisanego strumienia: jezeli dany strumien
   `rozmowa + nadawca + urzadzenie` przeszedl na podpisy urzadzen, kolejne
   wiadomosci bez poprawnego podpisu sa odrzucane.
-- Token sesji cloud WebSocket zostal przeniesiony z query stringu URL do
-  naglowka `Authorization: Bearer`. Backend domyslnie odrzuca
-  `/v2/ws?token=...`, a stary fallback mozna wlaczyc tylko jawnie przez
-  `ALLOW_WS_TOKEN_QUERY=true` na czas migracji.
-- Legacy relay wymaga `wss://` poza `localhost`, `127.0.0.1` i `::1`, zeby
-  `RELAY_TOKEN` nie byl wysylany plaintextem po sieci.
+- Token sesji cloud WebSocket nie jest juz wysylany ani w query stringu URL,
+  ani w naglowku handshake. Klient pobiera krotko zyjacy, jednorazowy ticket
+  przez HTTPS i zuzywa go jako pierwsza ramke WebSocket.
+- Legacy relay ze wspolnym sekretem zostal usuniety z aktywnej sciezki serwera.
 - Dodano podpisana, wersjonowana liste urzadzen konta:
   `deviceListEpoch`, `previousDeviceListHash`, aktywne urzadzenia,
   uniewaznione urzadzenia i podpis aktualna tozsamoscia Ed25519 konta.
