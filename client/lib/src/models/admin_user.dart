@@ -13,8 +13,9 @@ class AdminUsersResult {
     final rawUsers = json['users'] as List<dynamic>? ?? const [];
     return AdminUsersResult(
       users: rawUsers
-          .map((item) =>
-              AdminUser.fromJson((item as Map).cast<String, dynamic>()))
+          .map(
+            (item) => AdminUser.fromJson((item as Map).cast<String, dynamic>()),
+          )
           .toList(growable: false),
       serverTime: _parseDate(json['serverTime']),
       counts: AdminCounts.fromJson(

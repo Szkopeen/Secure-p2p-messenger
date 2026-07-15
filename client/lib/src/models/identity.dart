@@ -19,9 +19,7 @@ class RelaySettings {
 
   final String serverUrl;
 
-  Map<String, dynamic> toJson() => {
-        'serverUrl': serverUrl,
-      };
+  Map<String, dynamic> toJson() => {'serverUrl': serverUrl};
 
   factory RelaySettings.fromJson(Map<String, dynamic> json) {
     return RelaySettings(serverUrl: json['serverUrl'] as String);
@@ -29,10 +27,7 @@ class RelaySettings {
 }
 
 class AdminSettings {
-  const AdminSettings({
-    required this.serverUrl,
-    required this.adminToken,
-  });
+  const AdminSettings({required this.serverUrl, required this.adminToken});
 
   final String serverUrl;
   final String adminToken;

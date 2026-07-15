@@ -147,8 +147,11 @@ String _punycodeEncode(String input) {
           q = (q - t) ~/ (base - t);
         }
         output.write(_punycodeDigit(q));
-        bias =
-            _punycodeAdapt(delta, handledCount + 1, handledCount == basicCount);
+        bias = _punycodeAdapt(
+          delta,
+          handledCount + 1,
+          handledCount == basicCount,
+        );
         delta = 0;
         handledCount++;
       }

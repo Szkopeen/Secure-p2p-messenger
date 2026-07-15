@@ -380,9 +380,7 @@ class CloudApiClient {
             StateError('Polaczenie cloud zamknieto przed logowaniem.'),
           );
         }
-        _events.add(
-          const CloudProblem('Polaczenie cloud zostalo zamkniete.'),
-        );
+        _events.add(const CloudProblem('Polaczenie cloud zostalo zamkniete.'));
       },
     );
     _channel!.sink.add(jsonEncode({'type': 'auth', 'ticket': ticket}));
@@ -501,10 +499,7 @@ class CloudApiClient {
     }
   }
 
-  CloudAuthResult _authResult(
-    Map<String, dynamic> raw,
-    String serverUrl,
-  ) {
+  CloudAuthResult _authResult(Map<String, dynamic> raw, String serverUrl) {
     final user = asStringKeyMap(raw['user'], 'user');
     final session = CloudSession(
       serverUrl: serverUrl,

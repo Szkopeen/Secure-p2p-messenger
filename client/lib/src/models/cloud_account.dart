@@ -102,8 +102,9 @@ class CloudPublicUser {
         final value = entry.value;
         final certificateJson =
             value is Map ? value['deviceCertificate'] : null;
-        final certificate =
-            CloudDeviceCertificate.fromOptionalJson(certificateJson);
+        final certificate = CloudDeviceCertificate.fromOptionalJson(
+          certificateJson,
+        );
         if (certificate != null) {
           devices[entry.key.toString()] = certificate;
         }
@@ -120,8 +121,9 @@ class CloudPublicUser {
           json['keyAgreementPublicKeySignature'] as String? ?? '',
       deviceCertificates: devices,
       deviceList: CloudDeviceList.fromOptionalJson(json['deviceList']),
-      identityRotationProof:
-          IdentityRotationProof.fromOptionalJson(json['identityRotationProof']),
+      identityRotationProof: IdentityRotationProof.fromOptionalJson(
+        json['identityRotationProof'],
+      ),
     );
   }
 }
@@ -338,14 +340,18 @@ class CloudDeviceList {
           ? json['identityRotationEpoch'] as int
           : int.tryParse(json['identityRotationEpoch']?.toString() ?? '') ?? 0,
       devices: ((json['devices'] as List?) ?? const [])
-          .map((item) => CloudDeviceListEntry.fromJson(
-                (item as Map).cast<String, dynamic>(),
-              ))
+          .map(
+            (item) => CloudDeviceListEntry.fromJson(
+              (item as Map).cast<String, dynamic>(),
+            ),
+          )
           .toList(growable: false),
       revokedDevices: ((json['revokedDevices'] as List?) ?? const [])
-          .map((item) => CloudRevokedDevice.fromJson(
-                (item as Map).cast<String, dynamic>(),
-              ))
+          .map(
+            (item) => CloudRevokedDevice.fromJson(
+              (item as Map).cast<String, dynamic>(),
+            ),
+          )
           .toList(growable: false),
       signature: requiredString(json, 'signature'),
       updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? '') ??
@@ -446,8 +452,10 @@ class IdentityRotationProof {
       previousRotationHash: json['previousRotationHash'] as String? ?? '',
       oldIdentityPublicKey: requiredString(json, 'oldIdentityPublicKey'),
       newIdentityPublicKey: requiredString(json, 'newIdentityPublicKey'),
-      newKeyAgreementPublicKey:
-          requiredString(json, 'newKeyAgreementPublicKey'),
+      newKeyAgreementPublicKey: requiredString(
+        json,
+        'newKeyAgreementPublicKey',
+      ),
       signature: requiredString(json, 'signature'),
       newIdentityConfirmationSignature:
           json['newIdentityConfirmationSignature'] as String? ?? '',
@@ -488,8 +496,9 @@ class CloudConversation {
       memberIds: ((json['memberIds'] as List?) ?? const [])
           .map((item) => item.toString())
           .toList(growable: false),
-      memberKeys: ((json['memberKeys'] as Map?) ?? const {})
-          .map((key, value) => MapEntry(key.toString(), value)),
+      memberKeys: ((json['memberKeys'] as Map?) ?? const {}).map(
+        (key, value) => MapEntry(key.toString(), value),
+      ),
       keyEpoch: json['keyEpoch'] is int ? json['keyEpoch'] as int : 1,
       updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
@@ -612,10 +621,12 @@ class CloudVault {
       identityPublicKey: json['identityPublicKey'] as String? ?? '',
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String? ?? '',
-      identityRotationProof:
-          IdentityRotationProof.fromOptionalJson(json['identityRotationProof']),
-      conversationKeys: ((json['conversationKeys'] as Map?) ?? const {})
-          .map((key, value) => MapEntry(key.toString(), value.toString())),
+      identityRotationProof: IdentityRotationProof.fromOptionalJson(
+        json['identityRotationProof'],
+      ),
+      conversationKeys: ((json['conversationKeys'] as Map?) ?? const {}).map(
+        (key, value) => MapEntry(key.toString(), value.toString()),
+      ),
     );
   }
 

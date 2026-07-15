@@ -48,11 +48,8 @@ class GroupMemberInfo {
 }
 
 class PlainPayload {
-  const PlainPayload.text(
-    this.text, {
-    this.replyToMessageId,
-    this.replyPreview,
-  })  : type = PlainPayloadType.text,
+  const PlainPayload.text(this.text, {this.replyToMessageId, this.replyPreview})
+      : type = PlainPayloadType.text,
         fileName = null,
         mimeType = null,
         fileBytesBase64 = null,
@@ -93,10 +90,8 @@ class PlainPayload {
         groupAccepted = null,
         assert((groupId == null) == (groupMessageId == null));
 
-  const PlainPayload.retraction({
-    required this.targetMessageId,
-    this.groupId,
-  })  : type = PlainPayloadType.retraction,
+  const PlainPayload.retraction({required this.targetMessageId, this.groupId})
+      : type = PlainPayloadType.retraction,
         text = null,
         fileName = null,
         mimeType = null,
@@ -269,9 +264,8 @@ class PlainPayload {
         groupMemberInfos = null,
         groupAccepted = null;
 
-  const PlainPayload.groupLeave({
-    required this.groupId,
-  })  : type = PlainPayloadType.groupLeave,
+  const PlainPayload.groupLeave({required this.groupId})
+      : type = PlainPayloadType.groupLeave,
         text = null,
         fileName = null,
         mimeType = null,
@@ -420,7 +414,8 @@ class PlainPayload {
         final targetMessageId = json['targetMessageId'] as String?;
         if (targetMessageId == null || targetMessageId.isEmpty) {
           throw const FormatException(
-              'Brak identyfikatora cofanej wiadomosci.');
+            'Brak identyfikatora cofanej wiadomosci.',
+          );
         }
         return PlainPayload.retraction(
           targetMessageId: targetMessageId,
@@ -430,7 +425,8 @@ class PlainPayload {
         final targetMessageId = json['targetMessageId'] as String?;
         if (targetMessageId == null || targetMessageId.isEmpty) {
           throw const FormatException(
-              'Brak identyfikatora wiadomosci dla reakcji.');
+            'Brak identyfikatora wiadomosci dla reakcji.',
+          );
         }
         return PlainPayload.reaction(
           targetMessageId: targetMessageId,
@@ -441,7 +437,8 @@ class PlainPayload {
         final targetMessageId = json['targetMessageId'] as String?;
         if (targetMessageId == null || targetMessageId.isEmpty) {
           throw const FormatException(
-              'Brak identyfikatora wiadomosci dla przypiecia.');
+            'Brak identyfikatora wiadomosci dla przypiecia.',
+          );
         }
         return PlainPayload.pin(
           targetMessageId: targetMessageId,
@@ -452,18 +449,21 @@ class PlainPayload {
         final targetMessageId = json['targetMessageId'] as String?;
         if (targetMessageId == null || targetMessageId.isEmpty) {
           throw const FormatException(
-              'Brak identyfikatora wiadomosci dla potwierdzenia.');
+            'Brak identyfikatora wiadomosci dla potwierdzenia.',
+          );
         }
         return PlainPayload.receipt(
           targetMessageId: targetMessageId,
-          receiptKind:
-              ReceiptKind.values.byName(json['kind'] as String? ?? 'delivered'),
+          receiptKind: ReceiptKind.values.byName(
+            json['kind'] as String? ?? 'delivered',
+          ),
         );
       case 'edit':
         final targetMessageId = json['targetMessageId'] as String?;
         if (targetMessageId == null || targetMessageId.isEmpty) {
           throw const FormatException(
-              'Brak identyfikatora edytowanej wiadomosci.');
+            'Brak identyfikatora edytowanej wiadomosci.',
+          );
         }
         return PlainPayload.edit(
           targetMessageId: targetMessageId,
@@ -487,10 +487,14 @@ class PlainPayload {
                   .toList(growable: false),
           groupMemberInfos: ((json['memberProfiles'] as List?) ?? const [])
               .whereType<Map>()
-              .map((item) =>
-                  GroupMemberInfo.fromJson(item.cast<String, dynamic>()))
-              .where((item) =>
-                  item.userId.isNotEmpty && item.identityPublicKey.isNotEmpty)
+              .map(
+                (item) =>
+                    GroupMemberInfo.fromJson(item.cast<String, dynamic>()),
+              )
+              .where(
+                (item) =>
+                    item.userId.isNotEmpty && item.identityPublicKey.isNotEmpty,
+              )
               .toList(growable: false),
         );
       case 'groupInviteResponse':
@@ -584,13 +588,15 @@ class ChatMessage {
       contactId: json['contactId'] as String,
       direction: MessageDirection.values.byName(json['direction'] as String),
       payload: PlainPayload.fromJson(
-          (json['payload'] as Map).cast<String, dynamic>()),
+        (json['payload'] as Map).cast<String, dynamic>(),
+      ),
       createdAt: DateTime.parse(json['createdAt'] as String),
       status: MessageStatus.values.byName(json['status'] as String),
       retracted: json['retracted'] == true,
       pinned: json['pinned'] == true,
-      reactions: ((json['reactions'] as Map?) ?? const {})
-          .map((key, value) => MapEntry(key.toString(), value.toString())),
+      reactions: ((json['reactions'] as Map?) ?? const {}).map(
+        (key, value) => MapEntry(key.toString(), value.toString()),
+      ),
       editedAt: json['editedAt'] == null
           ? null
           : DateTime.parse(json['editedAt'] as String),

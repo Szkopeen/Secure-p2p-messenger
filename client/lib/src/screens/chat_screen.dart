@@ -274,7 +274,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                       ? const SizedBox.square(
                                           dimension: 18,
                                           child: CircularProgressIndicator(
-                                              strokeWidth: 2),
+                                            strokeWidth: 2,
+                                          ),
                                         )
                                       : const Icon(Icons.send),
                                 ),
@@ -290,21 +291,22 @@ class _ChatScreenState extends State<ChatScreen> {
                   Positioned.fill(
                     child: IgnorePointer(
                       child: Container(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .primary
-                            .withValues(alpha: 0.12),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.12),
                         child: Center(
                           child: DecoratedBox(
                             decoration: BoxDecoration(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .surfaceContainerHighest,
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerHighest,
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: const Padding(
                               padding: EdgeInsets.symmetric(
-                                  horizontal: 24, vertical: 16),
+                                horizontal: 24,
+                                vertical: 16,
+                              ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
@@ -565,8 +567,10 @@ class _ChatScreenState extends State<ChatScreen> {
                             await widget.appState.inviteContactsToGroup(
                               group: group,
                               contacts: selectableContacts
-                                  .where((contact) =>
-                                      selected.contains(contact.userId))
+                                  .where(
+                                    (contact) =>
+                                        selected.contains(contact.userId),
+                                  )
                                   .toList(growable: false),
                             );
                             if (dialogContext.mounted) {
@@ -665,8 +669,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 subtitle: Text(
-                  TimeOfDay.fromDateTime(message.createdAt.toLocal())
-                      .format(context),
+                  TimeOfDay.fromDateTime(
+                    message.createdAt.toLocal(),
+                  ).format(context),
                 ),
                 onTap: () {
                   Navigator.of(context).pop(message.id);
@@ -891,9 +896,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showError(Object error) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(error.toString())),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(error.toString())));
   }
 }
 
@@ -934,11 +939,7 @@ class _ReplyComposerPreview extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(label, style: Theme.of(context).textTheme.labelMedium),
-                  Text(
-                    preview,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(preview, maxLines: 2, overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
@@ -955,10 +956,7 @@ class _ReplyComposerPreview extends StatelessWidget {
 }
 
 class _ReplySnippet extends StatelessWidget {
-  const _ReplySnippet({
-    required this.preview,
-    required this.onTap,
-  });
+  const _ReplySnippet({required this.preview, required this.onTap});
 
   final String preview;
   final VoidCallback onTap;
@@ -1249,8 +1247,9 @@ class _MessageBubble extends StatelessWidget {
   }
 
   String _statusLine(ChatMessage message, BuildContext context) {
-    final time =
-        TimeOfDay.fromDateTime(message.createdAt.toLocal()).format(context);
+    final time = TimeOfDay.fromDateTime(
+      message.createdAt.toLocal(),
+    ).format(context);
     final transport =
         message.transport == null ? '' : ' / ${message.transport}';
     final edited = message.editedAt == null ? '' : ' / edytowano';
@@ -1297,7 +1296,9 @@ class _MessageBubble extends StatelessWidget {
   }
 
   Future<void> _handleAction(
-      BuildContext context, _MessageAction action) async {
+    BuildContext context,
+    _MessageAction action,
+  ) async {
     try {
       switch (action) {
         case _MessageAction.reply:
@@ -1339,9 +1340,9 @@ class _MessageBubble extends StatelessWidget {
       }
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -1405,10 +1406,7 @@ class _MessageBubble extends StatelessWidget {
                 IconButton.filledTonal(
                   tooltip: emoji,
                   onPressed: () => Navigator.of(context).pop(emoji),
-                  icon: Text(
-                    emoji,
-                    style: const TextStyle(fontSize: 22),
-                  ),
+                  icon: Text(emoji, style: const TextStyle(fontSize: 22)),
                 ),
             ],
           ),
@@ -1487,10 +1485,7 @@ class _MessageActionsButton extends StatelessWidget {
         if (canEdit)
           const PopupMenuItem(
             value: _MessageAction.edit,
-            child: _MessageMenuItem(
-              icon: Icons.edit_outlined,
-              label: 'Edytuj',
-            ),
+            child: _MessageMenuItem(icon: Icons.edit_outlined, label: 'Edytuj'),
           ),
         if (canReact)
           PopupMenuItem(
@@ -1522,10 +1517,7 @@ class _MessageActionsButton extends StatelessWidget {
 }
 
 class _MessageMenuItem extends StatelessWidget {
-  const _MessageMenuItem({
-    required this.icon,
-    required this.label,
-  });
+  const _MessageMenuItem({required this.icon, required this.label});
 
   final IconData icon;
   final String label;
@@ -1534,11 +1526,7 @@ class _MessageMenuItem extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 18),
-        const SizedBox(width: 10),
-        Text(label),
-      ],
+      children: [Icon(icon, size: 18), const SizedBox(width: 10), Text(label)],
     );
   }
 }
@@ -1598,9 +1586,9 @@ class _RetractedMessageView extends StatelessWidget {
             outbound
                 ? 'Usunieto wyslana wiadomosc.'
                 : 'Wiadomosc zostala usunieta.',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  fontStyle: FontStyle.italic,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic),
           ),
         ),
       ],
@@ -1609,10 +1597,7 @@ class _RetractedMessageView extends StatelessWidget {
 }
 
 class _PayloadView extends StatelessWidget {
-  const _PayloadView({
-    required this.payload,
-    required this.onReplyTap,
-  });
+  const _PayloadView({required this.payload, required this.onReplyTap});
 
   final PlainPayload payload;
   final ValueChanged<String> onReplyTap;
@@ -1627,8 +1612,9 @@ class _PayloadView extends StatelessWidget {
       PlainPayloadType.receipt => const Text('Potwierdzono wiadomosc.'),
       PlainPayloadType.edit => const Text('Edytowano wiadomosc.'),
       PlainPayloadType.groupInvite => const Text('Zaproszenie do grupy.'),
-      PlainPayloadType.groupInviteResponse =>
-        const Text('Odpowiedz na zaproszenie do grupy.'),
+      PlainPayloadType.groupInviteResponse => const Text(
+          'Odpowiedz na zaproszenie do grupy.',
+        ),
       PlainPayloadType.groupText => SelectableText(payload.text ?? ''),
       PlainPayloadType.groupLeave => const Text('Uzytkownik wyszedl z grupy.'),
       PlainPayloadType.file => Column(
@@ -1875,9 +1861,9 @@ class _VideoPreview extends StatelessWidget {
       );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     } finally {
       if (path != null) {
         await deleteTempMediaFile(path);
@@ -1965,10 +1951,7 @@ class _ImagePreview extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 320,
-            maxHeight: 240,
-          ),
+          constraints: const BoxConstraints(maxWidth: 320, maxHeight: 240),
           child: Image.memory(
             bytes,
             fit: BoxFit.contain,

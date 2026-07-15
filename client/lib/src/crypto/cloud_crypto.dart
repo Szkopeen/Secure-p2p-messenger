@@ -36,10 +36,7 @@ class CloudDecryptedMessage {
 }
 
 class CloudIdentityRotation {
-  const CloudIdentityRotation({
-    required this.vault,
-    required this.proof,
-  });
+  const CloudIdentityRotation({required this.vault, required this.proof});
 
   final CloudVault vault;
   final IdentityRotationProof proof;
@@ -425,16 +422,18 @@ class CloudCrypto {
     final identityRotationEpoch =
         vault.identityRotationProof?.rotationEpoch ?? 0;
     final signature = await _ed25519.sign(
-      canonicalJsonBytes(_deviceListPayload(
-        accountId: accountId,
-        serverOrigin: serverOrigin,
-        deviceListEpoch: deviceListEpoch,
-        previousDeviceListHash: previousDeviceListHash,
-        identityRotationEpoch: identityRotationEpoch,
-        devices: devices,
-        revokedDevices: revokedDevices,
-        updatedAt: updatedAt,
-      )),
+      canonicalJsonBytes(
+        _deviceListPayload(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          deviceListEpoch: deviceListEpoch,
+          previousDeviceListHash: previousDeviceListHash,
+          identityRotationEpoch: identityRotationEpoch,
+          devices: devices,
+          revokedDevices: revokedDevices,
+          updatedAt: updatedAt,
+        ),
+      ),
       keyPair: SimpleKeyPairData(
         unb64(vault.identityPrivateKey),
         publicKey: SimplePublicKey(
@@ -723,11 +722,13 @@ class CloudCrypto {
   Uint8List _deviceMessageDigest(Map<String, dynamic> unsignedEnvelope) {
     return Uint8List.fromList(
       crypto_hash.sha256
-          .convert(canonicalJsonBytes({
-            'v': 1,
-            'protocol': deviceMessageProtocol,
-            'envelope': unsignedEnvelope,
-          }))
+          .convert(
+            canonicalJsonBytes({
+              'v': 1,
+              'protocol': deviceMessageProtocol,
+              'envelope': unsignedEnvelope,
+            }),
+          )
           .bytes,
     );
   }
@@ -792,7 +793,8 @@ class CloudCrypto {
       aad: utf8Bytes(vaultAad),
     );
     return CloudVault.fromJson(
-        jsonDecode(utf8.decode(clear)) as Map<String, dynamic>);
+      jsonDecode(utf8.decode(clear)) as Map<String, dynamic>,
+    );
   }
 
   Future<String> newConversationKey() async {
@@ -847,8 +849,10 @@ class CloudCrypto {
       canonicalJsonBytes(unsigned),
       keyPair: SimpleKeyPairData(
         unb64(vault.identityPrivateKey),
-        publicKey: SimplePublicKey(unb64(vault.identityPublicKey),
-            type: KeyPairType.ed25519),
+        publicKey: SimplePublicKey(
+          unb64(vault.identityPublicKey),
+          type: KeyPairType.ed25519,
+        ),
         type: KeyPairType.ed25519,
       ),
     );
@@ -870,13 +874,15 @@ class CloudCrypto {
       ),
       type: KeyPairType.ed25519,
     );
-    final payload = utf8Bytes(jsonEncode({
-      'protocol': 'secure-chat/login-challenge/v1',
-      'challenge': challenge,
-      'userId': userId,
-      'deviceId': deviceId,
-      'expiresAtMs': expiresAtMs,
-    }));
+    final payload = utf8Bytes(
+      jsonEncode({
+        'protocol': 'secure-chat/login-challenge/v1',
+        'challenge': challenge,
+        'userId': userId,
+        'deviceId': deviceId,
+        'expiresAtMs': expiresAtMs,
+      }),
+    );
     final signature = await _ed25519.sign(payload, keyPair: keyPair);
     return b64(signature.bytes);
   }
@@ -924,11 +930,7 @@ class CloudCrypto {
       nonce: unb64(requiredString(envelope, 'nonce')),
       mac: Mac(unb64(requiredString(envelope, 'mac'))),
     );
-    final clear = await _aead.decrypt(
-      box,
-      secretKey: wrappingKey,
-      aad: aad,
-    );
+    final clear = await _aead.decrypt(box, secretKey: wrappingKey, aad: aad);
     return b64(clear);
   }
 
@@ -957,12 +959,14 @@ class CloudCrypto {
       'contentType': payload.type.name,
       'createdAt': createdAt,
     };
-    final clear = utf8Bytes(canonicalJson({
-      'v': 1,
-      'messageId': messageId,
-      'createdAt': createdAt,
-      'payload': payload.toJson(),
-    }));
+    final clear = utf8Bytes(
+      canonicalJson({
+        'v': 1,
+        'messageId': messageId,
+        'createdAt': createdAt,
+        'payload': payload.toJson(),
+      }),
+    );
     aad['plaintextBytes'] = clear.length;
     final compressed = ZLibEncoder().encode(clear);
     final nonce = secureRandomBytes(12);
@@ -1002,22 +1006,26 @@ class CloudCrypto {
 
   String get cloudMessageGenesisHash {
     return crypto_hash.sha256
-        .convert(canonicalJsonBytes({
-          'v': 1,
-          'protocol': messageChainProtocol,
-          'type': 'genesis',
-        }))
+        .convert(
+          canonicalJsonBytes({
+            'v': 1,
+            'protocol': messageChainProtocol,
+            'type': 'genesis',
+          }),
+        )
         .toString();
   }
 
   String cloudMessageHash(Map<String, dynamic> payload) {
     return crypto_hash.sha256
-        .convert(canonicalJsonBytes({
-          'v': 1,
-          'protocol': messageChainProtocol,
-          'type': 'message',
-          'message': payload,
-        }))
+        .convert(
+          canonicalJsonBytes({
+            'v': 1,
+            'protocol': messageChainProtocol,
+            'type': 'message',
+            'message': payload,
+          }),
+        )
         .toString();
   }
 

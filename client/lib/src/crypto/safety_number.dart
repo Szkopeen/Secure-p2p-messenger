@@ -19,10 +19,7 @@ class SafetyNumber {
     }
 
     final participants = [
-      {
-        'userId': ownUserId,
-        'identityPublicKey': ownIdentityPublicKey,
-      },
+      {'userId': ownUserId, 'identityPublicKey': ownIdentityPublicKey},
       {
         'userId': contactUserId,
         'identityPublicKey': contactIdentityPublicKey,
@@ -34,11 +31,13 @@ class SafetyNumber {
       });
 
     final digest = crypto_hash.sha256
-        .convert(canonicalJsonBytes({
-          'v': 1,
-          'protocol': 'secure-p2p-safety-number/v1',
-          'participants': participants,
-        }))
+        .convert(
+          canonicalJsonBytes({
+            'v': 1,
+            'protocol': 'secure-p2p-safety-number/v1',
+            'participants': participants,
+          }),
+        )
         .toString();
 
     return RegExp('.{1,5}')

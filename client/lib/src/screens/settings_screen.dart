@@ -16,9 +16,7 @@ class SettingsScreen extends StatelessWidget {
       builder: (context, _) {
         final publicKey = appState.ownPublicKey ?? '';
         return Scaffold(
-          appBar: AppBar(
-            title: const Text('Ustawienia'),
-          ),
+          appBar: AppBar(title: const Text('Ustawienia')),
           body: ListView(
             padding: const EdgeInsets.all(16),
             children: [
@@ -33,10 +31,7 @@ class SettingsScreen extends StatelessWidget {
                   ListTile(
                     leading: const Icon(Icons.vpn_key_outlined),
                     title: const Text('Klucz publiczny'),
-                    subtitle: SelectableText(
-                      publicKey,
-                      maxLines: 2,
-                    ),
+                    subtitle: SelectableText(publicKey, maxLines: 2),
                     trailing: IconButton(
                       tooltip: 'Kopiuj',
                       onPressed: publicKey.isEmpty
@@ -174,13 +169,15 @@ class SettingsScreen extends StatelessWidget {
                     leading: Icon(Icons.lock_outline),
                     title: Text('Historia lokalna'),
                     subtitle: Text(
-                        'Konto i wiadomosci sa zapisane lokalnie w szyfrowanym archiwum.'),
+                      'Konto i wiadomosci sa zapisane lokalnie w szyfrowanym archiwum.',
+                    ),
                   ),
                   ListTile(
                     leading: const Icon(Icons.delete_forever_outlined),
                     title: const Text('Wyczysc dane lokalne'),
                     subtitle: const Text(
-                        'Usuwa konto, kontakty, sesje i historie z tego urzadzenia.'),
+                      'Usuwa konto, kontakty, sesje i historie z tego urzadzenia.',
+                    ),
                     onTap: () => _confirmWipe(context),
                   ),
                 ],
@@ -197,9 +194,9 @@ class SettingsScreen extends StatelessWidget {
       await appState.setProfileImage();
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -208,9 +205,9 @@ class SettingsScreen extends StatelessWidget {
       await appState.clearProfileImage();
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -227,9 +224,9 @@ class SettingsScreen extends StatelessWidget {
       );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -264,9 +261,9 @@ class SettingsScreen extends StatelessWidget {
       );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -325,9 +322,9 @@ class SettingsScreen extends StatelessWidget {
       );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -407,10 +404,7 @@ class _DeviceTile extends StatelessWidget {
 }
 
 class _SettingsSection extends StatelessWidget {
-  const _SettingsSection({
-    required this.title,
-    required this.children,
-  });
+  const _SettingsSection({required this.title, required this.children});
 
   final String title;
   final List<Widget> children;
@@ -421,19 +415,14 @@ class _SettingsSection extends StatelessWidget {
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.outlineVariant,
-        ),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-            child: Text(
-              title,
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
+            child: Text(title, style: Theme.of(context).textTheme.titleSmall),
           ),
           ...children,
         ],

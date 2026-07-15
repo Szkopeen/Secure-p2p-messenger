@@ -29,10 +29,7 @@ class UpdateSignatureVerifier {
     final payload = asStringKeyMap(manifest['latest'], 'latest');
     final signatureBytes = unb64(requiredString(signature, 'signature'));
     final valid = await Ed25519().verify(
-      canonicalJsonBytes({
-        'protocol': protocol,
-        'latest': payload,
-      }),
+      canonicalJsonBytes({'protocol': protocol, 'latest': payload}),
       signature: Signature(
         signatureBytes,
         publicKey: SimplePublicKey(

@@ -123,9 +123,12 @@ class _SetupScreenState extends State<SetupScreen> {
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 12),
-                    Text(_error!,
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error)),
+                    Text(
+                      _error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
                   ],
                   const SizedBox(height: 20),
                   _ChatControlPanel(onCopy: _copyUrl),
@@ -181,9 +184,9 @@ class _SetupScreenState extends State<SetupScreen> {
   Future<void> _copyUrl(String url) async {
     await Clipboard.setData(ClipboardData(text: url));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Skopiowano link.')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Skopiowano link.')));
   }
 }
 
@@ -211,8 +214,10 @@ class _ChatControlPanel extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.policy_outlined,
-                    color: Theme.of(context).colorScheme.primary),
+                Icon(
+                  Icons.policy_outlined,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
                 const SizedBox(width: 10),
                 Text(
                   'Chat Control - status prawny',

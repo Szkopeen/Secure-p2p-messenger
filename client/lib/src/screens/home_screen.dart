@@ -91,9 +91,14 @@ class HomeScreen extends StatelessWidget {
                     width: double.infinity,
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
-                      child: Text(appState.status!,
-                          maxLines: 2, overflow: TextOverflow.ellipsis),
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: Text(
+                        appState.status!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
                 ),
@@ -113,7 +118,8 @@ class HomeScreen extends StatelessWidget {
                           ],
                           if (contactInvites.isNotEmpty) ...[
                             const _SectionHeader(
-                                title: 'Zaproszenia do kontaktow'),
+                              title: 'Zaproszenia do kontaktow',
+                            ),
                             for (final invite in contactInvites)
                               _ContactInviteTile(
                                 appState: appState,
@@ -212,8 +218,9 @@ class HomeScreen extends StatelessWidget {
                   children: [
                     TextField(
                       controller: name,
-                      decoration:
-                          const InputDecoration(labelText: 'Nazwa grupy'),
+                      decoration: const InputDecoration(
+                        labelText: 'Nazwa grupy',
+                      ),
                     ),
                     const SizedBox(height: 12),
                     if (selectableContacts.isEmpty)
@@ -269,8 +276,10 @@ class HomeScreen extends StatelessWidget {
                       : () async {
                           try {
                             final members = selectableContacts
-                                .where((contact) =>
-                                    selected.contains(contact.userId))
+                                .where(
+                                  (contact) =>
+                                      selected.contains(contact.userId),
+                                )
                                 .toList(growable: false);
                             await appState.createGroup(
                               name: name.text,
@@ -355,10 +364,7 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Text(
-        title,
-        style: Theme.of(context).textTheme.labelLarge,
-      ),
+      child: Text(title, style: Theme.of(context).textTheme.labelLarge),
     );
   }
 }
@@ -391,11 +397,7 @@ class _ContactTile extends StatelessWidget {
         ),
       ),
       title: Text(contact.displayName),
-      subtitle: Text(
-        subtitle,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
+      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
       trailing: Wrap(
         spacing: 4,
         crossAxisAlignment: WrapCrossAlignment.center,
@@ -511,10 +513,7 @@ class _ContactTile extends StatelessWidget {
 }
 
 class _CloudUserTile extends StatelessWidget {
-  const _CloudUserTile({
-    required this.appState,
-    required this.user,
-  });
+  const _CloudUserTile({required this.appState, required this.user});
 
   final AppState appState;
   final CloudPublicUser user;
@@ -525,11 +524,7 @@ class _CloudUserTile extends StatelessWidget {
         ? '?'
         : user.displayName.substring(0, 1).toUpperCase();
     return ListTile(
-      leading: _AvatarView(
-        bytesBase64: null,
-        fallback: initial,
-        online: true,
-      ),
+      leading: _AvatarView(bytesBase64: null, fallback: initial, online: true),
       title: Text(user.displayName),
       subtitle: Text(user.username),
       trailing: FilledButton.icon(
@@ -539,9 +534,9 @@ class _CloudUserTile extends StatelessWidget {
             if (context.mounted) Navigator.of(context).pop();
           } catch (error) {
             if (!context.mounted) return;
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(error.toString())),
-            );
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(error.toString())));
           }
         },
         icon: const Icon(Icons.chat_outlined),
@@ -552,10 +547,7 @@ class _CloudUserTile extends StatelessWidget {
 }
 
 class _ContactInviteTile extends StatelessWidget {
-  const _ContactInviteTile({
-    required this.appState,
-    required this.invite,
-  });
+  const _ContactInviteTile({required this.appState, required this.invite});
 
   final AppState appState;
   final ContactInvite invite;
@@ -614,8 +606,10 @@ class _GroupInviteTile extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Icon(Icons.mark_email_unread_outlined,
-                      color: colors.onPrimaryContainer),
+                  Icon(
+                    Icons.mark_email_unread_outlined,
+                    color: colors.onPrimaryContainer,
+                  ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
@@ -684,16 +678,10 @@ class _GroupTile extends StatelessWidget {
       leading: Badge.count(
         count: unread,
         isLabelVisible: unread > 0,
-        child: const CircleAvatar(
-          child: Icon(Icons.groups_outlined),
-        ),
+        child: const CircleAvatar(child: Icon(Icons.groups_outlined)),
       ),
       title: Text(group.name),
-      subtitle: Text(
-        subtitle,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
+      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
       trailing: group.pendingInvite
           ? Wrap(
               spacing: 4,
@@ -725,10 +713,7 @@ class _GroupTile extends StatelessWidget {
 }
 
 class _UnreadBadge extends StatelessWidget {
-  const _UnreadBadge({
-    required this.count,
-    required this.child,
-  });
+  const _UnreadBadge({required this.count, required this.child});
 
   final int count;
   final Widget child;
@@ -771,8 +756,10 @@ class _IdentityPanel extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(displayName,
-                      style: Theme.of(context).textTheme.titleMedium),
+                  Text(
+                    displayName,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                   SelectableText(
                     publicKey,
                     maxLines: 1,
@@ -809,9 +796,9 @@ class _IdentityPanel extends StatelessWidget {
       await appState.setProfileImage();
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -820,9 +807,9 @@ class _IdentityPanel extends StatelessWidget {
       await appState.clearProfileImage();
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 }

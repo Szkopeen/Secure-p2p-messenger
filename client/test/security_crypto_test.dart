@@ -33,30 +33,18 @@ void main() {
 
   group('Origin serwera', () {
     test('jest kanonizowany przed uzyciem w podpisie', () {
-      expect(
-        canonicalCloudOrigin('https://CHAT.SZKPN.PL/'),
-        serverOrigin,
-      );
+      expect(canonicalCloudOrigin('https://CHAT.SZKPN.PL/'), serverOrigin);
       expect(
         canonicalCloudOrigin('https://chat.szkpn.pl:443/api?x=1#fragment'),
         serverOrigin,
       );
-      expect(
-        canonicalCloudOrigin('wss://chat.szkpn.pl/v2/ws'),
-        serverOrigin,
-      );
+      expect(canonicalCloudOrigin('wss://chat.szkpn.pl/v2/ws'), serverOrigin);
       expect(
         canonicalCloudOrigin('https://chat.szkpn.pl:8443/api'),
         'https://chat.szkpn.pl:8443',
       );
-      expect(
-        canonicalCloudOrigin('https://chat.szkpn.pl.'),
-        serverOrigin,
-      );
-      expect(
-        canonicalCloudOrigin('https://chat.szkpn.pl:443'),
-        serverOrigin,
-      );
+      expect(canonicalCloudOrigin('https://chat.szkpn.pl.'), serverOrigin);
+      expect(canonicalCloudOrigin('https://chat.szkpn.pl:443'), serverOrigin);
       expect(
         canonicalCloudOrigin('https://chat.szkpn.pl:444'),
         'https://chat.szkpn.pl:444',
@@ -81,10 +69,7 @@ void main() {
         () => canonicalCloudOrigin('https://user:password@chat.szkpn.pl'),
         throwsArgumentError,
       );
-      expect(
-        () => canonicalCloudOrigin('/relative/path'),
-        throwsArgumentError,
-      );
+      expect(() => canonicalCloudOrigin('/relative/path'), throwsArgumentError);
       expect(
         () => canonicalCloudOrigin('ftp://chat.szkpn.pl'),
         throwsArgumentError,
@@ -179,71 +164,75 @@ void main() {
   });
 
   group('Anty-replay wiadomosci', () {
-    test('licznik i hash poprzedniej wiadomosci sa chronione przez AAD',
-        () async {
-      final crypto = CloudCrypto();
-      final conversationKey = await crypto.newConversationKey();
-      final vault = await crypto.createVault(
-        accountId: accountId,
-        serverOrigin: serverOrigin,
-      );
-      final deviceKey = await crypto.createDeviceKeyMaterial(
-        vault: vault,
-        accountId: accountId,
-        serverOrigin: serverOrigin,
-        deviceId: 'device-a',
-      );
-      final first = await crypto.encryptMessage(
-        conversationId: 'conversation-1',
-        senderUserId: accountId,
-        senderDeviceId: 'device-a',
-        messageCounter: 1,
-        previousMessageHash: crypto.cloudMessageGenesisHash,
-        conversationKey: conversationKey,
-        deviceKey: deviceKey,
-        payload: const PlainPayload.text('pierwsza'),
-      );
-      final firstHash = crypto.cloudMessageHash(first);
-      final second = await crypto.encryptMessage(
-        conversationId: 'conversation-1',
-        senderUserId: accountId,
-        senderDeviceId: 'device-a',
-        messageCounter: 2,
-        previousMessageHash: firstHash,
-        conversationKey: conversationKey,
-        deviceKey: deviceKey,
-        payload: const PlainPayload.text('druga'),
-      );
-
-      final decryptedFirst = await crypto.decryptMessage(
-        conversationId: 'conversation-1',
-        conversationKey: conversationKey,
-        payload: first,
-      );
-      final decryptedSecond = await crypto.decryptMessage(
-        conversationId: 'conversation-1',
-        conversationKey: conversationKey,
-        payload: second,
-      );
-
-      expect(decryptedFirst.senderDeviceId, 'device-a');
-      expect(decryptedFirst.messageCounter, 1);
-      expect(
-          decryptedFirst.previousMessageHash, crypto.cloudMessageGenesisHash);
-      expect(decryptedFirst.messageHash, firstHash);
-      expect(decryptedSecond.messageCounter, 2);
-      expect(decryptedSecond.previousMessageHash, firstHash);
-      expect(
-        await crypto.verifyDeviceMessageSignature(
+    test(
+      'licznik i hash poprzedniej wiadomosci sa chronione przez AAD',
+      () async {
+        final crypto = CloudCrypto();
+        final conversationKey = await crypto.newConversationKey();
+        final vault = await crypto.createVault(
           accountId: accountId,
           serverOrigin: serverOrigin,
-          identityPublicKey: vault.identityPublicKey,
+        );
+        final deviceKey = await crypto.createDeviceKeyMaterial(
+          vault: vault,
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+          deviceId: 'device-a',
+        );
+        final first = await crypto.encryptMessage(
+          conversationId: 'conversation-1',
+          senderUserId: accountId,
           senderDeviceId: 'device-a',
+          messageCounter: 1,
+          previousMessageHash: crypto.cloudMessageGenesisHash,
+          conversationKey: conversationKey,
+          deviceKey: deviceKey,
+          payload: const PlainPayload.text('pierwsza'),
+        );
+        final firstHash = crypto.cloudMessageHash(first);
+        final second = await crypto.encryptMessage(
+          conversationId: 'conversation-1',
+          senderUserId: accountId,
+          senderDeviceId: 'device-a',
+          messageCounter: 2,
+          previousMessageHash: firstHash,
+          conversationKey: conversationKey,
+          deviceKey: deviceKey,
+          payload: const PlainPayload.text('druga'),
+        );
+
+        final decryptedFirst = await crypto.decryptMessage(
+          conversationId: 'conversation-1',
+          conversationKey: conversationKey,
           payload: first,
-        ),
-        isTrue,
-      );
-    });
+        );
+        final decryptedSecond = await crypto.decryptMessage(
+          conversationId: 'conversation-1',
+          conversationKey: conversationKey,
+          payload: second,
+        );
+
+        expect(decryptedFirst.senderDeviceId, 'device-a');
+        expect(decryptedFirst.messageCounter, 1);
+        expect(
+          decryptedFirst.previousMessageHash,
+          crypto.cloudMessageGenesisHash,
+        );
+        expect(decryptedFirst.messageHash, firstHash);
+        expect(decryptedSecond.messageCounter, 2);
+        expect(decryptedSecond.previousMessageHash, firstHash);
+        expect(
+          await crypto.verifyDeviceMessageSignature(
+            accountId: accountId,
+            serverOrigin: serverOrigin,
+            identityPublicKey: vault.identityPublicKey,
+            senderDeviceId: 'device-a',
+            payload: first,
+          ),
+          isTrue,
+        );
+      },
+    );
 
     test('zmiana licznika w AAD uniewaznia szyfrogram', () async {
       final crypto = CloudCrypto();
@@ -658,7 +647,9 @@ void main() {
       );
 
       expect(
-          rotation.vault.identityPublicKey, isNot(oldVault.identityPublicKey));
+        rotation.vault.identityPublicKey,
+        isNot(oldVault.identityPublicKey),
+      );
       expect(
         rotation.vault.keyAgreementPublicKey,
         oldVault.keyAgreementPublicKey,
@@ -787,38 +778,40 @@ void main() {
       );
     });
 
-    test('rotacja odrzuca alternatywna galaz po zaakceptowaniu pierwszej',
-        () async {
-      final crypto = CloudCrypto();
-      final initialVault = await crypto.createVault(
-        accountId: accountId,
-        serverOrigin: serverOrigin,
-      );
-      final branchA = await crypto.rotateIdentity(
-        vault: initialVault,
-        accountId: accountId,
-        serverOrigin: serverOrigin,
-      );
-      final branchB = await crypto.rotateIdentity(
-        vault: initialVault,
-        accountId: accountId,
-        serverOrigin: serverOrigin,
-      );
+    test(
+      'rotacja odrzuca alternatywna galaz po zaakceptowaniu pierwszej',
+      () async {
+        final crypto = CloudCrypto();
+        final initialVault = await crypto.createVault(
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+        );
+        final branchA = await crypto.rotateIdentity(
+          vault: initialVault,
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+        );
+        final branchB = await crypto.rotateIdentity(
+          vault: initialVault,
+          accountId: accountId,
+          serverOrigin: serverOrigin,
+        );
 
-      expect(
-        crypto.isNextIdentityRotation(
-          previousProof: null,
-          nextProof: branchA.proof,
-        ),
-        isTrue,
-      );
-      expect(
-        crypto.isNextIdentityRotation(
-          previousProof: branchA.proof,
-          nextProof: branchB.proof,
-        ),
-        isFalse,
-      );
-    });
+        expect(
+          crypto.isNextIdentityRotation(
+            previousProof: null,
+            nextProof: branchA.proof,
+          ),
+          isTrue,
+        );
+        expect(
+          crypto.isNextIdentityRotation(
+            previousProof: branchA.proof,
+            nextProof: branchB.proof,
+          ),
+          isFalse,
+        );
+      },
+    );
   });
 }

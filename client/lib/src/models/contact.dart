@@ -50,10 +50,12 @@ class Contact {
       signingPublicKey: json['signingPublicKey'] as String?,
       keyAgreementPublicKeySignature:
           json['keyAgreementPublicKeySignature'] as String?,
-      identityRotationProof: (json['identityRotationProof'] as Map?)
-          ?.map((key, value) => MapEntry(key.toString(), value)),
-      deviceList: (json['deviceList'] as Map?)
-          ?.map((key, value) => MapEntry(key.toString(), value)),
+      identityRotationProof: (json['identityRotationProof'] as Map?)?.map(
+        (key, value) => MapEntry(key.toString(), value),
+      ),
+      deviceList: (json['deviceList'] as Map?)?.map(
+        (key, value) => MapEntry(key.toString(), value),
+      ),
       avatarMimeType: json['avatarMimeType'] as String?,
       avatarBytesBase64: json['avatarBytes'] as String?,
       profileUpdatedAt: profileUpdatedAtRaw == null

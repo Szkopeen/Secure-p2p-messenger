@@ -38,10 +38,8 @@ import 'storage/secure_store.dart';
 enum _CloudReplayDecision { accept, legacy, buffer }
 
 class AppState extends ChangeNotifier {
-  AppState({
-    SecureStore? store,
-    CryptoService? crypto,
-  })  : _store = store ?? SecureStore(),
+  AppState({SecureStore? store, CryptoService? crypto})
+      : _store = store ?? SecureStore(),
         _crypto = crypto ?? CryptoService() {
     _messageArchive = MessageArchive(secureStore: _store);
   }
@@ -252,7 +250,8 @@ class AppState extends ChangeNotifier {
     required String legacyRelaySecret,
   }) async {
     throw UnsupportedError(
-        'Stary tryb relay zostal usuniety. Uzyj konta cloud.');
+      'Stary tryb relay zostal usuniety. Uzyj konta cloud.',
+    );
   }
 
   Future<void> registerCloudAccount({
@@ -342,7 +341,8 @@ class AppState extends ChangeNotifier {
               pinnedHash.isNotEmpty &&
               pinnedHash != loginProbe.vaultHash)) {
         throw StateError(
-            'Serwer probuje cofnac lub sforkowac zaszyfrowany vault.');
+          'Serwer probuje cofnac lub sforkowac zaszyfrowany vault.',
+        );
       }
     }
     vault = await _cloudCrypto.ensureSignedIdentity(
@@ -536,8 +536,10 @@ class AppState extends ChangeNotifier {
         .map((item) => Contact.fromJson((item as Map).cast<String, dynamic>()))
         .toList(growable: false);
     final importedGroups = ((clear['groups'] as List?) ?? const [])
-        .map((item) =>
-            GroupConversation.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) =>
+              GroupConversation.fromJson((item as Map).cast<String, dynamic>()),
+        )
         .toList(growable: false);
     final importedDirectoryEnabled = clear['directoryEnabled'] == true;
     final profileJson = clear['ownProfile'];
@@ -546,8 +548,9 @@ class AppState extends ChangeNotifier {
         : UserProfile.fromJson((profileJson as Map).cast<String, dynamic>());
     final importedLocalArchiveKey = clear['localArchiveKey'] as String?;
     final importedMessages = ((clear['messages'] as List?) ?? const [])
-        .map((item) =>
-            ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) => ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
+        )
         .toList(growable: false);
 
     await _relaySubscription?.cancel();
@@ -733,7 +736,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> connectRelay() async {
     throw UnsupportedError(
-        'Stary tryb relay zostal usuniety. Uzyj konta cloud.');
+      'Stary tryb relay zostal usuniety. Uzyj konta cloud.',
+    );
   }
 
   Future<void> connectCloud() async {
@@ -886,8 +890,9 @@ class AppState extends ChangeNotifier {
         identityPublicKey: contact.signingPublicKey!,
         deviceList: deviceList,
       );
-      final proof =
-          IdentityRotationProof.fromOptionalJson(contact.identityRotationProof);
+      final proof = IdentityRotationProof.fromOptionalJson(
+        contact.identityRotationProof,
+      );
       if (!listValid && proof?.oldIdentityPublicKey.isNotEmpty == true) {
         listValid = await _cloudCrypto.verifyDeviceList(
           accountId: contact.userId,
@@ -910,8 +915,9 @@ class AppState extends ChangeNotifier {
   ) async {
     await _assertCloudUserKeyBundle(peer);
     final nextDeviceList = await _verifiedCloudUserDeviceList(peer);
-    final previousDeviceList =
-        CloudDeviceList.fromOptionalJson(existing.deviceList);
+    final previousDeviceList = CloudDeviceList.fromOptionalJson(
+      existing.deviceList,
+    );
     if (!_isAcceptableDeviceListUpdate(previousDeviceList, nextDeviceList)) {
       throw StateError(
         'Serwer zwrocil cofnieta albo rozwidlona liste urzadzen dla ${existing.displayName}.',
@@ -968,8 +974,9 @@ class AppState extends ChangeNotifier {
         proof.newKeyAgreementPublicKey != peer.keyAgreementPublicKey) {
       return false;
     }
-    final previousProof =
-        IdentityRotationProof.fromOptionalJson(existing.identityRotationProof);
+    final previousProof = IdentityRotationProof.fromOptionalJson(
+      existing.identityRotationProof,
+    );
     if (!_cloudCrypto.isNextIdentityRotation(
       previousProof: previousProof,
       nextProof: proof,
@@ -1004,8 +1011,9 @@ class AppState extends ChangeNotifier {
     Contact existing,
     Contact contact,
   ) async {
-    final proof =
-        IdentityRotationProof.fromOptionalJson(contact.identityRotationProof);
+    final proof = IdentityRotationProof.fromOptionalJson(
+      contact.identityRotationProof,
+    );
     if (proof == null || existing.signingPublicKey?.isNotEmpty != true) {
       return false;
     }
@@ -1014,8 +1022,9 @@ class AppState extends ChangeNotifier {
         proof.newKeyAgreementPublicKey != contact.identityPublicKey) {
       return false;
     }
-    final previousProof =
-        IdentityRotationProof.fromOptionalJson(existing.identityRotationProof);
+    final previousProof = IdentityRotationProof.fromOptionalJson(
+      existing.identityRotationProof,
+    );
     if (!_cloudCrypto.isNextIdentityRotation(
       previousProof: previousProof,
       nextProof: proof,
@@ -1084,9 +1093,7 @@ class AppState extends ChangeNotifier {
       final existing = _contactById(peerId);
       if (existing == null && peer != null) {
         await _assertCloudUserKeyBundle(peer);
-        _contacts.add(
-          _contactFromCloudUser(peer),
-        );
+        _contacts.add(_contactFromCloudUser(peer));
         _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
         await _store.saveContacts(_contacts);
       } else if (existing != null && peer != null) {
@@ -1153,8 +1160,10 @@ class AppState extends ChangeNotifier {
     final vault = _cloudVault;
     final session = _cloudSession;
     if (client == null || vault == null || session == null) return;
-    final encryptedVault =
-        await _cloudCrypto.encryptVault(vault, session.vaultKey);
+    final encryptedVault = await _cloudCrypto.encryptVault(
+      vault,
+      session.vaultKey,
+    );
     final version = await client.saveVault(encryptedVault);
     await _store.saveCloudVaultPin(session.userId, version.epoch, version.hash);
   }
@@ -1230,12 +1239,8 @@ class AppState extends ChangeNotifier {
     return created;
   }
 
-  Future<
-      ({
-        CloudDeviceList list,
-        int expectedEpoch,
-        String expectedHash,
-      })> _ensureCloudDeviceList(CloudDeviceKeyMaterial deviceKey) async {
+  Future<({CloudDeviceList list, int expectedEpoch, String expectedHash})>
+      _ensureCloudDeviceList(CloudDeviceKeyMaterial deviceKey) async {
     final session = _cloudSession;
     final vault = _cloudVault;
     final client = _cloudClient;
@@ -1270,8 +1275,9 @@ class AppState extends ChangeNotifier {
 
     final expectedEpoch = previous?.deviceListEpoch ?? 0;
     final expectedHash = previous?.deviceListHash ?? '';
-    final entry =
-        _cloudCrypto.deviceListEntryForCertificate(deviceKey.certificate);
+    final entry = _cloudCrypto.deviceListEntryForCertificate(
+      deviceKey.certificate,
+    );
     if (previous != null) {
       if (previous.isRevoked(deviceKey.deviceId)) {
         throw StateError('To urzadzenie jest uniewaznione na liscie konta.');
@@ -1436,7 +1442,8 @@ class AppState extends ChangeNotifier {
             : _contactById(memberId)?.identityPublicKey;
         if (recipientKey == null || recipientKey.isEmpty) {
           throw StateError(
-              'Brak zweryfikowanego klucza czlonka $memberId do rotacji.');
+            'Brak zweryfikowanego klucza czlonka $memberId do rotacji.',
+          );
         }
         envelopes[memberId] = await _cloudCrypto.wrapConversationKey(
           vault: vault,
@@ -1479,7 +1486,8 @@ class AppState extends ChangeNotifier {
     if (envelopeJson['conversationId'] != conversation.conversationId ||
         envelopeJson['keyEpoch'] != conversation.keyEpoch) {
       throw StateError(
-          'Serwer podal kopertę klucza z innej rozmowy lub epoki.');
+        'Serwer podal kopertę klucza z innej rozmowy lub epoki.',
+      );
     }
     if (senderUserId.isNotEmpty && senderUserId != session.userId) {
       final contact = _contactById(senderUserId);
@@ -1793,9 +1801,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> startCloudConversation(CloudPublicUser user) async {
     await _assertCloudUserKeyBundle(user);
-    await _startCloudDirectContact(
-      _contactFromCloudUser(user),
-    );
+    await _startCloudDirectContact(_contactFromCloudUser(user));
   }
 
   Future<void> _startCloudDirectContact(Contact contact) async {
@@ -1818,8 +1824,9 @@ class AppState extends ChangeNotifier {
     } else if (existing.signingPublicKey?.isNotEmpty != true &&
         existing.identityPublicKey == contact.identityPublicKey &&
         _contactHasSignedIdentity(contact)) {
-      final index =
-          _contacts.indexWhere((item) => item.userId == contact.userId);
+      final index = _contacts.indexWhere(
+        (item) => item.userId == contact.userId,
+      );
       if (index >= 0) {
         _contacts[index] = existing.copyWith(
           signingPublicKey: contact.signingPublicKey,
@@ -1924,10 +1931,7 @@ class AppState extends ChangeNotifier {
         identityPublicKey: entry.identityPublicKey,
       ),
     );
-    relay.sendContactRequest(
-      to: entry.userId,
-      displayName: identity.userId,
-    );
+    relay.sendContactRequest(to: entry.userId, displayName: identity.userId);
     _directoryStatus =
         'Wyslano zaproszenie do ${entry.displayName}. Jesli jest offline, poczeka na serwerze.';
     notifyListeners();
@@ -1989,13 +1993,15 @@ class AppState extends ChangeNotifier {
     }
     if (bytes.length > maxProfileImageBytes) {
       throw StateError(
-          'Profilowe jest za duze. Limit: ${maxProfileImageBytes ~/ 1024} KB.');
+        'Profilowe jest za duze. Limit: ${maxProfileImageBytes ~/ 1024} KB.',
+      );
     }
 
     final mimeType = _guessMimeType(file.name);
     if (mimeType == null || !mimeType.startsWith('image/')) {
       throw StateError(
-          'Profilowe musi byc obrazem JPG, PNG, GIF, WEBP albo BMP.');
+        'Profilowe musi byc obrazem JPG, PNG, GIF, WEBP albo BMP.',
+      );
     }
 
     _ownProfile = UserProfile(
@@ -2099,9 +2105,11 @@ class AppState extends ChangeNotifier {
     }
 
     final selected = contacts
-        .where((contact) =>
-            contact.userId != identity.userId &&
-            !group.memberIds.contains(contact.userId))
+        .where(
+          (contact) =>
+              contact.userId != identity.userId &&
+              !group.memberIds.contains(contact.userId),
+        )
         .fold<Map<String, Contact>>({}, (map, contact) {
           map[contact.userId] = contact;
           return map;
@@ -2243,7 +2251,8 @@ class AppState extends ChangeNotifier {
         : maxPlainFileBytes;
     if (bytes.length > effectiveLimit) {
       throw StateError(
-          'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.');
+        'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.',
+      );
     }
 
     final payload = PlainPayload.file(
@@ -2414,7 +2423,8 @@ class AppState extends ChangeNotifier {
     }
     if (message.status == MessageStatus.failed) {
       throw StateError(
-          'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.');
+        'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.',
+      );
     }
 
     final trimmed = text.trim();
@@ -2453,7 +2463,8 @@ class AppState extends ChangeNotifier {
     if (message.retracted) return;
     if (message.status == MessageStatus.failed) {
       throw StateError(
-          'Ta wiadomosc nie zostala dostarczona. Usun ja lokalnie.');
+        'Ta wiadomosc nie zostala dostarczona. Usun ja lokalnie.',
+      );
     }
 
     final identity = _requireIdentity();
@@ -2547,10 +2558,7 @@ class AppState extends ChangeNotifier {
       session: session,
       from: identity.userId,
       to: contact.userId,
-      payload: PlainPayload.pin(
-        targetMessageId: message.id,
-        pinPinned: pinned,
-      ),
+      payload: PlainPayload.pin(targetMessageId: message.id, pinPinned: pinned),
     );
     await _sendEncryptedPacket(contact, packet);
     _applyPin(contact.userId, message.id, pinned);
@@ -2574,7 +2582,8 @@ class AppState extends ChangeNotifier {
     }
     if (message.status == MessageStatus.failed) {
       throw StateError(
-          'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.');
+        'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.',
+      );
     }
 
     final trimmed = text.trim();
@@ -2609,7 +2618,8 @@ class AppState extends ChangeNotifier {
     if (message.retracted) return;
     if (message.status == MessageStatus.failed) {
       throw StateError(
-          'Ta wiadomosc nie zostala dostarczona. Usun ja lokalnie.');
+        'Ta wiadomosc nie zostala dostarczona. Usun ja lokalnie.',
+      );
     }
 
     await _sendGroupControlPayload(
@@ -2646,12 +2656,7 @@ class AppState extends ChangeNotifier {
         groupId: group.groupId,
       ),
     );
-    _applyReaction(
-      group.groupId,
-      message.id,
-      identity.userId,
-      normalizedEmoji,
-    );
+    _applyReaction(group.groupId, message.id, identity.userId, normalizedEmoji);
   }
 
   Future<void> setGroupMessagePinned(
@@ -2736,7 +2741,8 @@ class AppState extends ChangeNotifier {
         : maxPlainFileBytes;
     if (bytes.length > effectiveLimit) {
       throw StateError(
-          'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.');
+        'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.',
+      );
     }
 
     await _sendPlainPayload(
@@ -2826,8 +2832,11 @@ class AppState extends ChangeNotifier {
       ),
     );
 
-    await _sendEncryptedPacket(contact, packet,
-        visibleMessageId: packet.messageId);
+    await _sendEncryptedPacket(
+      contact,
+      packet,
+      visibleMessageId: packet.messageId,
+    );
   }
 
   Future<void> _sendEncryptedPacket(
@@ -2852,17 +2861,11 @@ class AppState extends ChangeNotifier {
   ) async {
     await _sendControlPayload(
       contact,
-      PlainPayload.receipt(
-        targetMessageId: messageId,
-        receiptKind: kind,
-      ),
+      PlainPayload.receipt(targetMessageId: messageId, receiptKind: kind),
     );
   }
 
-  Future<void> _sendHiddenPayload(
-    Contact contact,
-    PlainPayload payload,
-  ) async {
+  Future<void> _sendHiddenPayload(Contact contact, PlainPayload payload) async {
     final identity = _requireIdentity();
     final session = await _ensureSession(contact);
     final packet = await _crypto.encryptPayload(
@@ -3032,8 +3035,9 @@ class AppState extends ChangeNotifier {
     _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
     await _store.saveContacts(_contacts);
     if (_relayConnected) {
-      _relay
-          ?.queryProfiles(_contacts.map((contact) => contact.userId).toList());
+      _relay?.queryProfiles(
+        _contacts.map((contact) => contact.userId).toList(),
+      );
     }
   }
 
@@ -3104,8 +3108,10 @@ class AppState extends ChangeNotifier {
 
     final identity = _requireIdentity();
     final relay = _requireRelay();
-    final init =
-        await _crypto.createHandshakeInit(identity: identity, contact: contact);
+    final init = await _crypto.createHandshakeInit(
+      identity: identity,
+      contact: contact,
+    );
     _pendingSessions[contact.userId] = init.pendingSession;
     final signalId = relay.sendSignal(
       to: contact.userId,
@@ -3124,6 +3130,9 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  // Retained only to decode archives produced by pre-cloud clients. It is not
+  // connected to any live transport; removing it requires an archive migration.
+  // ignore: unused_element
   Future<void> _handleRelayEvent(RelayEvent event) async {
     switch (event) {
       case RelayReady():
@@ -3131,7 +3140,8 @@ class AppState extends ChangeNotifier {
         _relayMaxPayloadBytes = event.maxPayloadBytes;
         _setStatus('Relay polaczony.');
         _relay?.updateProfile(
-            _ownProfile ?? UserProfile(updatedAt: DateTime.now().toUtc()));
+          _ownProfile ?? UserProfile(updatedAt: DateTime.now().toUtc()),
+        );
         final contactIds = _contacts.map((contact) => contact.userId).toList();
         _relay?.queryPresence(contactIds);
         _relay?.queryProfiles(contactIds);
@@ -3154,8 +3164,11 @@ class AppState extends ChangeNotifier {
               _isDeviceSyncPayload(event.payload)) {
             await _handleDeviceSyncPayload(event.payload);
           } else {
-            await _handleEncryptedPacket(event.from, event.payload,
-                transport: 'relay');
+            await _handleEncryptedPacket(
+              event.from,
+              event.payload,
+              transport: 'relay',
+            );
           }
         }
         break;
@@ -3178,10 +3191,12 @@ class AppState extends ChangeNotifier {
           final pending = _pendingSessions.remove(signalContactId);
           pending?.completer.completeError(
             StateError(
-                'Kontakt $signalContactId jest offline albo ma inny identyfikator.'),
+              'Kontakt $signalContactId jest offline albo ma inny identyfikator.',
+            ),
           );
           _setStatus(
-              'Nie dostarczono handshake do $signalContactId. Sprawdz dokladny userId kontaktu.');
+            'Nie dostarczono handshake do $signalContactId. Sprawdz dokladny userId kontaktu.',
+          );
         }
         break;
       case RelayPresence():
@@ -3197,10 +3212,12 @@ class AppState extends ChangeNotifier {
       case RelayDirectory():
         _directoryEntries
           ..clear()
-          ..addAll(event.entries.where((entry) {
-            return entry.userId != _identity?.userId &&
-                _contactById(entry.userId) == null;
-          }));
+          ..addAll(
+            event.entries.where((entry) {
+              return entry.userId != _identity?.userId &&
+                  _contactById(entry.userId) == null;
+            }),
+          );
         _loadingDirectory = false;
         _directoryStatus =
             'Lista zawiera ${_directoryEntries.length} publicznych uzytkownikow spoza kontaktow.';
@@ -3222,8 +3239,9 @@ class AppState extends ChangeNotifier {
     _presenceTimer?.cancel();
     _presenceTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!_relayConnected) return;
-      _relay
-          ?.queryPresence(_contacts.map((contact) => contact.userId).toList());
+      _relay?.queryPresence(
+        _contacts.map((contact) => contact.userId).toList(),
+      );
     });
   }
 
@@ -3242,8 +3260,9 @@ class AppState extends ChangeNotifier {
     if (identity == null || event.from == identity.userId) return;
     if (_contactById(event.from) != null) return;
 
-    final existingIndex =
-        _contactInvites.indexWhere((invite) => invite.userId == event.from);
+    final existingIndex = _contactInvites.indexWhere(
+      (invite) => invite.userId == event.from,
+    );
     final invite = ContactInvite(
       requestId: event.id,
       userId: event.from,
@@ -3278,7 +3297,8 @@ class AppState extends ChangeNotifier {
             identity.userId.compareTo(contact.userId) < 0;
         if (pending != null && localInitiatedSessionWins) {
           _setStatus(
-              'Odebrano rownolegly handshake od ${contact.userId}; kontynuujemy lokalna sesje.');
+            'Odebrano rownolegly handshake od ${contact.userId}; kontynuujemy lokalna sesje.',
+          );
           return;
         }
         final accept = await _crypto.acceptHandshakeInit(
@@ -3441,13 +3461,21 @@ class AppState extends ChangeNotifier {
       }
       if (decrypted.payload.type == PlainPayloadType.groupText) {
         _handleGroupText(
-            from, decrypted.payload, decrypted.createdAt, transport);
+          from,
+          decrypted.payload,
+          decrypted.createdAt,
+          transport,
+        );
         return;
       }
       if (decrypted.payload.type == PlainPayloadType.file &&
           decrypted.payload.groupId != null) {
         _handleGroupFile(
-            from, decrypted.payload, decrypted.createdAt, transport);
+          from,
+          decrypted.payload,
+          decrypted.createdAt,
+          transport,
+        );
         return;
       }
       final added = _addMessage(
@@ -3463,7 +3491,8 @@ class AppState extends ChangeNotifier {
       );
       if (added) {
         unawaited(
-            _sendReceipt(contact, decrypted.messageId, ReceiptKind.delivered));
+          _sendReceipt(contact, decrypted.messageId, ReceiptKind.delivered),
+        );
         unawaited(
           DesktopNotifier.instance.notifyIncoming(
             senderName: contact.displayName,
@@ -3492,8 +3521,9 @@ class AppState extends ChangeNotifier {
     }.where((userId) => memberIds.contains(userId)).toList(growable: false);
     if (!memberIds.contains(identity.userId)) return;
 
-    final existingIndex =
-        _groups.indexWhere((group) => group.groupId == groupId);
+    final existingIndex = _groups.indexWhere(
+      (group) => group.groupId == groupId,
+    );
     if (existingIndex >= 0) {
       final existing = _groups[existingIndex];
       final nextMemberIds = <String>{
@@ -3502,7 +3532,7 @@ class AppState extends ChangeNotifier {
       }.toList(growable: false);
       final nextAcceptedIds = <String>{
         ...existing.acceptedMemberIds,
-        ...acceptedMemberIds,
+        ...acceptedMemberIds
       }
           .where((userId) => nextMemberIds.contains(userId))
           .toList(growable: false);
@@ -3510,7 +3540,9 @@ class AppState extends ChangeNotifier {
       final membershipChanged =
           !setEquals(existing.memberIds.toSet(), nextMemberIds.toSet()) ||
               !setEquals(
-                  existing.acceptedMemberIds.toSet(), nextAcceptedIds.toSet());
+                existing.acceptedMemberIds.toSet(),
+                nextAcceptedIds.toSet(),
+              );
       _groups[existingIndex] = existing.copyWith(
         name: payload.groupName ?? existing.name,
         memberIds: nextMemberIds,
@@ -3575,7 +3607,9 @@ class AppState extends ChangeNotifier {
       }.toList(growable: false);
       _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
       _addSystemMessage(
-          groupId, '${displayNameForUser(from)} dolaczyl do grupy.');
+        groupId,
+        '${displayNameForUser(from)} dolaczyl do grupy.',
+      );
       await _store.saveGroups(_groups);
       await _broadcastGroupRoster(_groups[index]);
     } else {
@@ -3719,8 +3753,10 @@ class AppState extends ChangeNotifier {
   }
 
   bool _addMessage(ChatMessage message) {
-    final list =
-        _messages.putIfAbsent(message.contactId, () => <ChatMessage>[]);
+    final list = _messages.putIfAbsent(
+      message.contactId,
+      () => <ChatMessage>[],
+    );
     if (list.any((item) => item.id == message.id)) return false;
     list.add(message);
     _sortMessages(list);
@@ -3902,11 +3938,7 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
-  bool _applyReceipt(
-    String contactId,
-    String messageId,
-    ReceiptKind kind,
-  ) {
+  bool _applyReceipt(String contactId, String messageId, ReceiptKind kind) {
     final list = _messages[contactId];
     if (list == null) return false;
     final index = list.indexWhere((message) => message.id == messageId);
@@ -4021,10 +4053,7 @@ class AppState extends ChangeNotifier {
             message.payload.type == PlainPayloadType.file);
   }
 
-  MessageStatus _promoteStatus(
-    MessageStatus current,
-    MessageStatus incoming,
-  ) {
+  MessageStatus _promoteStatus(MessageStatus current, MessageStatus incoming) {
     if (incoming == MessageStatus.failed) {
       return current == MessageStatus.delivered || current == MessageStatus.read
           ? current
@@ -4136,7 +4165,8 @@ class AppState extends ChangeNotifier {
 
       if (payloadSize > maxPayloadBytes) {
         _setStatus(
-            'Pominieto synchronizacje jednej duzej wiadomosci miedzy urzadzeniami.');
+          'Pominieto synchronizacje jednej duzej wiadomosci miedzy urzadzeniami.',
+        );
         if (messages.isEmpty) {
           sentEmptySnapshot = true;
         } else {
@@ -4234,8 +4264,10 @@ class AppState extends ChangeNotifier {
         changed = true;
       }
       final syncedMessages = ((clear['messages'] as List?) ?? const [])
-          .map((item) =>
-              ChatMessage.fromJson((item as Map).cast<String, dynamic>()))
+          .map(
+            (item) =>
+                ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
+          )
           .toList(growable: false);
       changed = _mergeSyncedMessages(syncedMessages) || changed;
 
@@ -4246,7 +4278,8 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     } catch (_) {
       _setStatus(
-          'Nie udalo sie odszyfrowac synchronizacji z innego urzadzenia.');
+        'Nie udalo sie odszyfrowac synchronizacji z innego urzadzenia.',
+      );
     } finally {
       _applyingDeviceSync = false;
     }
@@ -4259,8 +4292,9 @@ class AppState extends ChangeNotifier {
     for (final item in rawContacts) {
       final contact = Contact.fromJson((item as Map).cast<String, dynamic>());
       if (identity != null && contact.userId == identity.userId) continue;
-      final index =
-          _contacts.indexWhere((existing) => existing.userId == contact.userId);
+      final index = _contacts.indexWhere(
+        (existing) => existing.userId == contact.userId,
+      );
       if (index < 0) {
         _contacts.add(contact);
         changed = true;
@@ -4320,10 +4354,12 @@ class AppState extends ChangeNotifier {
     if (rawGroups == null) return false;
     var changed = false;
     for (final item in rawGroups) {
-      final incoming =
-          GroupConversation.fromJson((item as Map).cast<String, dynamic>());
-      final index =
-          _groups.indexWhere((group) => group.groupId == incoming.groupId);
+      final incoming = GroupConversation.fromJson(
+        (item as Map).cast<String, dynamic>(),
+      );
+      final index = _groups.indexWhere(
+        (group) => group.groupId == incoming.groupId,
+      );
       if (index < 0) {
         _groups.add(incoming);
         changed = true;
@@ -4358,8 +4394,9 @@ class AppState extends ChangeNotifier {
 
   Future<bool> _mergeSyncedProfile(Object? rawProfile) async {
     if (rawProfile == null) return false;
-    final incoming =
-        UserProfile.fromJson((rawProfile as Map).cast<String, dynamic>());
+    final incoming = UserProfile.fromJson(
+      (rawProfile as Map).cast<String, dynamic>(),
+    );
     final incomingDate = incoming.updatedAt;
     final currentDate = _ownProfile?.updatedAt;
     if (incomingDate != null &&
@@ -4376,8 +4413,10 @@ class AppState extends ChangeNotifier {
   bool _mergeSyncedMessages(List<ChatMessage> incomingMessages) {
     var changed = false;
     for (final incoming in incomingMessages) {
-      final list =
-          _messages.putIfAbsent(incoming.contactId, () => <ChatMessage>[]);
+      final list = _messages.putIfAbsent(
+        incoming.contactId,
+        () => <ChatMessage>[],
+      );
       final index = list.indexWhere((message) => message.id == incoming.id);
       if (index < 0) {
         list.add(incoming);
@@ -4551,7 +4590,9 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _verifyDownloadedUpdate(
-      File file, String? expectedSha256) async {
+    File file,
+    String? expectedSha256,
+  ) async {
     final expected = expectedSha256?.trim().toLowerCase();
     if (expected == null || expected.isEmpty) return;
 
@@ -4562,7 +4603,8 @@ class AppState extends ChangeNotifier {
         await file.delete();
       } catch (_) {}
       throw StateError(
-          'Suma SHA-256 pobranego pliku nie zgadza sie z manifestem.');
+        'Suma SHA-256 pobranego pliku nie zgadza sie z manifestem.',
+      );
     }
   }
 
@@ -4578,10 +4620,7 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<SecretKey> _deriveAccountExportKey(
-    String passphrase,
-    List<int> salt,
-  ) {
+  Future<SecretKey> _deriveAccountExportKey(String passphrase, List<int> salt) {
     final kdf = Pbkdf2(
       macAlgorithm: Hmac.sha256(),
       iterations: _accountExportIterations,
@@ -4604,8 +4643,10 @@ class AppState extends ChangeNotifier {
     final archived = await _messageArchive.load();
     _messages.clear();
     for (final message in archived) {
-      final list =
-          _messages.putIfAbsent(message.contactId, () => <ChatMessage>[]);
+      final list = _messages.putIfAbsent(
+        message.contactId,
+        () => <ChatMessage>[],
+      );
       if (!list.any((item) => item.id == message.id)) {
         list.add(message);
       }
@@ -4686,7 +4727,8 @@ class AppState extends ChangeNotifier {
       final key = contact?.signingPublicKey ?? '';
       if (key.isNotEmpty) identityPublicKeys.add(key);
       final proof = IdentityRotationProof.fromOptionalJson(
-          contact?.identityRotationProof);
+        contact?.identityRotationProof,
+      );
       if (proof?.oldIdentityPublicKey.isNotEmpty == true) {
         identityPublicKeys.add(proof!.oldIdentityPublicKey);
       }
@@ -4848,8 +4890,10 @@ class AppState extends ChangeNotifier {
       senderUserId: senderUserId,
       senderDeviceId: senderDeviceId,
     );
-    final pending =
-        _pendingCloudReplayMessages.putIfAbsent(streamKey, () => {});
+    final pending = _pendingCloudReplayMessages.putIfAbsent(
+      streamKey,
+      () => {},
+    );
     pending.putIfAbsent(messageCounter, () => stored);
     _setStatus('Wykryto luke w strumieniu wiadomosci, pobieram brakujace.');
     _requestCloudGapFill(streamKey, conversation);
@@ -4859,9 +4903,9 @@ class AppState extends ChangeNotifier {
   void _requestCloudGapFill(String streamKey, CloudConversation conversation) {
     if (!_cloudGapFetches.add(streamKey)) return;
     unawaited(
-      _loadCloudMessages(conversation).whenComplete(
-        () => _cloudGapFetches.remove(streamKey),
-      ),
+      _loadCloudMessages(
+        conversation,
+      ).whenComplete(() => _cloudGapFetches.remove(streamKey)),
     );
   }
 
@@ -4888,11 +4932,7 @@ class AppState extends ChangeNotifier {
       final next = pending.remove(nextCounter);
       if (pending.isEmpty) _pendingCloudReplayMessages.remove(streamKey);
       if (next == null) return;
-      await _applyCloudMessage(
-        next,
-        notify: false,
-        drainBuffered: false,
-      );
+      await _applyCloudMessage(next, notify: false, drainBuffered: false);
     }
   }
 
@@ -4949,8 +4989,9 @@ class AppState extends ChangeNotifier {
       }
     }
     if (contactId == null) return false;
-    return (_messages[contactId] ?? const <ChatMessage>[])
-        .any((message) => message.id == messageId);
+    return (_messages[contactId] ?? const <ChatMessage>[]).any(
+      (message) => message.id == messageId,
+    );
   }
 
   Future<void> _applyContactProfile(String userId, UserProfile profile) async {

@@ -105,7 +105,8 @@ class RelayClient {
 
   Future<void> connect() async {
     throw UnsupportedError(
-        'Stary tryb relay zostal usuniety. Uzyj konta cloud.');
+      'Stary tryb relay zostal usuniety. Uzyj konta cloud.',
+    );
   }
 
   Future<void> disconnect() async {}
@@ -122,8 +123,10 @@ class RelayClient {
     throw UnsupportedError('Stary tryb relay zostal usuniety.');
   }
 
-  String sendRelay(
-      {required String to, required Map<String, dynamic> payload}) {
+  String sendRelay({
+    required String to,
+    required Map<String, dynamic> payload,
+  }) {
     throw UnsupportedError('Stary tryb relay zostal usuniety.');
   }
 

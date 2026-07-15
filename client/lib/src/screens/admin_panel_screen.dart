@@ -6,18 +6,10 @@ import '../models/identity.dart';
 import '../services/admin_api_client.dart';
 import '../storage/secure_store.dart';
 
-enum _AdminAction {
-  ban,
-  unban,
-  deleteAndBan,
-  deleteOnly,
-}
+enum _AdminAction { ban, unban, deleteAndBan, deleteOnly }
 
 class AdminPanelScreen extends StatefulWidget {
-  const AdminPanelScreen({
-    required this.relaySettings,
-    super.key,
-  });
+  const AdminPanelScreen({required this.relaySettings, super.key});
 
   final RelaySettings? relaySettings;
 
@@ -261,7 +253,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
     if (token.length < 32) {
       throw const AdminApiException(
-          'Token administratora musi miec minimum 32 znaki.');
+        'Token administratora musi miec minimum 32 znaki.',
+      );
     }
     return AdminSettings(serverUrl: url, adminToken: token);
   }
@@ -312,10 +305,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       final result = switch (action) {
         _AdminAction.ban => await client.banUser(user.userId),
         _AdminAction.unban => await client.unbanUser(user.userId),
-        _AdminAction.deleteAndBan =>
-          await client.deleteUser(user.userId, ban: true),
-        _AdminAction.deleteOnly =>
-          await client.deleteUser(user.userId, ban: false),
+        _AdminAction.deleteAndBan => await client.deleteUser(
+            user.userId,
+            ban: true,
+          ),
+        _AdminAction.deleteOnly => await client.deleteUser(
+            user.userId,
+            ban: false,
+          ),
       };
       final refreshed = await client.listUsers();
       if (!mounted) return;
@@ -337,22 +334,22 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       _AdminAction.ban => (
           'Zablokowac uzytkownika?',
           'UserId: ${user.userId}\nAktywne polaczenia zostana zamkniete.',
-          'Zablokuj'
+          'Zablokuj',
         ),
       _AdminAction.unban => (
           'Odblokowac uzytkownika?',
           'UserId: ${user.userId}',
-          'Odblokuj'
+          'Odblokuj',
         ),
       _AdminAction.deleteAndBan => (
           'Usunac i zablokowac?',
           'UserId: ${user.userId}\nTo usunie dane relay, kolejki offline, profil publiczny i dopisze userId do banlisty.',
-          'Usun'
+          'Usun',
         ),
       _AdminAction.deleteOnly => (
           'Usunac dane bez blokady?',
           'UserId: ${user.userId}\nUzytkownik bedzie mogl polaczyc sie ponownie.',
-          'Usun'
+          'Usun',
         ),
     };
 
@@ -495,13 +492,17 @@ class _AdminUserTile extends StatelessWidget {
               const SizedBox(height: 12),
               _DetailRow(label: 'UserId', value: user.userId, action: onCopyId),
               _DetailRow(
-                  label: 'Ostatnie urzadzenie',
-                  value: user.lastDeviceId ?? '-'),
+                label: 'Ostatnie urzadzenie',
+                value: user.lastDeviceId ?? '-',
+              ),
               _DetailRow(
-                  label: 'Pierwszy raz', value: _formatDate(user.firstSeenAt)),
+                label: 'Pierwszy raz',
+                value: _formatDate(user.firstSeenAt),
+              ),
               _DetailRow(
-                  label: 'Ostatnio widziany',
-                  value: _formatDate(user.lastSeenAt)),
+                label: 'Ostatnio widziany',
+                value: _formatDate(user.lastSeenAt),
+              ),
               _DetailRow(
                 label: 'Klucz publiczny',
                 value: user.identityPublicKey ?? '-',
@@ -548,9 +549,9 @@ class _DetailRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final style = mono
-        ? Theme.of(context).textTheme.bodyMedium?.copyWith(
-              fontFamily: 'monospace',
-            )
+        ? Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(fontFamily: 'monospace')
         : Theme.of(context).textTheme.bodyMedium;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -559,17 +560,9 @@ class _DetailRow extends StatelessWidget {
         children: [
           SizedBox(
             width: 150,
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            child: Text(label, style: Theme.of(context).textTheme.bodySmall),
           ),
-          Expanded(
-            child: SelectableText(
-              value,
-              style: style,
-            ),
-          ),
+          Expanded(child: SelectableText(value, style: style)),
           if (action != null)
             IconButton(
               tooltip: 'Kopiuj',
@@ -611,18 +604,12 @@ class _SmallChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      visualDensity: VisualDensity.compact,
-      label: Text(label),
-    );
+    return Chip(visualDensity: VisualDensity.compact, label: Text(label));
   }
 }
 
 class _Section extends StatelessWidget {
-  const _Section({
-    required this.title,
-    required this.children,
-  });
+  const _Section({required this.title, required this.children});
 
   final String title;
   final List<Widget> children;
@@ -633,19 +620,14 @@ class _Section extends StatelessWidget {
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.outlineVariant,
-        ),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-            child: Text(
-              title,
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
+            child: Text(title, style: Theme.of(context).textTheme.titleSmall),
           ),
           ...children,
         ],

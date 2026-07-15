@@ -24,8 +24,10 @@ class AdminApiClient {
   }
 
   Future<AdminUser> getUser(String userId) async {
-    final json =
-        await _request('GET', '/admin/users/${Uri.encodeComponent(userId)}');
+    final json = await _request(
+      'GET',
+      '/admin/users/${Uri.encodeComponent(userId)}',
+    );
     return AdminUser.fromJson((json['user'] as Map).cast<String, dynamic>());
   }
 
@@ -76,11 +78,14 @@ class AdminApiClient {
         _buildUri(path, queryParameters: queryParameters),
       );
       request.headers.set(
-          HttpHeaders.authorizationHeader, 'Bearer ${settings.adminToken}');
+        HttpHeaders.authorizationHeader,
+        'Bearer ${settings.adminToken}',
+      );
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
 
-      final response =
-          await request.close().timeout(const Duration(seconds: 20));
+      final response = await request.close().timeout(
+            const Duration(seconds: 20),
+          );
       final body = await response.transform(utf8.decoder).join();
       final decoded = body.isEmpty
           ? <String, dynamic>{}
@@ -104,19 +109,18 @@ class AdminApiClient {
       rethrow;
     } on SocketException catch (error) {
       throw AdminApiException(
-          'Nie mozna polaczyc sie z relay: ${error.message}');
+        'Nie mozna polaczyc sie z relay: ${error.message}',
+      );
     } on FormatException {
       throw const AdminApiException(
-          'Relay zwrocil niepoprawna odpowiedz JSON.');
+        'Relay zwrocil niepoprawna odpowiedz JSON.',
+      );
     } finally {
       client.close(force: true);
     }
   }
 
-  Uri _buildUri(
-    String path, {
-    Map<String, String>? queryParameters,
-  }) {
+  Uri _buildUri(String path, {Map<String, String>? queryParameters}) {
     final base = Uri.parse(settings.serverUrl.trim());
     final scheme = switch (base.scheme) {
       'wss' => 'https',
@@ -125,7 +129,8 @@ class AdminApiClient {
     };
     if (scheme != 'https' && scheme != 'http') {
       throw const AdminApiException(
-          'Adres admina musi zaczynac sie od https:// albo http://.');
+        'Adres admina musi zaczynac sie od https:// albo http://.',
+      );
     }
 
     final basePath = base.path.endsWith('/')

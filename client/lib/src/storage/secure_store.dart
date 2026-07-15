@@ -13,9 +13,8 @@ import '../models/session.dart';
 import '../models/user_profile.dart';
 
 class SecureStore {
-  SecureStore({
-    FlutterSecureStorage? storage,
-  }) : _storage = storage ?? const FlutterSecureStorage();
+  SecureStore({FlutterSecureStorage? storage})
+      : _storage = storage ?? const FlutterSecureStorage();
 
   static const _identityUserId = 'identity.userId';
   static const _identityDeviceId = 'identity.deviceId';
@@ -43,7 +42,9 @@ class SecureStore {
     await _storage.write(key: _identityDeviceId, value: identity.deviceId);
     await _storage.write(key: _identityPrivateKey, value: b64(privateKeyBytes));
     await _storage.write(
-        key: _identityPublicKey, value: b64(identity.publicKey.bytes));
+      key: _identityPublicKey,
+      value: b64(identity.publicKey.bytes),
+    );
   }
 
   Future<IdentityKeyMaterial?> loadIdentity() async {
@@ -76,7 +77,9 @@ class SecureStore {
 
   Future<void> saveRelaySettings(RelaySettings settings) async {
     await _storage.write(
-        key: _relaySettings, value: jsonEncode(settings.toJson()));
+      key: _relaySettings,
+      value: jsonEncode(settings.toJson()),
+    );
   }
 
   Future<RelaySettings?> loadRelaySettings() async {
@@ -87,7 +90,9 @@ class SecureStore {
 
   Future<void> saveAdminSettings(AdminSettings settings) async {
     await _storage.write(
-        key: _adminSettings, value: jsonEncode(settings.toJson()));
+      key: _adminSettings,
+      value: jsonEncode(settings.toJson()),
+    );
   }
 
   Future<AdminSettings?> loadAdminSettings() async {
@@ -124,8 +129,10 @@ class SecureStore {
     if (raw == null || raw.isEmpty) return [];
     final list = jsonDecode(raw) as List<dynamic>;
     return list
-        .map((item) =>
-            ContactInvite.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) =>
+              ContactInvite.fromJson((item as Map).cast<String, dynamic>()),
+        )
         .toList(growable: false);
   }
 
@@ -143,10 +150,7 @@ class SecureStore {
   }
 
   Future<void> saveCloudDeviceKey(CloudDeviceKeyMaterial key) async {
-    await _storage.write(
-      key: _cloudDeviceKey,
-      value: jsonEncode(key.toJson()),
-    );
+    await _storage.write(key: _cloudDeviceKey, value: jsonEncode(key.toJson()));
   }
 
   Future<CloudDeviceKeyMaterial?> loadCloudDeviceKey() async {
@@ -171,9 +175,11 @@ class SecureStore {
     if (raw == null || raw.isEmpty) return [];
     final list = jsonDecode(raw) as List<dynamic>;
     return list
-        .map((item) => CloudMessageReplayState.fromJson(
-              (item as Map).cast<String, dynamic>(),
-            ))
+        .map(
+          (item) => CloudMessageReplayState.fromJson(
+            (item as Map).cast<String, dynamic>(),
+          ),
+        )
         .toList(growable: false);
   }
 
@@ -190,7 +196,10 @@ class SecureStore {
   }
 
   Future<void> saveCloudVaultPin(
-      String accountId, int epoch, String hash) async {
+    String accountId,
+    int epoch,
+    String hash,
+  ) async {
     final raw = await _storage.read(key: _cloudVaultPins);
     final pins = raw == null || raw.isEmpty
         ? <String, dynamic>{}
@@ -219,8 +228,10 @@ class SecureStore {
     if (raw == null || raw.isEmpty) return [];
     final list = jsonDecode(raw) as List<dynamic>;
     return list
-        .map((item) =>
-            GroupConversation.fromJson((item as Map).cast<String, dynamic>()))
+        .map(
+          (item) =>
+              GroupConversation.fromJson((item as Map).cast<String, dynamic>()),
+        )
         .toList(growable: false);
   }
 

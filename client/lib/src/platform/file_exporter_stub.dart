@@ -4,5 +4,6 @@ Future<void> saveReceivedFileImpl({
   String? mimeType,
 }) {
   throw UnsupportedError(
-      'Zapisywanie plikow nie jest obslugiwane na tej platformie.');
+    'Zapisywanie plikow nie jest obslugiwane na tej platformie.',
+  );
 }
