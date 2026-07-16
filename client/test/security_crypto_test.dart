@@ -54,13 +54,15 @@ void main() {
         canonicalCloudOrigin('https://chat.example.com:443/api?x=1#fragment'),
         serverOrigin,
       );
-      expect(canonicalCloudOrigin('wss://chat.example.com/v2/ws'), serverOrigin);
+      expect(
+          canonicalCloudOrigin('wss://chat.example.com/v2/ws'), serverOrigin);
       expect(
         canonicalCloudOrigin('https://chat.example.com:8443/api'),
         'https://chat.example.com:8443',
       );
       expect(canonicalCloudOrigin('https://chat.example.com.'), serverOrigin);
-      expect(canonicalCloudOrigin('https://chat.example.com:443'), serverOrigin);
+      expect(
+          canonicalCloudOrigin('https://chat.example.com:443'), serverOrigin);
       expect(
         canonicalCloudOrigin('https://chat.example.com:444'),
         'https://chat.example.com:444',
