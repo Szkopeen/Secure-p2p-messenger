@@ -321,4 +321,4 @@ Nie mowic jeszcze:
 - Ze jest odporny na aktywnie zlosliwy lub przejety serwer.
 - Ze jest anonimowy.
 - Ze nadaje sie dla sygnalistow, prawnikow, lekarzy, finansow lub danych
-  regulowanych.
+  regulowanych
