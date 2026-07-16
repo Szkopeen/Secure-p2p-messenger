@@ -46,6 +46,13 @@ const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
 const authIpAttempts = new Map();
 const authAccountAttempts = new Map();
 const authPairAttempts = new Map();
+const GENERIC_DEVICE_NAMES = new Set([
+  'Device',
+  'Windows device',
+  'Linux device',
+  'Android device',
+  'Urzadzenie'
+]);
 let activeKdfOperations = 0;
 const kdfWaiters = [];
 let rejectedKdfOperations = 0;
@@ -650,19 +657,24 @@ function authScopeKeys(req, username) {
   };
 }
 
+function sanitizeDeviceName(deviceName) {
+  const value = String(deviceName || '').trim();
+  return GENERIC_DEVICE_NAMES.has(value) ? value.slice(0, 80) : 'Device';
+}
+
 function allowAuthAttempt(req, username) {
   const now = Date.now();
   pruneAllAuthAttempts(now);
   const keys = authScopeKeys(req, username);
   const checks = [
     [authIpAttempts, keys.ip, AUTH_IP_MAX_ATTEMPTS, AUTH_IP_MAX_KEYS],
-    [authAccountAttempts, keys.account, AUTH_ACCOUNT_MAX_ATTEMPTS, AUTH_ACCOUNT_MAX_KEYS],
     [authPairAttempts, keys.pair, AUTH_PAIR_MAX_ATTEMPTS, AUTH_PAIR_MAX_KEYS]
   ];
   let allowed = true;
   for (const [map, key, maxAttempts, maxKeys] of checks) {
     if (!checkAuthScope(map, key, maxAttempts, maxKeys, now)) allowed = false;
   }
+  checkAuthScope(authAccountAttempts, keys.account, AUTH_ACCOUNT_MAX_ATTEMPTS, AUTH_ACCOUNT_MAX_KEYS, now);
   pruneAllAuthAttempts(now);
   return allowed;
 }
@@ -847,6 +859,7 @@ export class V2Store {
       this.database.writeState('normalized-state-v1', true);
     }
     this.normalizePersistedSessions();
+    this.anonymizeStoredDeviceNames();
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
     this.accountQueues = new Map();
@@ -870,7 +883,7 @@ export class V2Store {
     const pending = {
       userId: user.userId,
       deviceId,
-      deviceName: String(deviceName || 'Urzadzenie').slice(0, 80),
+      deviceName: sanitizeDeviceName(deviceName),
       challenge: crypto.randomBytes(32).toString('base64url'),
       expiresAtMs: Date.now() + PENDING_LOGIN_TTL_MS
     };
@@ -917,6 +930,20 @@ export class V2Store {
         changed = true;
       }
       if (changed) this.database.upsertSession(hash, session);
+    }
+  }
+
+  anonymizeStoredDeviceNames() {
+    for (const user of Object.values(this.users.users)) {
+      let changed = false;
+      for (const device of Object.values(user.devices || {})) {
+        const safeName = sanitizeDeviceName(device.deviceName);
+        if (device.deviceName !== safeName) {
+          device.deviceName = safeName;
+          changed = true;
+        }
+      }
+      if (changed) this.persistUser(user);
     }
   }
 
@@ -1034,7 +1061,7 @@ export class V2Store {
       for (const [deviceId, device] of Object.entries(user.devices || {})) {
         devices[deviceId] = {
           deviceId,
-          deviceName: device.deviceName || 'Urzadzenie',
+          deviceName: sanitizeDeviceName(device.deviceName),
           deviceCertificate: isValidDeviceCertificate(device.deviceCertificate)
             ? device.deviceCertificate
             : null
@@ -1065,7 +1092,7 @@ export class V2Store {
       current: hash === currentHash,
       userId: session.userId,
       deviceId: session.deviceId,
-      deviceName: device.deviceName || 'Urzadzenie',
+      deviceName: sanitizeDeviceName(device.deviceName),
       createdAt: session.createdAt || new Date(lastSeenAtMs).toISOString(),
       lastSeenAt: new Date(lastSeenAtMs).toISOString(),
       expiresAt: new Date(session.expiresAtMs).toISOString(),
@@ -1087,7 +1114,7 @@ export class V2Store {
     user.devices[deviceId] = {
       ...previousDevice,
       deviceId,
-      deviceName: String(deviceName || 'Urzadzenie').slice(0, 80),
+      deviceName: sanitizeDeviceName(deviceName),
       lastSeenAt: new Date(now).toISOString()
     };
     const hash = tokenHash(token);

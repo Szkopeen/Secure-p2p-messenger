@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:secure_p2p_messenger/src/app_state.dart';
 import 'package:secure_p2p_messenger/src/crypto/cloud_crypto.dart';
 import 'package:secure_p2p_messenger/src/crypto/cloud_origin.dart';
 import 'package:secure_p2p_messenger/src/crypto/codec.dart';
@@ -96,6 +97,30 @@ void main() {
   });
 
   group('KDF vaultu', () {
+    test('haslo konta musi byc inne niz sekret vaultu', () {
+      expect(
+        cloudAccountPasswordSeparatedFromVaultSecret(
+          'konto-haslo-123456',
+          'konto-haslo-123456',
+        ),
+        isFalse,
+      );
+      expect(
+        cloudAccountPasswordSeparatedFromVaultSecret(
+          '  konto-haslo-123456  ',
+          'konto-haslo-123456',
+        ),
+        isFalse,
+      );
+      expect(
+        cloudAccountPasswordSeparatedFromVaultSecret(
+          'konto-haslo-123456',
+          'osobny-sekret-vaultu-123456',
+        ),
+        isTrue,
+      );
+    });
+
     test('Argon2id jest domyslny, deterministyczny i rozny od legacy PBKDF2',
         () async {
       final crypto = CloudCrypto();

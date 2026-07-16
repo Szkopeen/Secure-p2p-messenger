@@ -235,13 +235,13 @@ test('konfiguracja akceptuje produkcyjny limit WebSocket 16 MiB', async () => {
   }
 });
 
-test('limiter autoryzacji blokuje konto niezaleznie od adresu IP', () => {
+test('limiter autoryzacji nie blokuje globalnie konta z nowych adresow IP', () => {
   security.resetAuthRateLimits();
   try {
     for (let index = 0; index < 20; index += 1) {
       assert.equal(security.allowAuthAttempt(authReq(`10.0.0.${index + 1}`), 'alice'), true);
     }
-    assert.equal(security.allowAuthAttempt(authReq('10.0.1.1'), 'alice'), false);
+    assert.equal(security.allowAuthAttempt(authReq('10.0.1.1'), 'alice'), true);
     assert.equal(security.allowAuthAttempt(authReq('10.0.1.1'), 'bob'), true);
     security.recordAuthSuccess(authReq('10.0.0.1'), 'alice');
     assert.equal(security.allowAuthAttempt(authReq('10.0.0.1'), 'alice'), true);
@@ -283,19 +283,19 @@ test('limiter autoryzacji nie usuwa aktywnej blokady IP przy zalewaniu loginami'
   }
 });
 
-test('limiter autoryzacji nie usuwa aktywnej blokady konta przy zalewaniu loginami', () => {
+test('limiter autoryzacji nie pozwala zalewaniem wielu kont zablokowac ofiary globalnie', () => {
   security.resetAuthRateLimits();
   try {
     for (let index = 0; index < 20; index += 1) {
       assert.equal(security.allowAuthAttempt(authReq(`10.10.0.${index + 1}`), 'alice'), true);
     }
-    assert.equal(security.allowAuthAttempt(authReq('10.10.1.1'), 'alice'), false);
+    assert.equal(security.allowAuthAttempt(authReq('10.10.1.1'), 'alice'), true);
 
     for (let index = 0; index < 6000; index += 1) {
       security.allowAuthAttempt(authReq(`203.0.113.${(index % 250) + 1}`), `flood-${index}`);
     }
 
-    assert.equal(security.allowAuthAttempt(authReq('10.10.1.2'), 'alice'), false);
+    assert.equal(security.allowAuthAttempt(authReq('10.10.1.2'), 'alice'), true);
   } finally {
     security.resetAuthRateLimits();
   }
@@ -679,6 +679,30 @@ test('publiczny profil moze ukryc liste urzadzen przed katalogiem', () => {
   assert.deepEqual(minimal.devices, {});
   assert.equal(minimal.deviceList, null);
   assert.equal(minimal.deviceListHash, '');
+});
+
+test('serwer anonimizuje nazwy urzadzen przed zapisem i publikacja', () => {
+  const { store, user } = fixture();
+  const legacyDeviceId = 'legacy-device';
+  user.devices = {
+    [legacyDeviceId]: {
+      deviceName: 'KAMIL-DESKTOP'
+    }
+  };
+  store.persistUser(user);
+
+  store.anonymizeStoredDeviceNames();
+
+  assert.equal(user.devices[legacyDeviceId].deviceName, 'Device');
+  assert.equal(store.publicUser(user).devices[legacyDeviceId].deviceName, 'Device');
+
+  const session = store.createSession(user, 'new-device', 'PRIVATE-HOSTNAME');
+  const hash = crypto.createHash('sha256').update(session.token).digest('base64url');
+  assert.equal(user.devices['new-device'].deviceName, 'Device');
+  assert.equal(store.publicSession(hash, store.sessions.sessions[hash]).deviceName, 'Device');
+
+  const pending = store.createPendingLogin(user, 'pending-device', 'Windows device');
+  assert.equal(pending.deviceName, 'Windows device');
 });
 
 test('endpoint HTTP przyjmuje tylko podpisany ciag wiadomosci z aktualna epoka', async () => {

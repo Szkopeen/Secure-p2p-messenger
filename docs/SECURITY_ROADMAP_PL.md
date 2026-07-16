@@ -20,10 +20,16 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 
 - Aktywny P2P/WebRTC zostal usuniety z klienta.
 - Haslo konta zostalo oddzielone od sekretu vaultu.
+- Klient odrzuca przypadek, w ktorym haslo konta i sekret vaultu sa takie same
+  po podstawowej normalizacji. Haslo konta jest przekazywane serwerowi, wiec
+  nie moze byc jednoczesnie sekretem lokalnego vaultu.
 - Haslo konta nadal jest wysylane do serwera w celu logowania, ale przez
   wymuszony HTTPS poza localhostem i nie sluzy do odszyfrowania vaultu.
 - Sekret vaultu jest uzywany lokalnie do wyprowadzenia klucza vaultu i nie jest
   wysylany do API.
+- Klient nie wysyla `Platform.localHostname` jako nazwy urzadzenia. Nowe sesje
+  uzywaja neutralnych nazw platformy, a backend anonimizuje starsze
+  `deviceName` zapisane w bazie.
 - Klient wymaga HTTPS/WSS poza localhostem.
 - Dodano trwala tozsamosc Ed25519 w vaulcie.
 - Klucz X25519 uzywany do szyfrowania kluczy rozmow jest podpisywany przez
@@ -115,10 +121,12 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Katalog uzytkownikow nie zwraca juz globalnej listy. Wyszukiwanie wymaga
   dokladnego loginu, jest rate-limitowane i nie ujawnia listy urzadzen osobom
   spoza wspolnej rozmowy albo wlasnego konta.
-- Logowanie i rejestracja maja limity per IP, per konto oraz per para IP+konto
-  z krotka blokada narastajaca. Limiter uzywa oddzielnych map dla IP, konta i
-  pary IP+konto, nie usuwa aktywnych blokad przy wypelnieniu mapy i ma testy
-  zalewu ponad 5000 unikalnych loginow.
+- Logowanie i rejestracja maja twarde limity per IP oraz per para IP+konto z
+  krotka blokada narastajaca. Globalny licznik konta jest tylko sygnalem presji
+  i nie blokuje samodzielnie logowania z nowego adresu, zeby atak z wielu IP
+  nie mogl zablokowac ofiary. Limiter uzywa oddzielnych map, nie usuwa
+  aktywnych blokad przy wypelnieniu mapy i ma testy zalewu ponad 5000
+  unikalnych loginow.
 - Klient ma prywatny ekran, natywny `FLAG_SECURE` na Androidzie i opcjonalna
   blokade PIN po powrocie z tla. PIN jest hashowany przez PBKDF2-HMAC-SHA256 z
   losowa sola, a licznik bledow i czas blokady sa trzymane w secure storage z
@@ -133,10 +141,10 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Dodano pelny model zagrozen oraz proces wydawniczy z commitem, wersjami
   narzedzi, testami, hashami artefaktow i podpisanym manifestem release.
 
-Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
-pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
-konta` i `Sekret vaultu`, a nastepnie utworzyc nowe konto testowe z osobnym
-sekretem.
+Uwaga migracyjna: stare testowe konta mogly miec vault szyfrowany haslem
+logowania. Nowy klient nie pozwala juz wpisac tego samego tekstu jako `Haslo
+konta` i `Sekret vaultu`. Dla takich kont utworz nowe konto testowe albo wykonaj
+kontrolowana migracje vaultu na osobny sekret przed dopuszczeniem uzytkownikow.
 
 ## Najwieksze pozostale ryzyka
 

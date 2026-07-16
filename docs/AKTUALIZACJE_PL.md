@@ -104,6 +104,10 @@ npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windo
 
 Potem wyslij na produkcje tylko `server/updates/manifest.json` i
 `server/updates/files/`. Prywatnego klucza nie wysylaj na serwer.
+Katalog `server/updates/files/` utrzymuj jako niezapisywalny dla procesu
+serwera poza momentem wdrozenia release. Endpoint pobierania odrzuca symlinki i
+sprawdza realna sciezke pliku, ale uprawnienia katalogu nadal sa wazna warstwa
+ochrony.
 
 ## 4. Sprawdz, czy serwer widzi aktualizacje
 

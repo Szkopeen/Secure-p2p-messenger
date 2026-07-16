@@ -30,6 +30,12 @@ import 'storage/secure_store.dart';
 
 enum _CloudReplayDecision { accept, buffer }
 
+bool cloudAccountPasswordSeparatedFromVaultSecret(
+  String password,
+  String vaultSecret,
+) =>
+    password.trim() != vaultSecret.trim();
+
 class _AppLockConfig {
   const _AppLockConfig({
     required this.algorithm,
@@ -325,6 +331,7 @@ class AppState extends ChangeNotifier {
     if (vaultSecret.length < 16) {
       throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
     }
+    _validateVaultSecretSeparated(password, vaultSecret);
 
     final vaultSalt = b64(secureRandomBytes(16));
     final vaultKey = await _cloudCrypto.deriveVaultKey(
@@ -341,7 +348,7 @@ class AppState extends ChangeNotifier {
       username: normalizedUsername,
       password: password,
       deviceId: deviceId,
-      deviceName: Platform.localHostname,
+      deviceName: _genericDeviceName(),
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
       identityPublicKey: vault.identityPublicKey,
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
@@ -371,13 +378,14 @@ class AppState extends ChangeNotifier {
     if (vaultSecret.length < 16) {
       throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
     }
+    _validateVaultSecretSeparated(password, vaultSecret);
     final deviceId = _uuid.v4();
     final probe = CloudApiClient(serverUrl: normalizedServer);
     final loginProbe = await probe.login(
       username: username.trim().toLowerCase(),
       password: password,
       deviceId: deviceId,
-      deviceName: Platform.localHostname,
+      deviceName: _genericDeviceName(),
     );
     final vaultKey = await _cloudCrypto.deriveVaultKey(
       vaultSecret: vaultSecret,
@@ -2528,6 +2536,21 @@ class AppState extends ChangeNotifier {
     if (Platform.isLinux) return 'linux';
     if (Platform.isAndroid) return 'android';
     return null;
+  }
+
+  String _genericDeviceName() {
+    if (Platform.isWindows) return 'Windows device';
+    if (Platform.isLinux) return 'Linux device';
+    if (Platform.isAndroid) return 'Android device';
+    return 'Device';
+  }
+
+  void _validateVaultSecretSeparated(String password, String vaultSecret) {
+    if (!cloudAccountPasswordSeparatedFromVaultSecret(password, vaultSecret)) {
+      throw ArgumentError(
+        'Sekret vaultu musi byc inny niz haslo konta. Haslo konta jest przekazywane serwerowi.',
+      );
+    }
   }
 
   Uri _updateManifestUri(String serverUrl) {

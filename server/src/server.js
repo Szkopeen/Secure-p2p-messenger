@@ -107,12 +107,36 @@ function serveUpdateFile(res, encodedName) {
   }
   const baseDir = path.resolve(config.updateFilesDir);
   const file = path.resolve(baseDir, fileName);
-  if (!file.startsWith(`${baseDir}${path.sep}`) || !fs.existsSync(file)) {
+  const relativePath = path.relative(baseDir, file);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
     return;
   }
-  const stat = fs.statSync(file);
-  if (!stat.isFile()) {
+  let fd;
+  let stat;
+  try {
+    const baseRealPath = fs.realpathSync(baseDir);
+    const linkStat = fs.lstatSync(file);
+    if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
+      sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
+      return;
+    }
+    const fileRealPath = fs.realpathSync(file);
+    const realRelativePath = path.relative(baseRealPath, fileRealPath);
+    if (realRelativePath.startsWith('..') || path.isAbsolute(realRelativePath)) {
+      sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
+      return;
+    }
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      fs.closeSync(fd);
+      fd = null;
+      sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
+      return;
+    }
+  } catch {
+    if (fd != null) fs.closeSync(fd);
     sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
     return;
   }
@@ -123,7 +147,9 @@ function serveUpdateFile(res, encodedName) {
     'content-disposition': `attachment; filename="${fileName}"`,
     'x-content-type-options': 'nosniff'
   });
-  fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+  fs.createReadStream(file, { fd, autoClose: true })
+    .on('error', () => res.destroy())
+    .pipe(res);
 }
 
 const httpServer = http.createServer((req, res) => {

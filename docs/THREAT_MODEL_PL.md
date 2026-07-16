@@ -112,6 +112,10 @@ odporny na aktywnie zlosliwy serwer albo post-compromise compromise recovery.
 - Wymuszaj HTTPS/WSS poza localhostem.
 - `ADMIN_TOKEN`, klucz release i backupy trzymaj poza repozytorium.
 - Klucz podpisywania release trzymaj poza serwerem produkcyjnym.
+- Nie uzywaj hasla konta jako sekretu vaultu. Klient to blokuje, poniewaz
+  haslo konta jest przekazywane serwerowi podczas logowania.
+- Nazwy urzadzen traktuj jako metadane. Klient wysyla tylko neutralna nazwe
+  platformy, a backend anonimizuje starsze wpisy `deviceName`.
 - Regularnie wykonuj `npm run backup-sqlite -- --out ...` albo offline kopie
   kompletnego zestawu `.sqlite`, `.sqlite-wal`, `.sqlite-shm`.
 - Przed udostepnieniem testerom uruchamiaj checklisty z

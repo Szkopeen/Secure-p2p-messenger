@@ -86,9 +86,14 @@ Wykonane elementy zabezpieczen:
 
 - Tresc rozmow i plikow szyfrowana po stronie klienta.
 - Haslo konta i sekret vaultu sa rozdzielone.
+- Klient odrzuca identyczne haslo konta i sekret vaultu po podstawowej
+  normalizacji wejscia.
 - Haslo konta jest wysylane do serwera jako haslo logowania, ale tylko przez
   HTTPS poza localhostem. Nie jest uzywane jako sekret vaultu.
 - Sekret vaultu nie jest wysylany do API.
+- Klient nie wysyla lokalnego hostname jako nazwy urzadzenia. Serwer akceptuje
+  tylko neutralne nazwy typu `Windows device`, `Linux device`, `Android device`
+  albo `Device` i anonimizuje starsze wpisy przy starcie.
 - Klient wymaga HTTPS/WSS poza localhostem.
 - WebSocket cloud uzywa krotko zyjacego, jednorazowego ticketu z `/v2/ws-ticket`.
 - Dlugotrwaly token sesji nie trafia do URL WebSocket ani do naglowkow handshake.
@@ -120,6 +125,8 @@ Wykonane elementy zabezpieczen:
   wysylania nowych podpisanych wiadomosci.
 - Manifest aktualizacji aplikacji jest podpisywany Ed25519 i weryfikowany
   kluczem publicznym wbudowanym w klienta.
+- Pliki aktualizacji sa podawane bez podazania za symlinkami i po sprawdzeniu,
+  ze finalna sciezka zostaje w katalogu aktualizacji.
 
 ## Znane ograniczenia
 
