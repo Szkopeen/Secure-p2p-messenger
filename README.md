@@ -258,26 +258,16 @@ ssh szkpn@ADRES_TAILSCALE_PI
 
 Pelna instrukcja jest w [docs/ZDALNY_DOSTEP_PI_PL.md](docs/ZDALNY_DOSTEP_PI_PL.md).
 
-## Administracja
+## Administracja zaproszeniami
 
-Lista zapisanych uzytkownikow:
-
-```bash
-cd /opt/secure-p2p/app/server
-sudo -u securep2p -H npm --prefix /opt/secure-p2p/app/server run admin:users -- list
-```
-
-Usuniecie konta z danych administracyjnych i dodanie go do banlisty:
-
-```bash
-sudo -u securep2p -H npm --prefix /opt/secure-p2p/app/server run admin:users -- delete USER_ID --yes
-sudo systemctl restart secure-p2p-relay
-```
-
-API administracyjne jest dostepne tylko z poprawnym `ADMIN_TOKEN`. Nie zwraca
-tresci rozmow ani kluczy prywatnych.
+Przy `REGISTRATION_MODE=invite` jednorazowe zaproszenia tworzy endpoint
+`POST /v2/admin/invites` chroniony osobnym `ADMIN_TOKEN`. Serwer zapisuje tylko
+hash tokenu, ograniczenie uzyc, termin waznosci i opcjonalny dokladny login.
 
 ## Co mowic testerom
+
+Egzekwowany format podpisow, certyfikatow, licznikow i kopert kluczy opisuje
+[docs/PROTOCOL_V2.md](docs/PROTOCOL_V2.md).
 
 Mozna mowic:
 

@@ -35,7 +35,7 @@ import 'services/desktop_notifier.dart';
 import 'storage/message_archive.dart';
 import 'storage/secure_store.dart';
 
-enum _CloudReplayDecision { accept, legacy, buffer }
+enum _CloudReplayDecision { accept, buffer }
 
 class AppState extends ChangeNotifier {
   AppState({SecureStore? store, CryptoService? crypto})
@@ -45,6 +45,7 @@ class AppState extends ChangeNotifier {
   }
 
   static const maxPlainFileBytes = 8 * 1024 * 1024;
+  static const maxCloudPlainFileBytes = 48 * 1024;
   static const maxProfileImageBytes = 1024 * 1024;
   static const _accountExportIterations = 310000;
   static const _accountExportAad = 'secure-p2p-account-transfer/v1';
@@ -86,6 +87,8 @@ class AppState extends ChangeNotifier {
   IdentityKeyMaterial? _identity;
   CloudSession? _cloudSession;
   CloudVault? _cloudVault;
+  Map<String, dynamic> _cloudVaultKdf =
+      Map<String, dynamic>.of(CloudCrypto.defaultVaultKdf);
   CloudDeviceKeyMaterial? _cloudDeviceKey;
   CloudDeviceList? _ownCloudDeviceList;
   CloudApiClient? _cloudClient;
@@ -259,6 +262,7 @@ class AppState extends ChangeNotifier {
     required String username,
     required String password,
     required String vaultSecret,
+    String inviteToken = '',
   }) async {
     final normalizedServer = _normalizeCloudServerUrl(serverUrl);
     final normalizedUsername = username.trim().toLowerCase();
@@ -277,6 +281,7 @@ class AppState extends ChangeNotifier {
       vaultSecret: vaultSecret,
       salt: vaultSalt,
     );
+    _cloudVaultKdf = Map<String, dynamic>.of(CloudCrypto.defaultVaultKdf);
     final serverOrigin = _cloudSignatureOrigin(normalizedServer);
     var vault = await _cloudCrypto.createVault(serverOrigin: serverOrigin);
     final encryptedVault = await _cloudCrypto.encryptVault(vault, vaultKey);
@@ -292,6 +297,7 @@ class AppState extends ChangeNotifier {
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
       vaultSalt: vaultSalt,
       encryptedVault: encryptedVault,
+      inviteToken: inviteToken.trim(),
     );
     final session = result.session.copyWith(vaultKey: vaultKey);
     vault = await _cloudCrypto.ensureSignedIdentity(
@@ -326,6 +332,7 @@ class AppState extends ChangeNotifier {
     final vaultKey = await _cloudCrypto.deriveVaultKey(
       vaultSecret: vaultSecret,
       salt: loginProbe.vaultSalt,
+      parameters: loginProbe.vaultKdf,
     );
     CloudVault vault;
     final encryptedVault = loginProbe.encryptedVault;
@@ -361,7 +368,18 @@ class AppState extends ChangeNotifier {
       pendingToken: loginProbe.pendingToken,
       signature: signature,
     );
-    final session = completed.session.copyWith(vaultKey: vaultKey);
+    final usesDefaultKdf = mapEquals(
+      loginProbe.vaultKdf,
+      CloudCrypto.defaultVaultKdf,
+    );
+    _cloudVaultKdf = Map<String, dynamic>.of(CloudCrypto.defaultVaultKdf);
+    final activatedVaultKey = usesDefaultKdf
+        ? vaultKey
+        : await _cloudCrypto.deriveVaultKey(
+            vaultSecret: vaultSecret,
+            salt: loginProbe.vaultSalt,
+          );
+    final session = completed.session.copyWith(vaultKey: activatedVaultKey);
     await _store.saveCloudVaultPin(
       loginProbe.userId,
       loginProbe.vaultEpoch,
@@ -450,7 +468,11 @@ class AppState extends ChangeNotifier {
 
     final salt = secureRandomBytes(16);
     final nonce = secureRandomBytes(12);
-    final key = await _deriveAccountExportKey(normalizedPassphrase, salt);
+    final key = await _deriveAccountExportKey(
+      normalizedPassphrase,
+      salt,
+      parameters: CloudCrypto.defaultVaultKdf,
+    );
     final box = await _accountExportAead.encrypt(
       utf8Bytes(clearJson),
       secretKey: key,
@@ -458,11 +480,10 @@ class AppState extends ChangeNotifier {
       aad: utf8Bytes(_accountExportAad),
     );
     final envelope = jsonEncode({
-      'v': 1,
+      'v': 2,
       'type': 'secure-p2p-account-transfer',
       'algorithm': 'AES-256-GCM',
-      'kdf': 'PBKDF2-HMAC-SHA256',
-      'iterations': _accountExportIterations,
+      'kdf': CloudCrypto.defaultVaultKdf,
       'salt': b64(salt),
       'nonce': b64(box.nonce),
       'ciphertext': b64(box.cipherText),
@@ -502,7 +523,24 @@ class AppState extends ChangeNotifier {
       throw const FormatException('To nie jest pakiet konta Secure Chat.');
     }
     final salt = unb64(envelope['salt'] as String);
-    final key = await _deriveAccountExportKey(normalizedPassphrase, salt);
+    final rawKdf = envelope['kdf'];
+    final Map<String, dynamic>? kdfParameters;
+    if (rawKdf is Map) {
+      kdfParameters = rawKdf.cast<String, dynamic>();
+    } else if (envelope['v'] == 1 && rawKdf == 'PBKDF2-HMAC-SHA256') {
+      if (envelope['iterations'] != _accountExportIterations) {
+        throw const FormatException(
+            'Nieprawidlowe parametry starego eksportu.');
+      }
+      kdfParameters = null;
+    } else {
+      throw const FormatException('Nieobslugiwany KDF eksportu konta.');
+    }
+    final key = await _deriveAccountExportKey(
+      normalizedPassphrase,
+      salt,
+      parameters: kdfParameters,
+    );
     final box = SecretBox(
       unb64(envelope['ciphertext'] as String),
       nonce: unb64(envelope['nonce'] as String),
@@ -773,10 +811,10 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> refreshCloudUsers() async {
+  Future<void> refreshCloudUsers({String? username}) async {
     final client = _cloudClient;
     if (client == null || _cloudSession == null) return;
-    final users = await client.users();
+    final users = await client.users(username: username);
     _cloudUsers
       ..clear()
       ..addAll(users);
@@ -1164,7 +1202,10 @@ class AppState extends ChangeNotifier {
       vault,
       session.vaultKey,
     );
-    final version = await client.saveVault(encryptedVault);
+    final version = await client.saveVault(
+      encryptedVault,
+      vaultKdf: _cloudVaultKdf,
+    );
     await _store.saveCloudVaultPin(session.userId, version.epoch, version.hash);
   }
 
@@ -1432,8 +1473,12 @@ class AppState extends ChangeNotifier {
     final client = _cloudClient;
     if (session == null || vault == null || client == null) return;
     final updatedKeys = Map<String, String>.of(vault.conversationKeys);
+    final blockedGroupIds = <String>[];
     for (final conversation in _cloudConversations.values) {
-      if (conversation.type != 'direct') continue;
+      if (conversation.type != 'direct') {
+        blockedGroupIds.add(conversation.conversationId);
+        continue;
+      }
       final newKey = await _cloudCrypto.newConversationKey();
       final envelopes = <String, dynamic>{};
       for (final memberId in conversation.memberIds) {
@@ -1466,6 +1511,13 @@ class AppState extends ChangeNotifier {
     }
     _cloudVault = vault.copyWith(conversationKeys: updatedKeys);
     await _saveCloudVault();
+    if (blockedGroupIds.isNotEmpty) {
+      throw StateError(
+        'Usunieto urzadzenie i obrocono klucze rozmow 1:1. '
+        'Wysylanie do ${blockedGroupIds.length} starych grup cloud pozostaje '
+        'zablokowane do migracji bezpiecznego protokolu grupowego.',
+      );
+    }
   }
 
   Future<String?> _ensureCloudConversationKey(
@@ -1489,12 +1541,22 @@ class AppState extends ChangeNotifier {
         'Serwer podal kopertę klucza z innej rozmowy lub epoki.',
       );
     }
-    if (senderUserId.isNotEmpty && senderUserId != session.userId) {
+    late final String expectedSenderIdentityPublicKey;
+    late final String expectedSenderKeyAgreementPublicKey;
+    if (senderUserId == session.userId) {
+      expectedSenderIdentityPublicKey = vault.identityPublicKey;
+      expectedSenderKeyAgreementPublicKey = vault.keyAgreementPublicKey;
+    } else {
       final contact = _contactById(senderUserId);
-      if (contact != null &&
-          (contact.identityPublicKey != senderPublicKey ||
-              contact.signingPublicKey != senderIdentityPublicKey ||
-              !_contactHasSignedIdentity(contact))) {
+      if (contact == null || !_contactHasSignedIdentity(contact)) {
+        throw StateError(
+          'Brak zaufanej, podpisanej tozsamosci nadawcy koperty klucza.',
+        );
+      }
+      expectedSenderIdentityPublicKey = contact.signingPublicKey!;
+      expectedSenderKeyAgreementPublicKey = contact.identityPublicKey;
+      if (contact.identityPublicKey != senderPublicKey ||
+          contact.signingPublicKey != senderIdentityPublicKey) {
         throw StateError(
           'Klucz kontaktu ${contact.displayName} nie zgadza sie z zapisana, podpisana tozsamoscia. Zweryfikuj safety number przed rozmowa.',
         );
@@ -1503,6 +1565,8 @@ class AppState extends ChangeNotifier {
     final key = await _cloudCrypto.unwrapConversationKey(
       vault: vault,
       localUserId: session.userId,
+      expectedSenderIdentityPublicKey: expectedSenderIdentityPublicKey,
+      expectedSenderKeyAgreementPublicKey: expectedSenderKeyAgreementPublicKey,
       envelope: envelopeJson,
     );
     final keys = Map<String, String>.of(vault.conversationKeys);
@@ -1543,9 +1607,11 @@ class AppState extends ChangeNotifier {
       senderDeviceId: aadSenderDeviceId,
       payload: stored.payload,
     );
-    if (_cloudCrypto.hasDeviceSignature(stored.payload) &&
+    if (!_cloudCrypto.hasDeviceSignature(stored.payload) ||
         !deviceSignatureVerified) {
-      throw StateError('Podpis urzadzenia nadawcy jest niepoprawny.');
+      throw StateError(
+        'Wiadomosc bez poprawnego certyfikatu i podpisu urzadzenia zostala odrzucona.',
+      );
     }
     final existingReplayState = _cloudReplayStateFor(
       conversationId: stored.conversationId,
@@ -1561,6 +1627,7 @@ class AppState extends ChangeNotifier {
 
     final decrypted = await _cloudCrypto.decryptMessage(
       conversationId: stored.conversationId,
+      expectedKeyEpoch: conversation.keyEpoch,
       conversationKey: key,
       payload: stored.payload,
     );
@@ -1711,6 +1778,7 @@ class AppState extends ChangeNotifier {
       conversationId: conversationId,
       senderUserId: session.userId,
       senderDeviceId: session.deviceId,
+      keyEpoch: conversation.keyEpoch,
       messageCounter: messageCounter,
       previousMessageHash: previousMessageHash,
       conversationKey: key,
@@ -2043,6 +2111,11 @@ class AppState extends ChangeNotifier {
     required String name,
     required List<Contact> members,
   }) async {
+    if (cloudMode) {
+      throw StateError(
+        'Grupy sa wylaczone do czasu wdrozenia bezpiecznej rotacji kluczy/MLS.',
+      );
+    }
     final identity = _requireIdentity();
     final groupName = name.trim().isEmpty ? 'Nowa grupa' : name.trim();
     final selectedMembers = members
@@ -2246,12 +2319,14 @@ class AppState extends ChangeNotifier {
     String? replyPreview,
   }) async {
     final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
-    final effectiveLimit = relayAwareLimit < maxPlainFileBytes
-        ? relayAwareLimit
-        : maxPlainFileBytes;
+    final effectiveLimit = cloudMode
+        ? maxCloudPlainFileBytes
+        : relayAwareLimit < maxPlainFileBytes
+            ? relayAwareLimit
+            : maxPlainFileBytes;
     if (bytes.length > effectiveLimit) {
       throw StateError(
-        'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.',
+        'Plik jest za duzy. Limit: ${_fileLimitLabel(effectiveLimit)}.',
       );
     }
 
@@ -2736,12 +2811,14 @@ class AppState extends ChangeNotifier {
     String? replyPreview,
   }) async {
     final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
-    final effectiveLimit = relayAwareLimit < maxPlainFileBytes
-        ? relayAwareLimit
-        : maxPlainFileBytes;
+    final effectiveLimit = cloudMode
+        ? maxCloudPlainFileBytes
+        : relayAwareLimit < maxPlainFileBytes
+            ? relayAwareLimit
+            : maxPlainFileBytes;
     if (bytes.length > effectiveLimit) {
       throw StateError(
-        'Plik jest za duzy. Limit: ${effectiveLimit ~/ (1024 * 1024)} MB.',
+        'Plik jest za duzy. Limit: ${_fileLimitLabel(effectiveLimit)}.',
       );
     }
 
@@ -4620,7 +4697,19 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<SecretKey> _deriveAccountExportKey(String passphrase, List<int> salt) {
+  Future<SecretKey> _deriveAccountExportKey(
+    String passphrase,
+    List<int> salt, {
+    required Map<String, dynamic>? parameters,
+  }) async {
+    if (parameters != null) {
+      final encoded = await _cloudCrypto.deriveVaultKey(
+        vaultSecret: passphrase,
+        salt: b64(salt),
+        parameters: parameters,
+      );
+      return SecretKey(unb64(encoded));
+    }
     final kdf = Pbkdf2(
       macAlgorithm: Hmac.sha256(),
       iterations: _accountExportIterations,
@@ -4789,7 +4878,9 @@ class AppState extends ChangeNotifier {
   }) {
     final session = _cloudSession;
     if (session == null || messageCounter == null || senderDeviceId.isEmpty) {
-      return _CloudReplayDecision.legacy;
+      throw StateError(
+        'Wiadomosc legacy bez licznika lub urzadzenia zostala odrzucona.',
+      );
     }
     if (messageCounter < 1) {
       throw StateError('Niepoprawny licznik wiadomosci cloud.');
@@ -5090,6 +5181,10 @@ class AppState extends ChangeNotifier {
       _ => null,
     };
   }
+
+  String _fileLimitLabel(int bytes) => bytes < 1024 * 1024
+      ? '${bytes ~/ 1024} KiB'
+      : '${bytes ~/ (1024 * 1024)} MiB';
 
   @override
   void dispose() {

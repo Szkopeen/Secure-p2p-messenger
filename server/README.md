@@ -2,14 +2,10 @@
 
 Lekki serwer Node.js dla aktualnej wersji cloud-only komunikatora Secure Chat.
 
-Historycznie katalog nazywal sie `relay`, ale obecnie serwer robi wiecej niz
-przekazywanie pakietow:
-
 - obsluguje konta i sesje,
 - przechowuje zaszyfrowane vaulty,
 - przechowuje zaszyfrowana historie rozmow i plikow,
-- kolejkuje wiadomosci offline,
-- obsluguje publiczna liste uzytkownikow opt-in,
+- udostepnia profile tylko uczestnikom wspolnych rozmow lub po dokladnym loginie,
 - przechowuje podpisane bundle kluczy, certyfikaty i listy urzadzen,
 - udostepnia podpisane aktualizacje aplikacji,
 - wystawia API administracyjne.
@@ -89,40 +85,17 @@ Na produkcyjnym Pi zwykle:
 Te katalogi zawieraja zaszyfrowane, ale wrazliwe dane. Rob kopie zapasowe przed
 aktualizacjami backendu.
 
-## Administracja uzytkownikami
+## Zaproszenia
 
-Lista zapisanych userId:
-
-```bash
-npm run admin:users -- list
-```
-
-Podglad konkretnego userId:
+Przy `REGISTRATION_MODE=invite` administrator tworzy krotko zyjace zaproszenie
+przez uwierzytelniony endpoint. Token jest zwracany tylko raz, a w SQLite
+przechowywany jest wylacznie jego hash:
 
 ```bash
-npm run admin:users -- show USER_ID
-```
-
-Usuniecie konta z danych administracyjnych i dodanie userId do banlisty:
-
-```bash
-npm run admin:users -- delete USER_ID --yes
-```
-
-Samo zablokowanie lub odblokowanie userId:
-
-```bash
-npm run admin:users -- ban USER_ID --yes
-npm run admin:users -- unban USER_ID --yes
-```
-
-Narzedzie robi backup zmienianych plikow w `data/admin-backups/`. Relay odswieza
-banliste okresowo; po pilnym usunieciu najlepiej zrestartowac usluge.
-
-Na produkcyjnym Pi uruchamiaj narzedzie jako uzytkownik uslugi:
-
-```bash
-sudo -u securep2p -H npm --prefix /opt/secure-p2p/app/server run admin:users -- list
+curl -X POST https://chat.szkpn.pl/v2/admin/invites \
+  -H "x-admin-token: $ADMIN_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"maxUses":1,"expiresInSeconds":86400,"restrictedUsername":"alice"}'
 ```
 
 ## Aktualizacje aplikacji

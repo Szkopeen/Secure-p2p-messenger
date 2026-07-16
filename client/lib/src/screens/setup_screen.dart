@@ -18,6 +18,7 @@ class _SetupScreenState extends State<SetupScreen> {
   final _cloudUsername = TextEditingController();
   final _cloudPassword = TextEditingController();
   final _cloudVaultSecret = TextEditingController();
+  final _cloudInviteToken = TextEditingController();
   bool _saving = false;
   String? _error;
 
@@ -27,6 +28,7 @@ class _SetupScreenState extends State<SetupScreen> {
     _cloudUsername.dispose();
     _cloudPassword.dispose();
     _cloudVaultSecret.dispose();
+    _cloudInviteToken.dispose();
     super.dispose();
   }
 
@@ -102,6 +104,16 @@ class _SetupScreenState extends State<SetupScreen> {
                     },
                   ),
                   const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _cloudInviteToken,
+                    decoration: const InputDecoration(
+                      labelText: 'Kod zaproszenia (przy rejestracji)',
+                      prefixIcon: Icon(Icons.vpn_key_outlined),
+                    ),
+                    autocorrect: false,
+                    obscureText: true,
+                  ),
+                  const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
@@ -173,6 +185,7 @@ class _SetupScreenState extends State<SetupScreen> {
         username: _cloudUsername.text,
         password: _cloudPassword.text,
         vaultSecret: _cloudVaultSecret.text,
+        inviteToken: _cloudInviteToken.text,
       );
     } catch (error) {
       setState(() => _error = error.toString());

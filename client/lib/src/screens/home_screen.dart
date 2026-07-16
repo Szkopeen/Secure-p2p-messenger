@@ -47,9 +47,10 @@ class HomeScreen extends StatelessWidget {
             ),
             actions: [
               IconButton(
-                tooltip: 'Utworz grupe',
+                tooltip:
+                    'Grupy sa wylaczone do czasu wdrozenia bezpiecznego rekey/MLS',
                 onPressed: () => _showCreateGroupDialog(context),
-                icon: const Icon(Icons.group_add_outlined),
+                icon: const Icon(Icons.group_off_outlined),
               ),
               IconButton(
                 tooltip: 'Globalna lista',
@@ -164,37 +165,60 @@ class HomeScreen extends StatelessWidget {
   Future<void> _openCloudUsers(BuildContext context) async {
     await appState.refreshCloudUsers();
     if (!context.mounted) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) {
-        return AnimatedBuilder(
-          animation: appState,
-          builder: (context, _) {
-            final users = appState.cloudUsers;
-            return ListView(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    'Uzytkownicy',
-                    style: Theme.of(context).textTheme.titleLarge,
+    final username = TextEditingController();
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) {
+          return AnimatedBuilder(
+            animation: appState,
+            builder: (context, _) {
+              final users = appState.cloudUsers;
+              return ListView(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Text(
+                      'Kontakty i wyszukiwanie',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
                   ),
-                ),
-                if (users.isEmpty)
-                  const ListTile(
-                    leading: Icon(Icons.info_outline),
-                    title: Text('Brak innych kont na serwerze'),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: TextField(
+                      controller: username,
+                      autocorrect: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Dokladny login',
+                        hintText: 'np. anna',
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      textInputAction: TextInputAction.search,
+                      onSubmitted: (value) =>
+                          appState.refreshCloudUsers(username: value),
+                    ),
                   ),
-                for (final user in users)
-                  _CloudUserTile(appState: appState, user: user),
-              ],
-            );
-          },
-        );
-      },
-    );
+                  if (users.isEmpty)
+                    const ListTile(
+                      leading: Icon(Icons.info_outline),
+                      title: Text('Brak wspolnych kontaktow'),
+                      subtitle: Text(
+                        'Aby znalezc nowa osobe, wpisz jej dokladny login.',
+                      ),
+                    ),
+                  for (final user in users)
+                    _CloudUserTile(appState: appState, user: user),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      username.dispose();
+    }
   }
 
   Future<void> _showCreateGroupDialog(BuildContext context) async {

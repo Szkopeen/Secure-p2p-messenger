@@ -1,9 +1,9 @@
 {
-  "name": "secure-p2p-relay",
+  "name": "secure-p2p-messenger-server",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Prywatny serwer WebSocket do signalingu i przekazywania zaszyfrowanych pakietow E2EE.",
+  "description": "Serwer API v2 komunikatora E2EE.",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -12,7 +12,6 @@
     "dev": "node --watch src/server.js",
     "check": "node scripts/check-conflicts.js && node --check src/config.js && node --check src/sqliteStore.js && node --check src/v2Store.js && node --check src/server.js",
     "test": "node --test test/*.test.js",
-    "admin:users": "node scripts/admin-users.js",
     "generate-update-key": "node scripts/generate-update-signing-key.js",
     "publish-update": "node scripts/publish-update.js"
   },

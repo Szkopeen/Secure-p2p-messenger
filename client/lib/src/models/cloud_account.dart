@@ -149,6 +149,8 @@ class CloudDeviceCertificate {
 
   Map<String, dynamic> toJson() => {
         'v': 1,
+        // Kept for hash compatibility with certificates issued by alpha builds.
+        // The signed certificate payload itself uses device-certificate/v1.
         'protocol': 'secure-chat/device-list/v1',
         'accountId': accountId,
         'serverOrigin': serverOrigin,

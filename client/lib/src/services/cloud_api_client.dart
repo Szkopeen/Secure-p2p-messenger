@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../crypto/codec.dart';
+import '../crypto/cloud_crypto.dart';
 import '../models/cloud_account.dart';
 
 class CloudAuthResult {
@@ -25,6 +26,7 @@ class CloudPendingLogin {
     required this.encryptedVault,
     required this.vaultEpoch,
     required this.vaultHash,
+    required this.vaultKdf,
   });
 
   final String pendingToken;
@@ -36,6 +38,7 @@ class CloudPendingLogin {
   final Map<String, dynamic>? encryptedVault;
   final int vaultEpoch;
   final String vaultHash;
+  final Map<String, dynamic>? vaultKdf;
 }
 
 class VaultVersion {
@@ -141,6 +144,8 @@ class CloudApiClient {
     required String keyAgreementPublicKeySignature,
     required String vaultSalt,
     required Map<String, dynamic> encryptedVault,
+    String inviteToken = '',
+    Map<String, dynamic> vaultKdf = CloudCrypto.defaultVaultKdf,
   }) async {
     final raw = await _post('/v2/register', {
       'username': username,
@@ -152,6 +157,8 @@ class CloudApiClient {
       'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
       'vaultSalt': vaultSalt,
       'encryptedVault': encryptedVault,
+      'vaultKdf': vaultKdf,
+      if (inviteToken.isNotEmpty) 'inviteToken': inviteToken,
     });
     return _authResult(raw, serverUrl);
   }
@@ -180,6 +187,9 @@ class CloudApiClient {
       encryptedVault: vault is Map ? vault.cast<String, dynamic>() : null,
       vaultEpoch: raw['vaultEpoch'] as int? ?? 0,
       vaultHash: raw['vaultHash'] as String? ?? '',
+      vaultKdf: raw['vaultKdf'] is Map
+          ? (raw['vaultKdf'] as Map).cast<String, dynamic>()
+          : null,
     );
   }
 
@@ -194,8 +204,12 @@ class CloudApiClient {
     return _authResult(raw, serverUrl);
   }
 
-  Future<List<CloudPublicUser>> users() async {
-    final raw = await _get('/v2/users');
+  Future<List<CloudPublicUser>> users({String? username}) async {
+    final normalized = username?.trim().toLowerCase() ?? '';
+    final path = normalized.isEmpty
+        ? '/v2/users'
+        : '/v2/users?username=${Uri.encodeQueryComponent(normalized)}';
+    final raw = await _get(path);
     final items = raw['users'] as List? ?? const [];
     return items
         .map(
@@ -212,12 +226,16 @@ class CloudApiClient {
     return null;
   }
 
-  Future<VaultVersion> saveVault(Map<String, dynamic> encryptedVault) async {
+  Future<VaultVersion> saveVault(
+    Map<String, dynamic> encryptedVault, {
+    required Map<String, dynamic> vaultKdf,
+  }) async {
     final current = await _get('/v2/vault');
     final saved = await _put('/v2/vault', {
       'encryptedVault': encryptedVault,
       'expectedVaultEpoch': current['vaultEpoch'] as int? ?? 0,
       'expectedVaultHash': current['vaultHash'] as String? ?? '',
+      'vaultKdf': vaultKdf,
     });
     return VaultVersion(
       epoch: requiredInt(saved, 'vaultEpoch'),

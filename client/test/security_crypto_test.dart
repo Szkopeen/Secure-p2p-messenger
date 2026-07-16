@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:secure_p2p_messenger/src/crypto/cloud_crypto.dart';
@@ -10,6 +14,18 @@ import 'package:secure_p2p_messenger/src/models/message.dart';
 void main() {
   const accountId = 'uuid-alice';
   const serverOrigin = 'https://chat.szkpn.pl';
+
+  test('wektor klient-serwer ma identyczny canonical JSON i SHA-256', () {
+    final vector = jsonDecode(
+      File('../test-vectors/protocol-canonical-v1.json').readAsStringSync(),
+    ) as Map<String, dynamic>;
+    final canonical = canonicalJson(vector['value']);
+    expect(canonical, vector['canonical']);
+    expect(
+      crypto_hash.sha256.convert(utf8.encode(canonical)).toString(),
+      vector['sha256'],
+    );
+  });
 
   Future<String> legacyV1Signature(CloudVault vault) async {
     final signature = await Ed25519().sign(
@@ -74,6 +90,40 @@ void main() {
         () => canonicalCloudOrigin('ftp://chat.szkpn.pl'),
         throwsArgumentError,
       );
+    });
+  });
+
+  group('KDF vaultu', () {
+    test('Argon2id jest domyslny, deterministyczny i rozny od legacy PBKDF2',
+        () async {
+      final crypto = CloudCrypto();
+      final salt = b64(List<int>.generate(16, (index) => index + 1));
+      const testParameters = {
+        'algorithm': 'argon2id',
+        'version': 19,
+        'memoryKiB': 8192,
+        'iterations': 2,
+        'lanes': 1,
+        'keyBytes': 32,
+      };
+      final first = await crypto.deriveVaultKey(
+        vaultSecret: 'bardzo-dlugi-sekret-testowy',
+        salt: salt,
+        parameters: testParameters,
+      );
+      final second = await crypto.deriveVaultKey(
+        vaultSecret: 'bardzo-dlugi-sekret-testowy',
+        salt: salt,
+        parameters: testParameters,
+      );
+      final legacy = await crypto.deriveVaultKey(
+        vaultSecret: 'bardzo-dlugi-sekret-testowy',
+        salt: salt,
+        parameters: null,
+      );
+
+      expect(first, second);
+      expect(first, isNot(legacy));
     });
   });
 
@@ -145,6 +195,8 @@ void main() {
         await crypto.unwrapConversationKey(
           vault: bob,
           localUserId: 'uuid-bob',
+          expectedSenderIdentityPublicKey: alice.identityPublicKey,
+          expectedSenderKeyAgreementPublicKey: alice.keyAgreementPublicKey,
           envelope: envelope,
         ),
         key,
@@ -156,6 +208,8 @@ void main() {
         () => crypto.unwrapConversationKey(
           vault: bob,
           localUserId: 'uuid-bob',
+          expectedSenderIdentityPublicKey: alice.identityPublicKey,
+          expectedSenderKeyAgreementPublicKey: alice.keyAgreementPublicKey,
           envelope: tampered,
         ),
         throwsStateError,
@@ -183,6 +237,7 @@ void main() {
           conversationId: 'conversation-1',
           senderUserId: accountId,
           senderDeviceId: 'device-a',
+          keyEpoch: 1,
           messageCounter: 1,
           previousMessageHash: crypto.cloudMessageGenesisHash,
           conversationKey: conversationKey,
@@ -194,6 +249,7 @@ void main() {
           conversationId: 'conversation-1',
           senderUserId: accountId,
           senderDeviceId: 'device-a',
+          keyEpoch: 1,
           messageCounter: 2,
           previousMessageHash: firstHash,
           conversationKey: conversationKey,
@@ -203,11 +259,13 @@ void main() {
 
         final decryptedFirst = await crypto.decryptMessage(
           conversationId: 'conversation-1',
+          expectedKeyEpoch: 1,
           conversationKey: conversationKey,
           payload: first,
         );
         final decryptedSecond = await crypto.decryptMessage(
           conversationId: 'conversation-1',
+          expectedKeyEpoch: 1,
           conversationKey: conversationKey,
           payload: second,
         );
@@ -251,6 +309,7 @@ void main() {
         conversationId: 'conversation-1',
         senderUserId: accountId,
         senderDeviceId: 'device-a',
+        keyEpoch: 1,
         messageCounter: 1,
         previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
@@ -266,6 +325,7 @@ void main() {
       expect(
         () => crypto.decryptMessage(
           conversationId: 'conversation-1',
+          expectedKeyEpoch: 1,
           conversationKey: conversationKey,
           payload: tampered,
         ),
@@ -290,6 +350,7 @@ void main() {
         conversationId: 'conversation-1',
         senderUserId: accountId,
         senderDeviceId: 'device-a',
+        keyEpoch: 1,
         messageCounter: 1,
         previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,
@@ -324,6 +385,7 @@ void main() {
         conversationId: 'conversation-1',
         senderUserId: accountId,
         senderDeviceId: 'device-a',
+        keyEpoch: 1,
         messageCounter: 1,
         previousMessageHash: crypto.cloudMessageGenesisHash,
         conversationKey: conversationKey,

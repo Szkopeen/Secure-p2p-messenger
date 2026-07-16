@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart' as crypto_hash;
 import 'package:cryptography/cryptography.dart';
+import 'package:pointycastle/export.dart' as pc;
 import 'package:uuid/uuid.dart';
 
 import '../models/cloud_account.dart';
@@ -12,6 +14,29 @@ import 'codec.dart';
 import 'bounded_zlib.dart';
 
 const _maxDecompressedMessageBytes = 16 * 1024 * 1024;
+
+List<int> _deriveArgon2id({
+  required List<int> secret,
+  required List<int> salt,
+  required int keyBytes,
+  required int iterations,
+  required int memoryKiB,
+  required int lanes,
+}) {
+  final generator = pc.Argon2BytesGenerator()
+    ..init(
+      pc.Argon2Parameters(
+        pc.Argon2Parameters.ARGON2_id,
+        Uint8List.fromList(salt),
+        desiredKeyLength: keyBytes,
+        version: pc.Argon2Parameters.ARGON2_VERSION_13,
+        iterations: iterations,
+        memory: memoryKiB,
+        lanes: lanes,
+      ),
+    );
+  return generator.process(Uint8List.fromList(secret));
+}
 
 class CloudDecryptedMessage {
   const CloudDecryptedMessage({
@@ -61,10 +86,52 @@ class CloudCrypto {
   final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   final Uuid _uuid = const Uuid();
 
+  static const Map<String, dynamic> defaultVaultKdf = {
+    'algorithm': 'argon2id',
+    'version': 19,
+    'memoryKiB': 65536,
+    'iterations': 3,
+    'lanes': 1,
+    'keyBytes': 32,
+  };
+
   Future<String> deriveVaultKey({
     required String vaultSecret,
     required String salt,
+    Map<String, dynamic>? parameters = defaultVaultKdf,
   }) async {
+    if (parameters != null && parameters['algorithm'] == 'argon2id') {
+      final memoryKiB = parameters['memoryKiB'] as int? ?? 0;
+      final iterations = parameters['iterations'] as int? ?? 0;
+      final lanes = parameters['lanes'] as int? ?? 0;
+      final version = parameters['version'] as int? ?? 0;
+      final keyBytes = parameters['keyBytes'] as int? ?? 0;
+      if (memoryKiB < 8192 ||
+          memoryKiB > 65536 ||
+          iterations < 2 ||
+          iterations > 4 ||
+          lanes != 1 ||
+          version != 19 ||
+          keyBytes != 32) {
+        throw const FormatException('Niebezpieczne parametry Argon2id.');
+      }
+      final secretBytes = utf8Bytes(vaultSecret);
+      final saltBytes = unb64(salt);
+      final derived = await Isolate.run(
+        () => _deriveArgon2id(
+          secret: secretBytes,
+          salt: saltBytes,
+          keyBytes: keyBytes,
+          iterations: iterations,
+          memoryKiB: memoryKiB,
+          lanes: lanes,
+        ),
+      );
+      return b64(derived);
+    }
+    if (parameters != null && parameters['algorithm'] != 'pbkdf2-sha256') {
+      throw const FormatException('Nieobslugiwany KDF vaultu.');
+    }
     final kdf = Pbkdf2(
       macAlgorithm: Hmac.sha256(),
       iterations: 310000,
@@ -890,13 +957,18 @@ class CloudCrypto {
   Future<String> unwrapConversationKey({
     required CloudVault vault,
     required String localUserId,
+    required String expectedSenderIdentityPublicKey,
+    required String expectedSenderKeyAgreementPublicKey,
     required Map<String, dynamic> envelope,
   }) async {
     final senderUserId = requiredString(envelope, 'senderUserId');
     final senderPublicKey = requiredString(envelope, 'senderPublicKey');
     if (requiredString(envelope, 'recipientUserId') != localUserId ||
         requiredInt(envelope, 'protocolVersion') != 1 ||
-        requiredInt(envelope, 'keyEpoch') < 1) {
+        requiredInt(envelope, 'keyEpoch') < 1 ||
+        requiredString(envelope, 'senderIdentityPublicKey') !=
+            expectedSenderIdentityPublicKey ||
+        senderPublicKey != expectedSenderKeyAgreementPublicKey) {
       throw StateError('Koperta klucza rozmowy ma niepoprawny kontekst.');
     }
     final unsigned = Map<String, dynamic>.of(envelope)..remove('signature');
@@ -905,7 +977,7 @@ class CloudCrypto {
       signature: Signature(
         unb64(requiredString(envelope, 'signature')),
         publicKey: SimplePublicKey(
-          unb64(requiredString(envelope, 'senderIdentityPublicKey')),
+          unb64(expectedSenderIdentityPublicKey),
           type: KeyPairType.ed25519,
         ),
       ),
@@ -938,6 +1010,7 @@ class CloudCrypto {
     required String conversationId,
     required String senderUserId,
     required String senderDeviceId,
+    required int keyEpoch,
     required int messageCounter,
     required String previousMessageHash,
     required String conversationKey,
@@ -954,6 +1027,7 @@ class CloudCrypto {
       'messageId': messageId,
       'senderUserId': senderUserId,
       'senderDeviceId': senderDeviceId,
+      'keyEpoch': keyEpoch,
       'messageCounter': messageCounter,
       'previousMessageHash': previousMessageHash,
       'contentType': payload.type.name,
@@ -1031,6 +1105,7 @@ class CloudCrypto {
 
   Future<CloudDecryptedMessage> decryptMessage({
     required String conversationId,
+    required int expectedKeyEpoch,
     required String conversationKey,
     required Map<String, dynamic> payload,
   }) async {
@@ -1039,6 +1114,7 @@ class CloudCrypto {
     }
     final aad = asStringKeyMap(payload['aad'], 'aad');
     if (aad['conversationId'] != conversationId ||
+        aad['keyEpoch'] != expectedKeyEpoch ||
         aad['messageId'] != payload['messageId']) {
       throw const FormatException('AAD wiadomosci cloud nie pasuje.');
     }

@@ -1,0 +1,4 @@
+storePassword=UZUPELNIJ
+keyPassword=UZUPELNIJ
+keyAlias=secure-p2p-messenger
+storeFile=C:/bezpieczna/sciezka/release-keystore.jks

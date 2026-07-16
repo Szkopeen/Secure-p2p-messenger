@@ -9,8 +9,13 @@ const AUTH_MAX_BODY_BYTES = 32 * 1024;
 const MAX_MESSAGE_PAGE = 500;
 const DEFAULT_MESSAGE_PAGE = 100;
 const MAX_MEMBER_KEY_BYTES = 16 * 1024;
-const MAX_STORED_MESSAGE_BYTES = 1024 * 1024;
-const MAX_MESSAGES_PER_CONVERSATION = 100_000;
+const MAX_STORED_MESSAGE_BYTES = 128 * 1024;
+const MAX_MESSAGES_PER_CONVERSATION = 50_000;
+const MAX_CONVERSATION_BYTES = 256 * 1024 * 1024;
+const MAX_ACCOUNT_BYTES = 1024 * 1024 * 1024;
+const MAX_INSTANCE_BYTES = 10 * 1024 * 1024 * 1024;
+const MAX_DAILY_ACCOUNT_BYTES = 100 * 1024 * 1024;
+const MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30 * 1000;
 const WS_TICKET_MAX_GLOBAL = 10_000;
@@ -23,10 +28,24 @@ const AUTH_MAX_KEYS = 5000;
 const PENDING_LOGIN_TTL_MS = 2 * 60 * 1000;
 const PENDING_LOGIN_MAX_GLOBAL = 5000;
 const MAX_CONCURRENT_KDF = 4;
+const MAX_KDF_QUEUE = 32;
+const KDF_QUEUE_TIMEOUT_MS = 5_000;
+const DEVICE_CERTIFICATE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
 const authAttempts = new Map();
 let activeKdfOperations = 0;
 const kdfWaiters = [];
+let rejectedKdfOperations = 0;
+let totalKdfQueueWaitMs = 0;
+let completedKdfQueueWaits = 0;
+
+class ServerBusyError extends Error {
+  constructor(message = 'Serwer jest chwilowo przeciazony.') {
+    super(message);
+    this.code = 'SERVER_BUSY';
+  }
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -38,6 +57,228 @@ function randomId() {
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isValidVaultKdf(value, { allowLegacy = false } = {}) {
+  if (!isObject(value)) return false;
+  if (allowLegacy && value.algorithm === 'pbkdf2-sha256') {
+    return value.iterations === 310000 && value.keyBytes === 32;
+  }
+  return value.algorithm === 'argon2id' && value.version === 19 &&
+    Number.isInteger(value.memoryKiB) && value.memoryKiB >= 8192 &&
+    value.memoryKiB <= 65536 && Number.isInteger(value.iterations) &&
+    value.iterations >= 2 && value.iterations <= 4 && value.lanes === 1 &&
+    value.keyBytes === 32;
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Niekanoniczna liczba JSON.');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isObject(value)) {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  throw new Error('Nieobslugiwany typ canonical JSON.');
+}
+
+function canonicalBytes(value) {
+  return Buffer.from(canonicalJson(value), 'utf8');
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(canonicalBytes(value)).digest('hex');
+}
+
+function verifyEd25519(publicKey, payload, signature) {
+  try {
+    return crypto.verify(null, payload, ed25519PublicKey(publicKey), Buffer.from(signature, 'base64url'));
+  } catch {
+    return false;
+  }
+}
+
+function unsignedDeviceCertificate(certificate) {
+  return {
+    v: 1,
+    protocol: 'secure-chat/device-certificate/v1',
+    accountId: certificate.accountId,
+    serverOrigin: certificate.serverOrigin,
+    deviceId: certificate.deviceId,
+    deviceSigningPublicKey: certificate.deviceSigningPublicKey,
+    deviceEpoch: certificate.deviceEpoch,
+    createdAt: certificate.createdAt
+  };
+}
+
+function verifyDeviceCertificate(user, certificate, now = Date.now()) {
+  if (!verifyDeviceCertificateSignature(
+    user.userId,
+    user.identityPublicKey,
+    certificate,
+    now
+  )) return false;
+  const activeDevice = activeDeviceEntry(user, certificate.deviceId);
+  if (!activeDevice || activeDevice.deviceSigningPublicKey !== certificate.deviceSigningPublicKey ||
+      activeDevice.deviceEpoch !== certificate.deviceEpoch) return false;
+  const certificateHash = sha256Hex(certificate);
+  return activeDevice.certificateHash === certificateHash && !isDeviceRevoked(user, certificate.deviceId);
+}
+
+function verifyDeviceCertificateSignature(accountId, identityPublicKey, certificate, now = Date.now()) {
+  if (!isValidDeviceCertificate(certificate) || certificate.accountId !== accountId) return false;
+  const createdAtMs = Date.parse(certificate.createdAt);
+  if (!Number.isFinite(createdAtMs) || createdAtMs > now + MAX_CLOCK_SKEW_MS ||
+      now - createdAtMs > DEVICE_CERTIFICATE_TTL_MS) return false;
+  return verifyEd25519(
+    identityPublicKey,
+    canonicalBytes(unsignedDeviceCertificate(certificate)),
+    certificate.signature
+  );
+}
+
+function verifyDeviceList(accountId, identityPublicKey, deviceList) {
+  if (!isValidDeviceList(deviceList) || deviceList.accountId !== accountId) return false;
+  const signed = {
+    v: 1,
+    protocol: 'secure-chat/device-list/v1',
+    accountId: deviceList.accountId,
+    serverOrigin: deviceList.serverOrigin,
+    deviceListEpoch: deviceList.deviceListEpoch,
+    previousDeviceListHash: deviceList.previousDeviceListHash,
+    identityRotationEpoch: deviceList.identityRotationEpoch,
+    devices: deviceList.devices,
+    revokedDevices: deviceList.revokedDevices,
+    updatedAt: deviceList.updatedAt
+  };
+  return verifyEd25519(identityPublicKey, canonicalBytes(signed), deviceList.signature);
+}
+
+function verifyKeyAgreementBinding(accountId, serverOrigin, identityPublicKey,
+  keyAgreementPublicKey, signature) {
+  return verifyEd25519(identityPublicKey, canonicalBytes({
+    v: 1,
+    protocol: 'secure-p2p-identity-key-binding/v2',
+    accountId,
+    serverOrigin,
+    identityPublicKey,
+    keyAgreementPublicKey
+  }), signature);
+}
+
+function identityRotationHash(proof) {
+  return proof ? sha256Hex(proof) : '';
+}
+
+function verifyIdentityRotation(user, nextIdentityPublicKey, nextKeyAgreementPublicKey,
+  proof, serverOrigin) {
+  if (!isValidIdentityRotationProof(proof) ||
+      proof.oldIdentityPublicKey !== user.identityPublicKey ||
+      proof.newIdentityPublicKey !== nextIdentityPublicKey ||
+      proof.newKeyAgreementPublicKey !== nextKeyAgreementPublicKey) return false;
+  const previousProof = user.identityRotationProof;
+  const expectedEpoch = Number.isInteger(previousProof?.rotationEpoch)
+    ? previousProof.rotationEpoch + 1
+    : 1;
+  if (proof.rotationEpoch !== expectedEpoch ||
+      proof.previousRotationHash !== identityRotationHash(previousProof)) return false;
+  const rotatedAtMs = Date.parse(proof.rotatedAt);
+  if (!Number.isFinite(rotatedAtMs) || Math.abs(Date.now() - rotatedAtMs) > MAX_CLOCK_SKEW_MS) return false;
+  const signed = canonicalBytes({
+    v: 1,
+    protocol: 'secure-p2p-identity-rotation/v1',
+    accountId: user.userId,
+    serverOrigin,
+    rotationEpoch: proof.rotationEpoch,
+    previousRotationHash: proof.previousRotationHash,
+    oldIdentityPublicKey: proof.oldIdentityPublicKey,
+    newIdentityPublicKey: proof.newIdentityPublicKey,
+    newKeyAgreementPublicKey: proof.newKeyAgreementPublicKey,
+    rotatedAt: proof.rotatedAt
+  });
+  return verifyEd25519(proof.oldIdentityPublicKey, signed, proof.signature) &&
+    verifyEd25519(proof.newIdentityPublicKey, signed, proof.newIdentityConfirmationSignature);
+}
+
+function cloudMessageHash(payload) {
+  return sha256Hex({
+    v: 1,
+    protocol: 'secure-chat/message-chain/v1',
+    type: 'message',
+    message: payload
+  });
+}
+
+const CLOUD_MESSAGE_GENESIS_HASH = sha256Hex({
+  v: 1,
+  protocol: 'secure-chat/message-chain/v1',
+  type: 'genesis'
+});
+
+function verifyCloudMessageSignature(user, payload) {
+  const certificate = payload.deviceCertificate;
+  if (!verifyDeviceCertificate(user, certificate)) return false;
+  const unsigned = { ...payload };
+  delete unsigned.deviceCertificate;
+  delete unsigned.deviceSignature;
+  const digest = crypto.createHash('sha256').update(canonicalBytes({
+    v: 1,
+    protocol: 'secure-chat/device-message/v1',
+    envelope: unsigned
+  })).digest();
+  return verifyEd25519(certificate.deviceSigningPublicKey, digest, payload.deviceSignature);
+}
+
+function verifyMemberKeyEnvelope(envelope, user) {
+  if (envelope.senderIdentityPublicKey !== user.identityPublicKey ||
+      envelope.senderPublicKey !== user.keyAgreementPublicKey) return false;
+  const unsigned = { ...envelope };
+  delete unsigned.signature;
+  return verifyEd25519(user.identityPublicKey, canonicalBytes(unsigned), envelope.signature);
+}
+
+function storageQuotaError(store, userId, conversationId, payloadBytes, now = Date.now()) {
+  if (store.database.messageCount(conversationId) >= store.limits.messagesPerConversation) {
+    return { status: 507, error: 'Rozmowa osiagnela limit przechowywania.' };
+  }
+  if (store.database.conversationBytes(conversationId) + payloadBytes > store.limits.conversationBytes) {
+    return { status: 507, error: 'Rozmowa osiagnela limit bajtow.' };
+  }
+  if (store.database.accountBytes(userId) + payloadBytes > store.limits.accountBytes) {
+    return { status: 507, error: 'Konto osiagnelo limit przechowywania.' };
+  }
+  if (store.database.instanceBytes() + payloadBytes > store.limits.instanceBytes) {
+    return { status: 507, error: 'Instancja osiagnela limit przechowywania.' };
+  }
+  const sinceIso = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+  if (store.database.dailyAccountBytes(userId, sinceIso) + payloadBytes >
+      store.limits.dailyAccountBytes) {
+    return { status: 429, error: 'Przekroczono dobowy limit uploadu konta.' };
+  }
+  const disk = fs.statfsSync(store.dataDir);
+  const freeBytes = Number(disk.bavail) * Number(disk.bsize);
+  if (!Number.isFinite(freeBytes) || freeBytes - payloadBytes < store.limits.minFreeDiskBytes) {
+    return { status: 507, error: 'Za malo wolnego miejsca na serwerze.' };
+  }
+  return null;
+}
+
+function messageStreamError(database, conversationId, senderUserId, senderDeviceId,
+  counter, previousHash) {
+  const streamHead = database.streamHead(conversationId, senderUserId, senderDeviceId);
+  if (!streamHead) {
+    return counter === 1 && previousHash === CLOUD_MESSAGE_GENESIS_HASH
+      ? null
+      : 'Licznik lub previousMessageHash nie rozpoczyna lancucha urzadzenia.';
+  }
+  return counter === streamHead.message_counter + 1 && previousHash === streamHead.payload_hash
+    ? null
+    : 'Licznik lub previousMessageHash nie kontynuuje lancucha urzadzenia.';
 }
 
 function isValidIdentityRotationProof(value) {
@@ -151,6 +392,11 @@ function isDeviceRevoked(user, deviceId) {
 function validateCloudMessagePayload(payload, body, auth) {
   if (!isObject(payload)) return 'Brak zaszyfrowanego payloadu.';
   if (!isObject(payload.aad)) return 'Brak AAD wiadomosci.';
+  if (payload.v !== 1 || payload.protocol !== 'secure-p2p-cloud-message/v1' ||
+      payload.aad.v !== 1 || payload.aad.protocol !== 'secure-p2p-cloud-message/v1' ||
+      payload.aad.protocolVersion !== 2) {
+    return 'Nieobslugiwana wersja protokolu wiadomosci.';
+  }
   if (String(payload.messageId || '') !== String(body.messageId || '')) {
     return 'messageId payloadu nie zgadza sie z zadaniem.';
   }
@@ -160,13 +406,6 @@ function validateCloudMessagePayload(payload, body, auth) {
   if (String(payload.aad.senderUserId || '') !== auth.user.userId) {
     return 'senderUserId w AAD nie zgadza sie z sesja.';
   }
-  const hasReplayFields =
-    payload.aad.senderDeviceId !== undefined ||
-    payload.aad.messageCounter !== undefined ||
-    payload.aad.previousMessageHash !== undefined;
-  if (!hasReplayFields &&
-      payload.deviceCertificate === undefined &&
-      payload.deviceSignature === undefined) return null;
   if (String(payload.aad.senderDeviceId || '') !== auth.session.deviceId) {
     return 'senderDeviceId w AAD nie zgadza sie z sesja.';
   }
@@ -176,35 +415,19 @@ function validateCloudMessagePayload(payload, body, auth) {
   if (typeof payload.aad.previousMessageHash !== 'string') {
     return 'Niepoprawny hash poprzedniej wiadomosci.';
   }
-  if (payload.aad.protocolVersion !== undefined && payload.aad.protocolVersion !== 2) {
-    return 'Niepoprawna wersja protokolu wiadomosci.';
+  if (!isValidDeviceCertificate(payload.deviceCertificate) ||
+      typeof payload.deviceSignature !== 'string' || payload.deviceSignature.length < 16) {
+    return 'Wiadomosc wymaga certyfikatu i podpisu urzadzenia.';
   }
-  if (payload.deviceCertificate !== undefined) {
-    if (!isValidDeviceCertificate(payload.deviceCertificate)) {
-      return 'Niepoprawny certyfikat urzadzenia.';
-    }
-    if (payload.deviceCertificate.accountId !== auth.user.userId ||
-        payload.deviceCertificate.deviceId !== auth.session.deviceId) {
-      return 'Certyfikat urzadzenia nie zgadza sie z sesja.';
-    }
-    if (typeof payload.deviceSignature !== 'string' || payload.deviceSignature.length < 16) {
-      return 'Brak podpisu urzadzenia.';
-    }
-    if (isDeviceRevoked(auth.user, auth.session.deviceId)) {
-      return 'Urzadzenie zostalo uniewaznione.';
-    }
-    const activeDevice = activeDeviceEntry(auth.user, auth.session.deviceId);
-    if (isValidDeviceList(auth.user.deviceList)) {
-      if (!activeDevice) {
-        return 'Urzadzenie nie jest aktywne na podpisanej liscie urzadzen.';
-      }
-      if (activeDevice.deviceSigningPublicKey !== payload.deviceCertificate.deviceSigningPublicKey) {
-        return 'Certyfikat urzadzenia nie zgadza sie z lista urzadzen.';
-      }
-    }
+  if (!Number.isInteger(payload.aad.keyEpoch) || payload.aad.keyEpoch < 1) {
+    return 'Niepoprawna epoka klucza wiadomosci.';
   }
-  if (payload.deviceSignature !== undefined && payload.deviceCertificate === undefined) {
-    return 'Podpis urzadzenia wymaga certyfikatu urzadzenia.';
+  if (payload.deviceCertificate.accountId !== auth.user.userId ||
+      payload.deviceCertificate.deviceId !== auth.session.deviceId) {
+    return 'Certyfikat urzadzenia nie zgadza sie z sesja.';
+  }
+  if (!verifyCloudMessageSignature(auth.user, payload)) {
+    return 'Niepoprawny lub wygasly certyfikat albo podpis wiadomosci.';
   }
   return null;
 }
@@ -233,18 +456,78 @@ function writeJson(file, value) {
   fs.renameSync(tmp, file);
 }
 
-async function scryptAsync(password, salt) {
-  if (activeKdfOperations >= MAX_CONCURRENT_KDF) {
-    await new Promise((resolve) => kdfWaiters.push(resolve));
+async function acquireKdfSlot() {
+  if (activeKdfOperations < MAX_CONCURRENT_KDF) {
+    activeKdfOperations += 1;
+    return;
   }
+  if (kdfWaiters.length >= MAX_KDF_QUEUE) {
+    rejectedKdfOperations += 1;
+    throw new ServerBusyError();
+  }
+  await new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, timer: null, enqueuedAt: Date.now() };
+    waiter.timer = setTimeout(() => {
+      const index = kdfWaiters.indexOf(waiter);
+      if (index >= 0) kdfWaiters.splice(index, 1);
+      rejectedKdfOperations += 1;
+      reject(new ServerBusyError('Przekroczono czas oczekiwania na KDF.'));
+    }, KDF_QUEUE_TIMEOUT_MS);
+    waiter.timer.unref?.();
+    kdfWaiters.push(waiter);
+  });
+}
+
+function releaseKdfSlot() {
+  activeKdfOperations -= 1;
+  const waiter = kdfWaiters.shift();
+  if (!waiter) return;
+  clearTimeout(waiter.timer);
+  totalKdfQueueWaitMs += Date.now() - waiter.enqueuedAt;
+  completedKdfQueueWaits += 1;
   activeKdfOperations += 1;
+  waiter.resolve();
+}
+
+export function kdfMetrics() {
+  return {
+    active: activeKdfOperations,
+    queued: kdfWaiters.length,
+    rejected: rejectedKdfOperations,
+    averageQueueWaitMs: completedKdfQueueWaits === 0
+      ? 0
+      : Math.round(totalKdfQueueWaitMs / completedKdfQueueWaits)
+  };
+}
+
+export function storageMetrics(store) {
+  const usedBytes = Number(store.database.instanceBytes());
+  const limitBytes = Number(store.limits.instanceBytes);
+  const usedPercent = limitBytes > 0 ? (usedBytes / limitBytes) * 100 : 100;
+  const disk = fs.statfsSync(store.dataDir);
+  const freeDiskBytes = Number(disk.bavail) * Number(disk.bsize);
+  const alertLevel = usedPercent >= 95 ? 'critical'
+    : usedPercent >= 85 ? 'high'
+      : usedPercent >= 70 ? 'warning'
+        : 'ok';
+  return {
+    usedBytes,
+    limitBytes,
+    usedPercent: Math.round(usedPercent * 100) / 100,
+    freeDiskBytes,
+    minimumFreeDiskBytes: store.limits.minFreeDiskBytes,
+    alertLevel
+  };
+}
+
+async function scryptAsync(password, salt) {
+  await acquireKdfSlot();
   try {
     return await new Promise((resolve, reject) => crypto.scrypt(String(password), salt, 64, {
       N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024
     }, (error, key) => error ? reject(error) : resolve(key)));
   } finally {
-    activeKdfOperations -= 1;
-    kdfWaiters.shift()?.();
+    releaseKdfSlot();
   }
 }
 
@@ -323,7 +606,7 @@ function tokenHash(token) {
   return crypto.createHash('sha256').update(String(token), 'utf8').digest('base64url');
 }
 
-function validateMemberKeys(memberKeys, memberIds) {
+function validateMemberKeys(memberKeys, memberIds, auth) {
   if (!isObject(memberKeys)) return 'memberKeys musi byc obiektem.';
   const allowed = new Set(memberIds);
   for (const [memberId, envelope] of Object.entries(memberKeys)) {
@@ -344,6 +627,11 @@ function validateMemberKeys(memberKeys, memberIds) {
     if (envelope.recipientUserId !== memberId) {
       return 'Odbiorca koperty memberKeys nie zgadza sie z kluczem mapy.';
     }
+    if (!auth || envelope.senderUserId !== auth.user.userId ||
+        envelope.senderDeviceId !== auth.session.deviceId ||
+        !verifyMemberKeyEnvelope(envelope, auth.user)) {
+      return 'Koperta memberKeys nie ma poprawnego podpisu lub kluczy konta.';
+    }
   }
   return null;
 }
@@ -363,31 +651,58 @@ function bearerToken(req) {
   return match ? match[1] : '';
 }
 
+function timingSafeTextEqual(left, right) {
+  const a = Buffer.from(String(left || ''), 'utf8');
+  const b = Buffer.from(String(right || ''), 'utf8');
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+}
+
 export class V2Store {
-  constructor({ dataDir }) {
+  constructor({ dataDir, limits = {} }) {
     this.dataDir = path.resolve(dataDir);
     fs.mkdirSync(this.dataDir, { recursive: true });
+    this.limits = Object.freeze({
+      messageBytes: limits.messageBytes ?? MAX_STORED_MESSAGE_BYTES,
+      messagesPerConversation: limits.messagesPerConversation ?? MAX_MESSAGES_PER_CONVERSATION,
+      conversationBytes: limits.conversationBytes ?? MAX_CONVERSATION_BYTES,
+      accountBytes: limits.accountBytes ?? MAX_ACCOUNT_BYTES,
+      instanceBytes: limits.instanceBytes ?? MAX_INSTANCE_BYTES,
+      dailyAccountBytes: limits.dailyAccountBytes ?? MAX_DAILY_ACCOUNT_BYTES,
+      minFreeDiskBytes: limits.minFreeDiskBytes ?? MIN_FREE_DISK_BYTES
+    });
     this.database = new SqliteStateStore(this.dataDir);
     this.usersFile = path.join(this.dataDir, 'users.json');
     this.sessionsFile = path.join(this.dataDir, 'sessions.json');
     this.conversationsFile = path.join(this.dataDir, 'conversations.json');
     this.messagesFile = path.join(this.dataDir, 'messages.json');
-    this.users = this.database.hasState('users')
+    const normalizedState = this.database.readState('normalized-state-v1', false) === true;
+    this.users = normalizedState
+      ? this.database.readEntities('users', 'users')
+      : this.database.hasState('users')
       ? this.database.readState('users', null)
       : readJson(this.usersFile, { v: 1, users: {} });
-    this.sessions = this.database.hasState('sessions')
+    this.sessions = normalizedState
+      ? this.database.readEntities('sessions', 'sessions')
+      : this.database.hasState('sessions')
       ? this.database.readState('sessions', null)
       : readJson(this.sessionsFile, { v: 1, sessions: {} });
-    this.conversations = this.database.hasState('conversations')
+    this.conversations = normalizedState
+      ? this.database.readEntities('conversations', 'conversations')
+      : this.database.hasState('conversations')
       ? this.database.readState('conversations', null)
       : readJson(this.conversationsFile, { v: 1, conversations: {} });
+    this.invites = normalizedState
+      ? this.database.readEntities('invitations', 'invites')
+      : this.database.readState('invites', { v: 1, invites: {} });
     this.messages = fs.existsSync(this.messagesFile)
       ? readJson(this.messagesFile, { v: 1, messages: {} })
       : { v: 1, messages: {} };
     this.database.importLegacyMessages(this.messages.messages);
-    this.database.writeState('users', this.users);
-    this.database.writeState('sessions', this.sessions);
-    this.database.writeState('conversations', this.conversations);
+    this.database.replaceEntities('users', this.users.users);
+    this.database.replaceEntities('sessions', this.sessions.sessions);
+    this.database.replaceEntities('conversations', this.conversations.conversations);
+    this.database.replaceEntities('invitations', this.invites.invites);
+    this.database.writeState('normalized-state-v1', true);
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
     this.accountQueues = new Map();
@@ -439,15 +754,54 @@ export class V2Store {
   }
 
   persistUsers() {
-    this.database.writeState('users', this.users);
+    this.database.replaceEntities('users', this.users.users);
   }
 
   persistSessions() {
-    this.database.writeState('sessions', this.sessions);
+    this.database.replaceEntities('sessions', this.sessions.sessions);
   }
 
   persistConversations() {
-    this.database.writeState('conversations', this.conversations);
+    this.database.replaceEntities('conversations', this.conversations.conversations);
+  }
+
+  persistInvites() {
+    this.database.replaceEntities('invitations', this.invites.invites);
+  }
+
+  createInvite({ createdBy = 'admin', restrictedUsername = '', expiresInSeconds = 86400,
+    maxUses = 1 } = {}) {
+    const token = crypto.randomBytes(32).toString('base64url');
+    const inviteId = randomId();
+    const now = Date.now();
+    this.invites.invites[inviteId] = {
+      inviteId,
+      tokenHash: tokenHash(token),
+      expiresAt: new Date(now + Math.min(7 * 86400, Math.max(300, expiresInSeconds)) * 1000).toISOString(),
+      maxUses: Math.min(10, Math.max(1, maxUses)),
+      uses: 0,
+      createdBy,
+      restrictedUsername: normalizeUsername(restrictedUsername),
+      createdAt: new Date(now).toISOString(),
+      usedAt: null
+    };
+    this.persistInvites();
+    return { inviteId, token, ...this.invites.invites[inviteId], tokenHash: undefined };
+  }
+
+  consumeInvite(token, username) {
+    const hash = tokenHash(token);
+    const invite = Object.values(this.invites.invites).find((item) =>
+      item.tokenHash === hash);
+    if (!invite || Date.parse(invite.expiresAt) <= Date.now() ||
+        invite.uses >= invite.maxUses ||
+        (invite.restrictedUsername && invite.restrictedUsername !== normalizeUsername(username))) {
+      return false;
+    }
+    invite.uses += 1;
+    invite.usedAt = nowIso();
+    this.persistInvites();
+    return true;
   }
 
   persistMessages(message) {
@@ -455,7 +809,10 @@ export class V2Store {
   }
 
   persistMessageAndConversation(message) {
-    this.database.appendMessageAndUpdateConversations(message, this.conversations);
+    this.database.appendMessageAndUpdateConversation(
+      message,
+      this.conversations.conversations[message.conversationId]
+    );
   }
 
   pruneSessions() {
@@ -483,7 +840,6 @@ export class V2Store {
       devices[deviceId] = {
         deviceId,
         deviceName: device.deviceName || 'Urzadzenie',
-        lastSeenAt: device.lastSeenAt || null,
         deviceCertificate: isValidDeviceCertificate(device.deviceCertificate)
           ? device.deviceCertificate
           : null
@@ -770,8 +1126,23 @@ export async function handleV2Http(store, req, res, url, options = {}) {
     const method = req.method || 'GET';
     const parts = url.pathname.split('/').filter(Boolean);
 
+    if (method === 'POST' && url.pathname === '/v2/admin/invites') {
+      if (!timingSafeTextEqual(req.headers['x-admin-token'], options.adminToken)) {
+        return sendJson(res, 401, { ok: false, error: 'Brak autoryzacji administratora.' });
+      }
+      const body = await readBody(req, AUTH_MAX_BODY_BYTES);
+      const invite = store.createInvite({
+        createdBy: 'admin',
+        restrictedUsername: body.restrictedUsername,
+        expiresInSeconds: Number(body.expiresInSeconds) || 86400,
+        maxUses: Number(body.maxUses) || 1
+      });
+      return sendJson(res, 201, { ok: true, invite });
+    }
+
     if (method === 'POST' && url.pathname === '/v2/register') {
-      if ((options.registrationMode || 'invite') !== 'open') {
+      const registrationMode = options.registrationMode || 'disabled';
+      if (registrationMode === 'disabled') {
         return sendJson(res, 403, { ok: false, error: 'Rejestracja publiczna jest wylaczona.' });
       }
       const body = await readBody(req, AUTH_MAX_BODY_BYTES);
@@ -781,6 +1152,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       const deviceId = String(body.deviceId || randomId());
       if (!safeUsername(username)) return sendJson(res, 400, { ok: false, error: 'Niepoprawna nazwa konta.' });
       if (password.length < 8) return sendJson(res, 400, { ok: false, error: 'Haslo ma minimum 8 znakow.' });
+      return await store.withAccountLock(`registration:${username}`, async () => {
       if (store.userByName(username)) return sendJson(res, 409, { ok: false, error: 'Konto juz istnieje.' });
       if (typeof body.keyAgreementPublicKey !== 'string' || body.keyAgreementPublicKey.length < 16) {
         return sendJson(res, 400, { ok: false, error: 'Brak publicznego klucza szyfrowania.' });
@@ -791,13 +1163,21 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (typeof body.keyAgreementPublicKeySignature !== 'string' || body.keyAgreementPublicKeySignature.length < 16) {
         return sendJson(res, 400, { ok: false, error: 'Brak podpisu klucza szyfrowania.' });
       }
+      if (!isValidVaultKdf(body.vaultKdf)) {
+        return sendJson(res, 400, { ok: false, error: 'Nowe konto wymaga bezpiecznych parametrow Argon2id.' });
+      }
+      const passwordHash = await hashPassword(password);
+      if (registrationMode === 'invite' &&
+          !store.consumeInvite(String(body.inviteToken || ''), username)) {
+        return sendJson(res, 403, { ok: false, error: 'Niepoprawne lub wygasle zaproszenie.' });
+      }
 
       const userId = randomId();
       const user = {
         userId,
         username,
         displayName: String(body.displayName || username).slice(0, 80),
-        password: await hashPassword(password),
+        password: passwordHash,
         vaultSalt: typeof body.vaultSalt === 'string' && body.vaultSalt.length >= 16
           ? body.vaultSalt
           : crypto.randomBytes(16).toString('base64url'),
@@ -806,6 +1186,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         keyAgreementPublicKeySignature: body.keyAgreementPublicKeySignature,
         identityRotationProof: isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null,
         encryptedVault: isObject(body.encryptedVault) ? body.encryptedVault : null,
+        vaultKdf: body.vaultKdf,
         devices: {},
         createdAt: nowIso(),
         updatedAt: nowIso()
@@ -815,7 +1196,8 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       try {
         session = store.createSession(user, deviceId, body.deviceName);
       } catch (error) {
-        return sendJson(res, 403, { ok: false, error: String(error.message || error) });
+        console.error(JSON.stringify({ event: 'registration_session_failed', error: String(error?.stack || error) }));
+        return sendJson(res, 403, { ok: false, error: 'REGISTRATION_FAILED' });
       }
       store.persistUsers();
       return sendJson(res, 200, {
@@ -826,6 +1208,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         deviceId,
         vaultSalt: user.vaultSalt,
         encryptedVault: user.encryptedVault
+      });
       });
     }
 
@@ -852,7 +1235,10 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         vaultSalt: user.vaultSalt,
         encryptedVault: user.encryptedVault,
         vaultEpoch: Number.isInteger(user.vaultEpoch) ? user.vaultEpoch : 0,
-        vaultHash: typeof user.vaultHash === 'string' ? user.vaultHash : ''
+        vaultHash: typeof user.vaultHash === 'string' ? user.vaultHash : '',
+        vaultKdf: isValidVaultKdf(user.vaultKdf, { allowLegacy: true })
+          ? user.vaultKdf
+          : null
       });
     }
 
@@ -897,8 +1283,15 @@ export async function handleV2Http(store, req, res, url, options = {}) {
     }
 
     if (method === 'GET' && url.pathname === '/v2/users') {
+      const exactUsername = normalizeUsername(url.searchParams.get('username'));
+      const visibleUserIds = new Set([auth.user.userId]);
+      for (const conversation of store.conversationsForUser(auth.user.userId)) {
+        for (const memberId of conversation.memberIds) visibleUserIds.add(memberId);
+      }
       const users = Object.values(store.users.users)
-        .filter((user) => user.userId !== auth.user.userId)
+        .filter((user) => user.userId !== auth.user.userId &&
+          (visibleUserIds.has(user.userId) ||
+            (exactUsername.length >= 3 && user.username === exactUsername)))
         .map((user) => store.publicUser(user))
         .sort((a, b) => a.displayName.localeCompare(b.displayName));
       return sendJson(res, 200, { ok: true, users });
@@ -920,25 +1313,52 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (typeof body.keyAgreementPublicKeySignature !== 'string' || body.keyAgreementPublicKeySignature.length < 16) {
         return sendJson(res, 400, { ok: false, error: 'Brak podpisu klucza szyfrowania.' });
       }
-      if (body.identityRotationProof !== undefined && body.identityRotationProof !== null && !isValidIdentityRotationProof(body.identityRotationProof)) {
-        return sendJson(res, 400, { ok: false, error: 'Niepoprawny dowod rotacji tozsamosci.' });
+      if (!isValidDeviceCertificate(body.deviceCertificate) ||
+          body.deviceCertificate.accountId !== auth.user.userId ||
+          body.deviceCertificate.deviceId !== auth.session.deviceId) {
+        return sendJson(res, 400, { ok: false, error: 'Aktualizacja kluczy wymaga certyfikatu aktualnego urzadzenia.' });
       }
-      if (body.deviceCertificate !== undefined && body.deviceCertificate !== null) {
-        if (!isValidDeviceCertificate(body.deviceCertificate)) {
-          return sendJson(res, 400, { ok: false, error: 'Niepoprawny certyfikat urzadzenia.' });
-        }
-        if (body.deviceCertificate.accountId !== auth.user.userId ||
-            body.deviceCertificate.deviceId !== auth.session.deviceId) {
-          return sendJson(res, 400, { ok: false, error: 'Certyfikat urzadzenia nie zgadza sie z sesja.' });
-        }
+      const serverOrigin = body.deviceCertificate.serverOrigin;
+      if ((auth.user.serverOrigin && auth.user.serverOrigin !== serverOrigin) ||
+          (body.deviceList?.serverOrigin && body.deviceList.serverOrigin !== serverOrigin)) {
+        return sendJson(res, 400, { ok: false, error: 'Origin kluczy nie zgadza sie z kontem.' });
       }
-      if (body.deviceList !== undefined && body.deviceList !== null) {
-        if (!isValidDeviceList(body.deviceList)) {
-          return sendJson(res, 400, { ok: false, error: 'Niepoprawna lista urzadzen.' });
-        }
-        if (body.deviceList.accountId !== auth.user.userId) {
-          return sendJson(res, 400, { ok: false, error: 'Lista urzadzen nie zgadza sie z kontem.' });
-        }
+      const identityChanged = body.identityPublicKey !== auth.user.identityPublicKey;
+      if (identityChanged && !verifyIdentityRotation(
+        auth.user,
+        body.identityPublicKey,
+        body.keyAgreementPublicKey,
+        body.identityRotationProof,
+        serverOrigin
+      )) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny kryptograficzny dowod rotacji tozsamosci.' });
+      }
+      if (!identityChanged && body.identityRotationProof !== undefined &&
+          body.identityRotationProof !== null &&
+          canonicalJson(body.identityRotationProof) !== canonicalJson(auth.user.identityRotationProof)) {
+        return sendJson(res, 400, { ok: false, error: 'Nieoczekiwany dowod rotacji tozsamosci.' });
+      }
+      if (!verifyKeyAgreementBinding(
+        auth.user.userId,
+        serverOrigin,
+        body.identityPublicKey,
+        body.keyAgreementPublicKey,
+        body.keyAgreementPublicKeySignature
+      )) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny podpis klucza X25519.' });
+      }
+      if (!verifyDeviceCertificateSignature(
+        auth.user.userId,
+        body.identityPublicKey,
+        body.deviceCertificate
+      )) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny lub wygasly certyfikat urzadzenia.' });
+      }
+      if (!isValidDeviceList(body.deviceList) ||
+          !verifyDeviceList(auth.user.userId, body.identityPublicKey, body.deviceList)) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny podpis listy urzadzen.' });
+      }
+      {
         if (body.deviceList.revokedDevices.some((device) => device.deviceId === auth.session.deviceId)) {
           return sendJson(res, 400, { ok: false, error: 'Nie mozna uniewaznic aktualnie uzywanego urzadzenia.' });
         }
@@ -963,11 +1383,31 @@ export async function handleV2Http(store, req, res, url, options = {}) {
             error: 'Lista urzadzen zostala zmieniona przez inne urzadzenie. Odswiez stan i sprobuj ponownie.'
           });
         }
+        const calculatedListHash = sha256Hex(body.deviceList);
+        const idempotentList = currentEpoch > 0 &&
+          body.deviceList.deviceListEpoch === currentEpoch &&
+          body.deviceListHash === currentHash &&
+          canonicalJson(body.deviceList) === canonicalJson(auth.user.deviceList);
+        const nextList = body.deviceList.deviceListEpoch === currentEpoch + 1 &&
+          body.deviceList.previousDeviceListHash === currentHash &&
+          body.deviceListHash === calculatedListHash;
+        if (!idempotentList && !nextList) {
+          return sendJson(res, 409, { ok: false, error: 'Lista urzadzen nie kontynuuje podpisanego lancucha.' });
+        }
+        const active = body.deviceList.devices.find((item) =>
+          item.deviceId === auth.session.deviceId);
+        if (!active ||
+            active.deviceSigningPublicKey !== body.deviceCertificate.deviceSigningPublicKey ||
+            active.deviceEpoch !== body.deviceCertificate.deviceEpoch ||
+            active.certificateHash !== sha256Hex(body.deviceCertificate)) {
+          return sendJson(res, 400, { ok: false, error: 'Lista urzadzen nie zawiera aktualnego certyfikatu.' });
+        }
       }
       const previouslyRevoked = revokedDeviceIds(auth.user);
       auth.user.keyAgreementPublicKey = body.keyAgreementPublicKey;
       auth.user.identityPublicKey = body.identityPublicKey;
       auth.user.keyAgreementPublicKeySignature = body.keyAgreementPublicKeySignature;
+      auth.user.serverOrigin = serverOrigin;
       auth.user.identityRotationProof = isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null;
       if (isValidDeviceCertificate(body.deviceCertificate)) {
         auth.user.devices ||= {};
@@ -1000,6 +1440,9 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (!isObject(body.encryptedVault)) {
         return sendJson(res, 400, { ok: false, error: 'Brak zaszyfrowanego vaulta.' });
       }
+      if (!isValidVaultKdf(body.vaultKdf)) {
+        return sendJson(res, 400, { ok: false, error: 'Zapis vaultu wymaga Argon2id.' });
+      }
       return await store.withAccountLock(auth.user.userId, async () => {
         const user = store.users.users[auth.user.userId];
         const currentEpoch = Number.isInteger(user.vaultEpoch) ? user.vaultEpoch : 0;
@@ -1015,6 +1458,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
           return sendJson(res, 413, { ok: false, error: 'Vault jest za duzy.' });
         }
         user.encryptedVault = body.encryptedVault;
+        user.vaultKdf = body.vaultKdf;
         user.vaultEpoch = currentEpoch + 1;
         user.vaultHash = crypto.createHash('sha256').update(serialized).digest('base64url');
         user.updatedAt = nowIso();
@@ -1031,6 +1475,9 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         encryptedVault: auth.user.encryptedVault
         ,vaultEpoch: Number.isInteger(auth.user.vaultEpoch) ? auth.user.vaultEpoch : 0
         ,vaultHash: typeof auth.user.vaultHash === 'string' ? auth.user.vaultHash : ''
+        ,vaultKdf: isValidVaultKdf(auth.user.vaultKdf, { allowLegacy: true })
+          ? auth.user.vaultKdf
+          : null
       });
     }
 
@@ -1048,7 +1495,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (!SAFE_ID.test(requestedConversationId)) {
         return sendJson(res, 400, { ok: false, error: 'Niepoprawny identyfikator rozmowy.' });
       }
-      const memberKeysError = validateMemberKeys(body.memberKeys || {}, memberIds);
+      const memberKeysError = validateMemberKeys(body.memberKeys || {}, memberIds, auth);
       if (memberKeysError) return sendJson(res, 400, { ok: false, error: memberKeysError });
       if (Object.keys(body.memberKeys || {}).length !== memberIds.length) {
         return sendJson(res, 400, { ok: false, error: 'Tworzenie rozmowy wymaga koperty dla kazdego czlonka.' });
@@ -1098,7 +1545,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         if (body.expectedKeyEpoch !== currentEpoch) {
           return sendJson(res, 409, { ok: false, error: 'Klucz rozmowy zostal juz obrocony.' });
         }
-        const memberKeysError = validateMemberKeys(body.memberKeys, conversation.memberIds);
+        const memberKeysError = validateMemberKeys(body.memberKeys, conversation.memberIds, auth);
         if (memberKeysError) return sendJson(res, 400, { ok: false, error: memberKeysError });
         if (Object.keys(body.memberKeys).length !== conversation.memberIds.length) {
           return sendJson(res, 400, { ok: false, error: 'Rotacja wymaga koperty dla kazdego czlonka.' });
@@ -1143,15 +1590,42 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (!conversation || !conversation.memberIds.includes(auth.user.userId)) {
         return sendJson(res, 404, { ok: false, error: 'Nie ma takiej rozmowy.' });
       }
+      if (conversation.type !== 'direct') {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'Wysylanie do grup jest zablokowane do czasu bezpiecznej rotacji kluczy.'
+        });
+      }
       const payloadError = validateCloudMessagePayload(body.payload, body, auth);
       if (payloadError) {
         return sendJson(res, 400, { ok: false, error: payloadError });
       }
-      if (Buffer.byteLength(JSON.stringify(body.payload), 'utf8') > MAX_STORED_MESSAGE_BYTES) {
+      if (body.payload.aad.keyEpoch !== conversation.keyEpoch) {
+        return sendJson(res, 409, { ok: false, error: 'Wiadomosc uzywa nieaktualnej epoki klucza.' });
+      }
+      const payloadBytes = Buffer.byteLength(JSON.stringify(body.payload), 'utf8');
+      if (payloadBytes > store.limits.messageBytes) {
         return sendJson(res, 413, { ok: false, error: 'Wiadomosc jest za duza.' });
       }
-      if (store.database.messageCount(conversationId) >= MAX_MESSAGES_PER_CONVERSATION) {
-        return sendJson(res, 507, { ok: false, error: 'Rozmowa osiagnela limit przechowywania.' });
+      const quotaError = storageQuotaError(
+        store,
+        auth.user.userId,
+        conversationId,
+        payloadBytes
+      );
+      if (quotaError) return sendJson(res, quotaError.status, { ok: false, error: quotaError.error });
+      const counter = body.payload.aad.messageCounter;
+      const previousHash = body.payload.aad.previousMessageHash;
+      const streamError = messageStreamError(
+        store.database,
+        conversationId,
+        auth.user.userId,
+        auth.session.deviceId,
+        counter,
+        previousHash
+      );
+      if (streamError) {
+        return sendJson(res, 409, { ok: false, error: streamError });
       }
       const list = store.messages.messages[conversationId] || [];
       const seq = store.database.nextMessageSequence(conversationId);
@@ -1161,6 +1635,9 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         seq,
         senderUserId: auth.user.userId,
         senderDeviceId: auth.session.deviceId,
+        messageCounter: counter,
+        payloadHash: cloudMessageHash(body.payload),
+        payloadBytes,
         createdAt: nowIso(),
         payload: body.payload
       };
@@ -1177,6 +1654,9 @@ export async function handleV2Http(store, req, res, url, options = {}) {
   } catch (error) {
     const requestId = crypto.randomUUID();
     console.error(JSON.stringify({ requestId, error: String(error?.stack || error) }));
+    if (error?.code === 'SERVER_BUSY') {
+      return sendJson(res, 503, { ok: false, error: 'SERVER_BUSY', requestId });
+    }
     return sendJson(res, 500, { ok: false, error: 'INTERNAL_ERROR', requestId });
   }
 }
@@ -1196,3 +1676,16 @@ export function handleV2WebSocket(store, ws, request) {
     ws.on('message', () => ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() })));
   });
 }
+
+export const securityTestInternals = Object.freeze({
+  canonicalJson,
+  cloudMessageHash,
+  genesisHash: CLOUD_MESSAGE_GENESIS_HASH,
+  messageStreamError,
+  scryptAsync,
+  storageQuotaError,
+  validateCloudMessagePayload,
+  validateMemberKeys,
+  verifyDeviceCertificate,
+  verifyMemberKeyEnvelope
+});
