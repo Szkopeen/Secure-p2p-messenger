@@ -1,6 +1,6 @@
-# Secure P2P Messenger
+# Self Hosted Secure Messenger
 
-Secure P2P Messenger to self-hosted komunikator z klientem Flutter i serwerem API v2. Aktualna wersja dziala w trybie cloud relay: serwer przechowuje konta, sesje i zaszyfrowana historie, a tresc rozmow pozostaje szyfrowana po stronie klienta.
+Self Hosted Secure Messenger to self-hosted komunikator z klientem Flutter i serwerem API v2. Aktualna wersja dziala w trybie cloud relay: serwer przechowuje konta, sesje i zaszyfrowana historie, a tresc rozmow pozostaje szyfrowana po stronie klienta.
 
 Repozytorium nie powinno zawierac prywatnych danych, prawdziwych domen, adresow IP, tokenow, kluczy ani lokalnych sciezek. Wszystkie przyklady ponizej uzywaja placeholderow.
 
