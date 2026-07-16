@@ -11,6 +11,7 @@ import {
   handleV2Http,
   securityTestInternals as security
 } from '../src/v2Store.js';
+import { safeOpenUpdateFile } from '../src/updateFiles.js';
 
 async function httpRequest(store, method, pathname, { body, token } = {}) {
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
@@ -50,6 +51,16 @@ function authReq(ip) {
     clientIp: ip,
     socket: { remoteAddress: ip }
   };
+}
+
+function createFileSymlinkOrSkip(t, target, link) {
+  try {
+    fs.symlinkSync(target, link, 'file');
+    return true;
+  } catch (error) {
+    t.skip(`System nie pozwala utworzyc symlinkow w tym srodowisku: ${error.code || error.message}`);
+    return false;
+  }
 }
 
 async function importFreshConfig() {
@@ -232,6 +243,38 @@ test('konfiguracja akceptuje produkcyjny limit WebSocket 16 MiB', async () => {
     else process.env.MAX_PAYLOAD_BYTES = previousPayload;
     if (previousAdmin === undefined) delete process.env.ADMIN_TOKEN;
     else process.env.ADMIN_TOKEN = previousAdmin;
+  }
+});
+
+test('pliki aktualizacji odrzucaja symlink manifestu i artefaktu', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-updates-'));
+  const updatesDir = path.join(root, 'updates');
+  const filesDir = path.join(updatesDir, 'files');
+  fs.mkdirSync(filesDir, { recursive: true });
+  const secret = path.join(root, 'secret.txt');
+  fs.writeFileSync(secret, 'tajny plik spoza katalogu aktualizacji', 'utf8');
+
+  const manifestLink = path.join(updatesDir, 'manifest.json');
+  if (!createFileSymlinkOrSkip(t, secret, manifestLink)) return;
+  assert.throws(
+    () => safeOpenUpdateFile(updatesDir, 'manifest.json', { maxBytes: 1024 * 1024 }),
+    { code: 'NOT_FOUND' }
+  );
+
+  const artifactLink = path.join(filesDir, 'client.zip');
+  if (!createFileSymlinkOrSkip(t, secret, artifactLink)) return;
+  assert.throws(
+    () => safeOpenUpdateFile(filesDir, 'client.zip'),
+    { code: 'NOT_FOUND' }
+  );
+
+  const manifest = path.join(updatesDir, 'valid-manifest.json');
+  fs.writeFileSync(manifest, '{}', 'utf8');
+  const opened = safeOpenUpdateFile(updatesDir, 'valid-manifest.json', { maxBytes: 1024 * 1024 });
+  try {
+    assert.equal(opened.stat.size, 2);
+  } finally {
+    fs.closeSync(opened.fd);
   }
 });
 

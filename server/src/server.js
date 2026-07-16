@@ -13,6 +13,7 @@ import {
   kdfMetrics,
   storageMetrics
 } from './v2Store.js';
+import { SafeUpdateFileError, safeOpenUpdateFile } from './updateFiles.js';
 
 const v2Store = new V2Store({
   dataDir: config.v2DataDir,
@@ -74,22 +75,28 @@ function sendJson(res, status, payload) {
 
 function serveUpdateManifest(res) {
   const file = path.resolve(config.updateManifestFile);
-  if (!fs.existsSync(file)) {
+  let opened;
+  try {
+    opened = safeOpenUpdateFile(path.dirname(file), path.basename(file), {
+      maxBytes: 1024 * 1024
+    });
+  } catch (error) {
+    if (error instanceof SafeUpdateFileError && error.code === 'TOO_LARGE') {
+      sendJson(res, 500, { ok: false, error: 'Niepoprawny manifest aktualizacji.' });
+      return;
+    }
     sendJson(res, 404, { ok: false, error: 'Brak manifestu aktualizacji.' });
-    return;
-  }
-  const stat = fs.statSync(file);
-  if (!stat.isFile() || stat.size > 1024 * 1024) {
-    sendJson(res, 500, { ok: false, error: 'Niepoprawny manifest aktualizacji.' });
     return;
   }
   res.writeHead(200, {
     'content-type': 'application/json; charset=utf-8',
-    'content-length': stat.size,
+    'content-length': opened.stat.size,
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff'
   });
-  fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
+  fs.createReadStream(opened.file, { fd: opened.fd, autoClose: true })
+    .on('error', () => res.destroy())
+    .pipe(res);
 }
 
 function serveUpdateFile(res, encodedName) {
@@ -106,48 +113,21 @@ function serveUpdateFile(res, encodedName) {
     return;
   }
   const baseDir = path.resolve(config.updateFilesDir);
-  const file = path.resolve(baseDir, fileName);
-  const relativePath = path.relative(baseDir, file);
-  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-    sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
-    return;
-  }
-  let fd;
-  let stat;
+  let opened;
   try {
-    const baseRealPath = fs.realpathSync(baseDir);
-    const linkStat = fs.lstatSync(file);
-    if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
-      sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
-      return;
-    }
-    const fileRealPath = fs.realpathSync(file);
-    const realRelativePath = path.relative(baseRealPath, fileRealPath);
-    if (realRelativePath.startsWith('..') || path.isAbsolute(realRelativePath)) {
-      sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
-      return;
-    }
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    stat = fs.fstatSync(fd);
-    if (!stat.isFile()) {
-      fs.closeSync(fd);
-      fd = null;
-      sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
-      return;
-    }
+    opened = safeOpenUpdateFile(baseDir, fileName);
   } catch {
-    if (fd != null) fs.closeSync(fd);
     sendJson(res, 404, { ok: false, error: 'Plik aktualizacji nie istnieje.' });
     return;
   }
   res.writeHead(200, {
     'content-type': 'application/octet-stream',
-    'content-length': stat.size,
+    'content-length': opened.stat.size,
     'cache-control': 'no-store',
     'content-disposition': `attachment; filename="${fileName}"`,
     'x-content-type-options': 'nosniff'
   });
-  fs.createReadStream(file, { fd, autoClose: true })
+  fs.createReadStream(opened.file, { fd: opened.fd, autoClose: true })
     .on('error', () => res.destroy())
     .pipe(res);
 }

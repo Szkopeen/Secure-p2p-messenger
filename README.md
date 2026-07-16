@@ -125,8 +125,8 @@ Wykonane elementy zabezpieczen:
   wysylania nowych podpisanych wiadomosci.
 - Manifest aktualizacji aplikacji jest podpisywany Ed25519 i weryfikowany
   kluczem publicznym wbudowanym w klienta.
-- Pliki aktualizacji sa podawane bez podazania za symlinkami i po sprawdzeniu,
-  ze finalna sciezka zostaje w katalogu aktualizacji.
+- Manifest i artefakty aktualizacji sa podawane bez podazania za symlinkami i
+  po sprawdzeniu, ze finalna sciezka zostaje w katalogu aktualizacji.
 
 ## Znane ograniczenia
 
