@@ -104,6 +104,9 @@ Wykonane elementy zabezpieczen:
   poprzedniego dowodu.
 - Nowe wiadomosci maja anty-replay: licznik, hash poprzedniej wiadomosci,
   genesis hash i kanoniczny hash calej koperty.
+- Nowe wiadomosci wyprowadzaja osobny klucz AEAD przez HKDF-SHA256 z klucza
+  rozmowy, epoki, licznika, ID wiadomosci i poprzedniego hasha. To ogranicza
+  reuse klucza wiadomosci, ale nie jest pelnym Double Ratchet.
 - Wiadomosci poza kolejnoscia sa buforowane jako luka zamiast od razu blokowac
   rozmowe.
 - Kazde urzadzenie ma lokalny klucz podpisujacy Ed25519.
@@ -130,6 +133,13 @@ Wykonane elementy zabezpieczen:
   ukrywa haslo logowania przed aktywnie zlosliwym serwerem.
 - Nie ma jeszcze Double Ratchet ani MLS, wiec forward secrecy i
   post-compromise security sa ograniczone.
+- Brak Double Ratchet/PQXDH, key transparency oraz OPAQUE/PAKE jest blokada dla
+  scenariuszy wysokiego ryzyka. Nie wolno opisywac tej wersji jako odpornej na
+  zlosliwy serwer albo porownywalnej z Signalem, dopoki te protokoly nie beda
+  wdrozone i audytowane.
+- Blokada PIN chroni interfejs po powrocie do aplikacji. Nie opakowuje jeszcze
+  lokalnych kluczy dodatkowa warstwa kryptograficzna; integracja z Android
+  Keystore, biometria, DPAPI i Secret Service/KWallet pozostaje roadmapa.
 - Uniewaznienie urzadzenia blokuje nowe wiadomosci i sesje oraz rotuje klucze
   rozmow 1:1. Grupy pozostaja wylaczone do czasu wdrozenia bezpiecznego MLS
   albo audytowanego protokolu sender-key.

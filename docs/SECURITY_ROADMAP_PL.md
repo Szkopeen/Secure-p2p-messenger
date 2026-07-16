@@ -68,6 +68,10 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Hash lancucha wiadomosci obejmuje rowniez podpis urzadzenia, dzieki czemu
   nastepna wiadomosc zalezy nie tylko od szyfrogramu, ale tez od tego, ktore
   urzadzenie podpisalo poprzednia koperte.
+- Nowe wiadomosci wyprowadzaja osobny klucz AEAD przez HKDF-SHA256 z klucza
+  rozmowy, epoki, licznika, ID wiadomosci i poprzedniego hasha. To ogranicza
+  reuse klucza wiadomosci, ale nie daje jeszcze pelnego Double Ratchet ani
+  post-compromise security.
 - Klient blokuje downgrade podpisanego strumienia: jezeli dany strumien
   `rozmowa + nadawca + urzadzenie` przeszedl na podpisy urzadzen, kolejne
   wiadomosci bez poprawnego podpisu sa odrzucane.
@@ -105,14 +109,21 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   endpoint `/v2/sessions` pozwala zobaczyc aktywne sesje.
 - Publiczny `/healthz` jest prostym liveness checkiem. Szczegoly KDF i storage
   sa przeniesione do `/metrics`, chronione `x-admin-token`, allowlista adresow
-  IP i cache'owane dla kosztownych metryk storage.
+  IP i cache'owane dla kosztownych metryk storage. Przy reverse proxy decyzja
+  allowlisty opiera sie na rozpoznanym `clientIp`, a nie na lokalnym adresie
+  TCP proxy.
 - Katalog uzytkownikow nie zwraca juz globalnej listy. Wyszukiwanie wymaga
   dokladnego loginu, jest rate-limitowane i nie ujawnia listy urzadzen osobom
   spoza wspolnej rozmowy albo wlasnego konta.
 - Logowanie i rejestracja maja limity per IP, per konto oraz per para IP+konto
-  z krotka blokada narastajaca.
+  z krotka blokada narastajaca. Limiter uzywa oddzielnych map dla IP, konta i
+  pary IP+konto, nie usuwa aktywnych blokad przy wypelnieniu mapy i ma testy
+  zalewu ponad 5000 unikalnych loginow.
 - Klient ma prywatny ekran, natywny `FLAG_SECURE` na Androidzie i opcjonalna
-  blokade PIN po powrocie z tla.
+  blokade PIN po powrocie z tla. PIN jest hashowany przez PBKDF2-HMAC-SHA256 z
+  losowa sola, a licznik bledow i czas blokady sa trzymane w secure storage z
+  progresywnym timeoutem. Ta funkcja chroni interfejs i nie opakowuje jeszcze
+  lokalnych kluczy dodatkowa warstwa kryptograficzna.
 - Dodano skrypt `npm run backup-sqlite -- --out ...`, ktory wykonuje backup
   online przez SQLite `VACUUM INTO` i sprawdza integralnosc zrodlowej bazy oraz
   utworzonej kopii.
@@ -130,7 +141,8 @@ sekretem.
 ## Najwieksze pozostale ryzyka
 
 1. Brak OPAQUE lub rownowaznego protokolu logowania bez ujawniania hasla
-   aplikacyjnego serwerowi.
+   aplikacyjnego serwerowi. Tego nie wolno zastapic wlasnym, nieaudytowanym
+   PAKE.
 2. Pierwsze dodanie kontaktu nadal ufa tozsamosci dostarczonej przez serwer,
    dopoki uzytkownicy nie porownaja safety number poza serwerem.
 3. Brak publicznego key transparency logu.
@@ -140,8 +152,8 @@ sekretem.
 5. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
 6. Rekey po uniewaznieniu obejmuje aktywne rozmowy 1:1; grupy sa wylaczone do
    czasu wdrozenia bezpiecznego protokolu grupowego.
-7. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
-   komunikatu.
+7. Brak Double Ratchet/PQXDH, czyli brak pelnego forward secrecy i
+   post-compromise security porownywalnego z Signalem.
 8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
 9. SQLite jest odpowiedni dla malej self-hosted instancji, ale duza publiczna
@@ -150,16 +162,18 @@ sekretem.
 
 ## Priorytet 1: prawdziwsze E2EE wzgledem serwera
 
-1. Wdrozyc OPAQUE albo inny protokol logowania, w ktorym serwer nie otrzymuje
-   sekretu pozwalajacego odszyfrowac vault.
-2. Dodac key transparency log dla publicznych tozsamosci Ed25519.
+1. Wdrozyc sprawdzona biblioteke OPAQUE albo inny audytowany PAKE, w ktorym
+   serwer nie otrzymuje sekretu pozwalajacego odszyfrowac vault.
+2. Dodac publicznie weryfikowalny key transparency log dla publicznych
+   tozsamosci Ed25519, z klientem weryfikujacym dowody inkluzji i spojnosc
+   drzewa.
 3. Rozszerzyc rekey po uniewaznieniu na przyszly bezpieczny protokol grupowy.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.
 
 ## Priorytet 2: forward secrecy
 
-1. Dodac Double Ratchet dla rozmow 1:1.
+1. Dodac audytowana implementacje X3DH/PQXDH + Double Ratchet dla rozmow 1:1.
 2. Usuwac zuzyte klucze wiadomosci natychmiast po uzyciu.
 3. Oddzielic klucze do historii lokalnej, synchronizacji i nowych wiadomosci.
 4. Dla grup zaczac od sender keys, a potem rozwazyc bardziej zaawansowany MLS.

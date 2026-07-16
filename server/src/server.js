@@ -60,8 +60,7 @@ function clientIp(req) {
 
 function metricsIpAllowed(req) {
   if (config.metricsAllowedIps.includes('*')) return true;
-  const remote = req.socket.remoteAddress || '';
-  return config.metricsAllowedIps.includes(req.clientIp) || config.metricsAllowedIps.includes(remote);
+  return config.metricsAllowedIps.includes(req.clientIp || '');
 }
 
 function sendJson(res, status, payload) {

@@ -41,6 +41,11 @@ New messages must use `secure-p2p-cloud-message/v1` with
 `aad.protocolVersion = 2`. The authenticated data includes conversation and
 message IDs, sender account and device, key epoch, per-device counter,
 `previousMessageHash`, content type, creation time and plaintext byte count.
+New clients set `aad.messageKeyDerivation = hkdf-sha256-message-v1` and derive
+the AES-GCM key for each message with HKDF-SHA256 from the conversation key,
+key epoch, message counter, message ID and previous message hash. This reduces
+key reuse across messages, but it is not a substitute for Double Ratchet or
+post-compromise security.
 
 The device signs SHA-256 of canonical JSON:
 
@@ -78,3 +83,17 @@ transparency, metadata anonymity, OPAQUE or malicious-server equivocation
 resistance. Until reviewed implementations of those properties exist, the
 product remains an alpha and must not be described as suitable for high-risk
 users.
+
+## Capability gate
+
+The current protocol version deliberately has no high-risk capability bit. A
+release may only claim Double Ratchet/PQXDH, post-compromise security, key
+transparency or OPAQUE/PAKE after the repository contains:
+
+1. a reviewed protocol document for the feature,
+2. an implementation based on an audited library or independently reviewed
+   construction,
+3. client and server tests for downgrade, rollback and equivocation cases,
+4. migration tests for existing conversations and accounts.
+
+Until then, those properties are release blockers rather than marketing claims.

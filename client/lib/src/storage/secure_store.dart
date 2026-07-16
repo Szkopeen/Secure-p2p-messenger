@@ -28,6 +28,7 @@ class SecureStore {
   static const _cloudVaultPins = 'cloud.vaultPins.v1';
   static const _privacyScreenEnabled = 'privacy.screen.enabled.v1';
   static const _appLockPin = 'privacy.appLock.pin.v1';
+  static const _appLockState = 'privacy.appLock.state.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -103,15 +104,48 @@ class SecureStore {
     );
   }
 
-  Future<void> saveAppLockPin({required String salt, required String hash}) {
+  Future<void> saveAppLockPin({
+    required String algorithm,
+    required int iterations,
+    required String salt,
+    required String hash,
+  }) {
     return _storage.write(
       key: _appLockPin,
-      value: jsonEncode({'salt': salt, 'hash': hash}),
+      value: jsonEncode({
+        'algorithm': algorithm,
+        'iterations': iterations,
+        'salt': salt,
+        'hash': hash,
+      }),
     );
   }
 
   Future<void> clearAppLockPin() {
     return _storage.delete(key: _appLockPin);
+  }
+
+  Future<Map<String, dynamic>?> loadAppLockState() async {
+    final raw = await _storage.read(key: _appLockState);
+    if (raw == null || raw.isEmpty) return null;
+    return (jsonDecode(raw) as Map).cast<String, dynamic>();
+  }
+
+  Future<void> saveAppLockState({
+    required int failedAttempts,
+    DateTime? blockedUntil,
+  }) {
+    return _storage.write(
+      key: _appLockState,
+      value: jsonEncode({
+        'failedAttempts': failedAttempts,
+        'blockedUntilMs': blockedUntil?.toUtc().millisecondsSinceEpoch,
+      }),
+    );
+  }
+
+  Future<void> clearAppLockState() {
+    return _storage.delete(key: _appLockState);
   }
 
   Future<void> saveContacts(List<Contact> contacts) async {

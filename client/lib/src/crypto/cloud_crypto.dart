@@ -79,6 +79,7 @@ class CloudCrypto {
   static const deviceCertificateProtocol = 'secure-chat/device-certificate/v1';
   static const deviceMessageProtocol = 'secure-chat/device-message/v1';
   static const deviceListProtocol = 'secure-chat/device-list/v1';
+  static const messageKeyDerivation = 'hkdf-sha256-message-v1';
 
   final AesGcm _aead = AesGcm.with256bits();
   final X25519 _x25519 = X25519();
@@ -1023,6 +1024,7 @@ class CloudCrypto {
       'v': 1,
       'protocol': messageProtocol,
       'protocolVersion': 2,
+      'messageKeyDerivation': messageKeyDerivation,
       'conversationId': conversationId,
       'messageId': messageId,
       'senderUserId': senderUserId,
@@ -1044,9 +1046,13 @@ class CloudCrypto {
     aad['plaintextBytes'] = clear.length;
     final compressed = ZLibEncoder().encode(clear);
     final nonce = secureRandomBytes(12);
+    final messageKey = await _deriveMessageKey(
+      conversationKey: conversationKey,
+      aad: aad,
+    );
     final box = await _aead.encrypt(
       compressed,
-      secretKey: SecretKey(unb64(conversationKey)),
+      secretKey: messageKey,
       nonce: nonce,
       aad: canonicalJsonBytes(aad),
     );
@@ -1123,9 +1129,12 @@ class CloudCrypto {
       nonce: unb64(requiredString(payload, 'nonce')),
       mac: Mac(unb64(requiredString(payload, 'mac'))),
     );
+    final messageKey = aad['messageKeyDerivation'] == messageKeyDerivation
+        ? await _deriveMessageKey(conversationKey: conversationKey, aad: aad)
+        : SecretKey(unb64(conversationKey));
     final compressed = await _aead.decrypt(
       box,
-      secretKey: SecretKey(unb64(conversationKey)),
+      secretKey: messageKey,
       aad: canonicalJsonBytes(aad),
     );
     final expectedPlaintextBytes = aad['plaintextBytes'];
@@ -1163,6 +1172,25 @@ class CloudCrypto {
     if (value == null) return null;
     if (value is int) return value;
     return int.tryParse(value.toString());
+  }
+
+  Future<SecretKey> _deriveMessageKey({
+    required String conversationKey,
+    required Map<String, dynamic> aad,
+  }) {
+    return _hkdf.deriveKey(
+      secretKey: SecretKey(unb64(conversationKey)),
+      nonce: canonicalJsonBytes({
+        'v': 1,
+        'protocol': 'secure-chat/message-key/v1',
+        'conversationId': aad['conversationId'],
+        'keyEpoch': aad['keyEpoch'],
+        'messageCounter': aad['messageCounter'],
+        'messageId': aad['messageId'],
+        'previousMessageHash': aad['previousMessageHash'],
+      }),
+      info: utf8Bytes(messageKeyDerivation),
+    );
   }
 
   Future<SecretKey> _deriveWrappingKey({

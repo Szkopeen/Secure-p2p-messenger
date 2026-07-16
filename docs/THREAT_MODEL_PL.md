@@ -78,19 +78,29 @@ scenariuszy wysokiego ryzyka.
 - Sesje maja konfigurowalny TTL i idle timeout, a WebSocket uzywa
   jednorazowego ticketu.
 - Publiczny `/healthz` nie ujawnia metryk. Szczegoly sa w `/metrics`,
-  chronione tokenem administratora i allowlista adresow IP.
+  chronione tokenem administratora i allowlista adresow IP. Przy zaufanym
+  reverse proxy allowlista sprawdza rozpoznany adres klienta, a nie lokalny
+  adres TCP proxy.
 - Katalog nie zwraca globalnej listy uzytkownikow; wyszukiwanie wymaga
   dokladnego loginu.
 - Legacy relay i stare aktywne grupy sa usuniete z klienta.
 - Manifest aktualizacji jest podpisywany Ed25519, a artefakty maja SHA-256.
 - SQLite pracuje w WAL i ma testowany backup online oraz restore kopii.
 
+## Capability gate
+
+Ta wersja nie ma capability dla zastosowan wysokiego ryzyka. W szczegolnosci
+nie ma jeszcze audytowanego Double Ratchet/PQXDH, publicznego key transparency
+ani OPAQUE/PAKE. Do czasu wdrozenia tych protokolow produkt nalezy opisywac
+jako self-hosted komunikator dla malej, zaufanej grupy, a nie jako system
+odporny na aktywnie zlosliwy serwer albo post-compromise compromise recovery.
+
 ## Pozostale ryzyka do zamkniecia przed wysokim ryzykiem
 
-- OPAQUE albo rownowazne logowanie, w ktorym serwer nie otrzymuje hasla
-  aplikacyjnego.
-- Key transparency dla publicznych tozsamosci Ed25519.
-- Double Ratchet/PQXDH dla rozmow 1:1.
+- Audytowana biblioteka OPAQUE albo rownowazne logowanie, w ktorym serwer nie
+  otrzymuje hasla aplikacyjnego.
+- Publicznie weryfikowalny key transparency dla publicznych tozsamosci Ed25519.
+- Audytowane X3DH/PQXDH + Double Ratchet dla rozmow 1:1.
 - MLS albo audytowany sender-key protocol dla grup.
 - Rekey dla przyszlych grup przez MLS albo audytowany protokol sender-key.
 - Niezalezny pentest backendu, klienta Windows, klienta Android i procesu

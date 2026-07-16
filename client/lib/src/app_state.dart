@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart' as crypto_hash;
+import 'package:cryptography/cryptography.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -30,8 +31,15 @@ import 'storage/secure_store.dart';
 enum _CloudReplayDecision { accept, buffer }
 
 class _AppLockConfig {
-  const _AppLockConfig({required this.salt, required this.hash});
+  const _AppLockConfig({
+    required this.algorithm,
+    required this.iterations,
+    required this.salt,
+    required this.hash,
+  });
 
+  final String algorithm;
+  final int iterations;
   final String salt;
   final String hash;
 }
@@ -44,6 +52,10 @@ class AppState extends ChangeNotifier {
   static const maxPlainFileBytes = 8 * 1024 * 1024;
   static const maxCloudPlainFileBytes = 48 * 1024;
   static const maxProfileImageBytes = 1024 * 1024;
+  static const _appLockPinAlgorithm = 'pbkdf2-hmac-sha256';
+  static const _legacyAppLockPinAlgorithm = 'legacy-sha256';
+  static const _appLockPinIterations = 310000;
+  static const _appLockPinBits = 256;
   final SecureStore _store;
   final CloudCrypto _cloudCrypto = CloudCrypto();
   final UpdateSignatureVerifier _updateSignatureVerifier =
@@ -162,11 +174,26 @@ class AppState extends ChangeNotifier {
     }
     _validatePinFormat(normalizedPin);
     final salt = b64(secureRandomBytes(16));
-    final hash = _hashAppLockPin(normalizedPin, salt);
-    await _store.saveAppLockPin(salt: salt, hash: hash);
-    _appLock = _AppLockConfig(salt: salt, hash: hash);
+    final hash = await _hashAppLockPin(
+      normalizedPin,
+      salt,
+      _appLockPinIterations,
+    );
+    await _store.saveAppLockPin(
+      algorithm: _appLockPinAlgorithm,
+      iterations: _appLockPinIterations,
+      salt: salt,
+      hash: hash,
+    );
+    _appLock = _AppLockConfig(
+      algorithm: _appLockPinAlgorithm,
+      iterations: _appLockPinIterations,
+      salt: salt,
+      hash: hash,
+    );
     _appLockFailures = 0;
     _appLockBlockedUntil = null;
+    await _store.clearAppLockState();
     await _refreshScreenSecurity();
     notifyListeners();
   }
@@ -174,10 +201,11 @@ class AppState extends ChangeNotifier {
   Future<void> disableAppLockPin(String pin) async {
     final config = _appLock;
     if (config == null) return;
-    if (!_verifyAppLockPin(pin, config)) {
+    if (!await _verifyAppLockPin(pin, config)) {
       throw ArgumentError('Niepoprawny PIN.');
     }
     await _store.clearAppLockPin();
+    await _store.clearAppLockState();
     _appLock = null;
     _privacyLocked = false;
     _appLockFailures = 0;
@@ -198,17 +226,24 @@ class AppState extends ChangeNotifier {
     if (blockedUntil != null && now.isBefore(blockedUntil)) {
       throw StateError('Za duzo prob. Sprobuj ponownie za chwile.');
     }
-    if (_verifyAppLockPin(pin, config)) {
+    final normalizedPin = _normalizePin(pin);
+    if (await _verifyAppLockPin(normalizedPin, config)) {
+      if (_appLockNeedsUpgrade(config)) {
+        await _replaceAppLockPin(normalizedPin);
+      }
       _privacyLocked = false;
       _appLockFailures = 0;
       _appLockBlockedUntil = null;
+      await _store.clearAppLockState();
       notifyListeners();
       return;
     }
     _appLockFailures += 1;
-    if (_appLockFailures >= 5) {
-      _appLockBlockedUntil = now.add(const Duration(seconds: 30));
-    }
+    final lockDuration = _appLockLockDuration(_appLockFailures);
+    _appLockBlockedUntil =
+        lockDuration == Duration.zero ? null : now.add(lockDuration);
+    await _persistAppLockState();
+    notifyListeners();
     throw ArgumentError('Niepoprawny PIN.');
   }
 
@@ -245,6 +280,9 @@ class AppState extends ChangeNotifier {
       await _loadPackageInfo();
       _privacyScreenEnabled = await _store.loadPrivacyScreenEnabled();
       _appLock = _appLockFromStore(await _store.loadAppLockPin());
+      _restoreAppLockState(
+        _appLock == null ? null : await _store.loadAppLockState(),
+      );
       await _refreshScreenSecurity();
       await cleanupTempMediaFiles(maxAge: Duration.zero);
       _cloudSession = await _store.loadCloudSession();
@@ -2971,7 +3009,42 @@ class AppState extends ChangeNotifier {
     final salt = raw['salt'] ?? '';
     final hash = raw['hash'] ?? '';
     if (salt.isEmpty || hash.isEmpty) return null;
-    return _AppLockConfig(salt: salt, hash: hash);
+    final algorithm = raw['algorithm'] ?? _legacyAppLockPinAlgorithm;
+    final iterations = int.tryParse(raw['iterations'] ?? '') ??
+        (algorithm == _appLockPinAlgorithm ? _appLockPinIterations : 1);
+    if (algorithm != _appLockPinAlgorithm &&
+        algorithm != _legacyAppLockPinAlgorithm) {
+      return null;
+    }
+    if (algorithm == _appLockPinAlgorithm && iterations < 100000) {
+      return null;
+    }
+    return _AppLockConfig(
+      algorithm: algorithm,
+      iterations: iterations,
+      salt: salt,
+      hash: hash,
+    );
+  }
+
+  void _restoreAppLockState(Map<String, dynamic>? raw) {
+    _appLockFailures = 0;
+    _appLockBlockedUntil = null;
+    if (raw == null) return;
+    final failedAttempts = raw['failedAttempts'];
+    if (failedAttempts is int && failedAttempts > 0) {
+      _appLockFailures = failedAttempts;
+    }
+    final blockedUntilMs = raw['blockedUntilMs'];
+    if (blockedUntilMs is int && blockedUntilMs > 0) {
+      final blockedUntil = DateTime.fromMillisecondsSinceEpoch(
+        blockedUntilMs,
+        isUtc: true,
+      ).toLocal();
+      if (DateTime.now().isBefore(blockedUntil)) {
+        _appLockBlockedUntil = blockedUntil;
+      }
+    }
   }
 
   void _lockPrivacy() {
@@ -2997,15 +3070,72 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  String _hashAppLockPin(String pin, String salt) {
+  Future<String> _hashAppLockPin(
+    String pin,
+    String salt,
+    int iterations,
+  ) async {
+    final key = await Pbkdf2(
+      macAlgorithm: Hmac.sha256(),
+      iterations: iterations,
+      bits: _appLockPinBits,
+    ).deriveKey(
+      secretKey: SecretKey(utf8Bytes(pin)),
+      nonce: unb64(salt),
+    );
+    return b64(await key.extractBytes());
+  }
+
+  String _hashLegacyAppLockPin(String pin, String salt) {
     return crypto_hash.sha256.convert(utf8Bytes('$salt:$pin')).toString();
   }
 
-  bool _verifyAppLockPin(String pin, _AppLockConfig config) {
+  Future<bool> _verifyAppLockPin(String pin, _AppLockConfig config) async {
     final normalizedPin = _normalizePin(pin);
-    final actual = _hashAppLockPin(normalizedPin, config.salt);
-    final expected = config.hash;
-    return _constantTimeEquals(actual, expected);
+    final actual = config.algorithm == _appLockPinAlgorithm
+        ? await _hashAppLockPin(normalizedPin, config.salt, config.iterations)
+        : _hashLegacyAppLockPin(normalizedPin, config.salt);
+    return _constantTimeEquals(actual, config.hash);
+  }
+
+  bool _appLockNeedsUpgrade(_AppLockConfig config) {
+    return config.algorithm != _appLockPinAlgorithm ||
+        config.iterations < _appLockPinIterations;
+  }
+
+  Future<void> _replaceAppLockPin(String normalizedPin) async {
+    final salt = b64(secureRandomBytes(16));
+    final hash = await _hashAppLockPin(
+      normalizedPin,
+      salt,
+      _appLockPinIterations,
+    );
+    await _store.saveAppLockPin(
+      algorithm: _appLockPinAlgorithm,
+      iterations: _appLockPinIterations,
+      salt: salt,
+      hash: hash,
+    );
+    _appLock = _AppLockConfig(
+      algorithm: _appLockPinAlgorithm,
+      iterations: _appLockPinIterations,
+      salt: salt,
+      hash: hash,
+    );
+  }
+
+  Duration _appLockLockDuration(int failedAttempts) {
+    if (failedAttempts >= 15) return const Duration(minutes: 30);
+    if (failedAttempts >= 10) return const Duration(minutes: 5);
+    if (failedAttempts >= 5) return const Duration(seconds: 30);
+    return Duration.zero;
+  }
+
+  Future<void> _persistAppLockState() {
+    return _store.saveAppLockState(
+      failedAttempts: _appLockFailures,
+      blockedUntil: _appLockBlockedUntil,
+    );
   }
 
   bool _constantTimeEquals(String left, String right) {

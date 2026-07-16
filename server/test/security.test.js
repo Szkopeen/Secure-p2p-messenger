@@ -264,6 +264,43 @@ test('limiter autoryzacji blokuje powtarzane proby z tej samej pary IP i konta',
   }
 });
 
+test('limiter autoryzacji nie usuwa aktywnej blokady IP przy zalewaniu loginami', () => {
+  security.resetAuthRateLimits();
+  try {
+    const lockedIp = authReq('198.51.100.10');
+    for (let index = 0; index < 80; index += 1) {
+      assert.equal(security.allowAuthAttempt(lockedIp, `spray-${index}`), true);
+    }
+    assert.equal(security.allowAuthAttempt(lockedIp, 'victim'), false);
+
+    for (let index = 0; index < 6000; index += 1) {
+      security.allowAuthAttempt(authReq(`203.0.113.${(index % 250) + 1}`), `flood-${index}`);
+    }
+
+    assert.equal(security.allowAuthAttempt(lockedIp, 'after-flood'), false);
+  } finally {
+    security.resetAuthRateLimits();
+  }
+});
+
+test('limiter autoryzacji nie usuwa aktywnej blokady konta przy zalewaniu loginami', () => {
+  security.resetAuthRateLimits();
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      assert.equal(security.allowAuthAttempt(authReq(`10.10.0.${index + 1}`), 'alice'), true);
+    }
+    assert.equal(security.allowAuthAttempt(authReq('10.10.1.1'), 'alice'), false);
+
+    for (let index = 0; index < 6000; index += 1) {
+      security.allowAuthAttempt(authReq(`203.0.113.${(index % 250) + 1}`), `flood-${index}`);
+    }
+
+    assert.equal(security.allowAuthAttempt(authReq('10.10.1.2'), 'alice'), false);
+  } finally {
+    security.resetAuthRateLimits();
+  }
+});
+
 test('weryfikacja hasla respektuje zapisane parametry scrypt i oznacza upgrade', async () => {
   const legacy = await security.hashPassword('correct horse', 'fixed-salt', { N: 16384, r: 8, p: 1 });
   const legacyResult = await security.verifyPasswordDetailed('correct horse', legacy);

@@ -27,7 +27,9 @@ const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_PAIR_MAX_ATTEMPTS = 10;
 const AUTH_ACCOUNT_MAX_ATTEMPTS = 20;
 const AUTH_IP_MAX_ATTEMPTS = 80;
-const AUTH_MAX_KEYS = 5000;
+const AUTH_IP_MAX_KEYS = 5000;
+const AUTH_ACCOUNT_MAX_KEYS = 5000;
+const AUTH_PAIR_MAX_KEYS = 10000;
 const AUTH_LOCK_BASE_MS = 30 * 1000;
 const AUTH_LOCK_MAX_MS = 15 * 60 * 1000;
 const PENDING_LOGIN_TTL_MS = 2 * 60 * 1000;
@@ -41,7 +43,9 @@ const PASSWORD_SCRYPT_LEGACY_PARAMS = Object.freeze({ N: 16384, r: 8, p: 1 });
 const DEVICE_CERTIFICATE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
-const authAttempts = new Map();
+const authIpAttempts = new Map();
+const authAccountAttempts = new Map();
+const authPairAttempts = new Map();
 let activeKdfOperations = 0;
 const kdfWaiters = [];
 let rejectedKdfOperations = 0;
@@ -588,31 +592,42 @@ function loginChallengePayload(pending) {
   }), 'utf8');
 }
 
-function authAttemptEntry(key) {
-  const existing = authAttempts.get(key);
+function authEntryExpired(entry, now) {
+  return entry.hits.length === 0 && entry.lockUntilMs <= now;
+}
+
+function pruneAuthAttempts(map, now = Date.now()) {
+  for (const [key, entry] of map.entries()) {
+    entry.hits = entry.hits.filter((time) => time > now - AUTH_WINDOW_MS);
+    if (authEntryExpired(entry, now)) {
+      map.delete(key);
+    }
+  }
+}
+
+function authAttemptEntry(map, key, maxKeys, now) {
+  const existing = map.get(key);
   if (existing && typeof existing === 'object' && Array.isArray(existing.hits)) {
     return existing;
   }
+  pruneAuthAttempts(map, now);
+  if (map.size >= maxKeys) {
+    return null;
+  }
   const entry = { hits: [], lockUntilMs: 0, failures: 0 };
-  authAttempts.set(key, entry);
+  map.set(key, entry);
   return entry;
 }
 
-function pruneAuthAttempts(now = Date.now()) {
-  for (const [key, entry] of authAttempts.entries()) {
-    entry.hits = entry.hits.filter((time) => time > now - AUTH_WINDOW_MS);
-    if (entry.hits.length === 0 && entry.lockUntilMs <= now) {
-      authAttempts.delete(key);
-    }
-  }
-  while (authAttempts.size > AUTH_MAX_KEYS) {
-    const oldestKey = authAttempts.keys().next().value;
-    authAttempts.delete(oldestKey);
-  }
+function pruneAllAuthAttempts(now = Date.now()) {
+  pruneAuthAttempts(authIpAttempts, now);
+  pruneAuthAttempts(authAccountAttempts, now);
+  pruneAuthAttempts(authPairAttempts, now);
 }
 
-function checkAuthScope(key, maxAttempts, now) {
-  const entry = authAttemptEntry(key);
+function checkAuthScope(map, key, maxAttempts, maxKeys, now) {
+  const entry = authAttemptEntry(map, key, maxKeys, now);
+  if (entry == null) return false;
   entry.hits = entry.hits.filter((time) => time > now - AUTH_WINDOW_MS);
   if (entry.lockUntilMs > now) return false;
   if (entry.hits.length >= maxAttempts) {
@@ -637,29 +652,31 @@ function authScopeKeys(req, username) {
 
 function allowAuthAttempt(req, username) {
   const now = Date.now();
-  pruneAuthAttempts(now);
+  pruneAllAuthAttempts(now);
   const keys = authScopeKeys(req, username);
   const checks = [
-    [keys.ip, AUTH_IP_MAX_ATTEMPTS],
-    [keys.account, AUTH_ACCOUNT_MAX_ATTEMPTS],
-    [keys.pair, AUTH_PAIR_MAX_ATTEMPTS]
+    [authIpAttempts, keys.ip, AUTH_IP_MAX_ATTEMPTS, AUTH_IP_MAX_KEYS],
+    [authAccountAttempts, keys.account, AUTH_ACCOUNT_MAX_ATTEMPTS, AUTH_ACCOUNT_MAX_KEYS],
+    [authPairAttempts, keys.pair, AUTH_PAIR_MAX_ATTEMPTS, AUTH_PAIR_MAX_KEYS]
   ];
   let allowed = true;
-  for (const [key, maxAttempts] of checks) {
-    if (!checkAuthScope(key, maxAttempts, now)) allowed = false;
+  for (const [map, key, maxAttempts, maxKeys] of checks) {
+    if (!checkAuthScope(map, key, maxAttempts, maxKeys, now)) allowed = false;
   }
-  pruneAuthAttempts(now);
+  pruneAllAuthAttempts(now);
   return allowed;
 }
 
 function recordAuthSuccess(req, username) {
   const keys = authScopeKeys(req, username);
-  authAttempts.delete(keys.account);
-  authAttempts.delete(keys.pair);
+  authAccountAttempts.delete(keys.account);
+  authPairAttempts.delete(keys.pair);
 }
 
 function resetAuthRateLimits() {
-  authAttempts.clear();
+  authIpAttempts.clear();
+  authAccountAttempts.clear();
+  authPairAttempts.clear();
 }
 
 async function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url'), params = PASSWORD_SCRYPT_PARAMS) {
