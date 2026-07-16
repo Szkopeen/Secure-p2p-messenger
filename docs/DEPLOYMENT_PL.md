@@ -9,6 +9,9 @@ HOST=127.0.0.1
 PORT=8443
 REGISTRATION_MODE=disabled
 ADMIN_TOKEN=TU_WKLEJ_LOSOWY_SEKRET_ADMIN_MINIMUM_32_ZNAKI
+SESSION_TTL_HOURS=72
+SESSION_IDLE_TTL_HOURS=24
+METRICS_STORAGE_CACHE_SECONDS=15
 MAX_PAYLOAD_BYTES=16777216
 MAX_CONNECTIONS_PER_USER=12
 V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
@@ -47,7 +50,8 @@ Klient nie wysyla dlugotrwalego tokenu sesji w URL ani w naglowku handshake. Prz
 2. Tymczasowo ustaw `REGISTRATION_MODE=open` i utworz dwa konta.
 3. Ustaw `REGISTRATION_MODE=disabled` i zrestartuj usluge.
 4. Zaloguj dwa klienty przez adres HTTPS.
-5. Dodaj kontakt z listy uzytkownikow, porownaj safety number i wyslij wiadomosc.
+5. Wyszukaj kontakt po dokladnym loginie, porownaj safety number i wyslij
+   wiadomosc.
 6. Zamknij klienta, uruchom ponownie i sprawdz lokalna historie.
 7. Zaloguj to samo konto na drugim urzadzeniu i sprawdz synchronizacje.
 8. Uniewaznij stare urzadzenie testowe i upewnij sie, ze traci sesje.
@@ -55,10 +59,33 @@ Klient nie wysyla dlugotrwalego tokenu sesji w URL ani w naglowku handshake. Prz
 ## Diagnostyka
 
 ```bash
-sudo systemctl status secure-p2p-relay --no-pager
-sudo journalctl -u secure-p2p-relay -n 100 --no-pager
+sudo systemctl status secure-p2p --no-pager
+sudo journalctl -u secure-p2p -n 100 --no-pager
 sudo systemctl status caddy --no-pager
 curl https://chat.twojadomena.pl/healthz
+curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.twojadomena.pl/metrics
 ```
 
-Nazwa uslugi systemd moze nadal zawierac `relay` historycznie, ale aktywny transport aplikacji to cloud API `/v2`.
+`/healthz` jest publiczne i zwraca tylko prosty status OK. Szczegoly KDF i
+storage sa pod `/metrics`, chronione `x-admin-token`.
+
+## Backup SQLite
+
+Aktywna baza cloud jest w `V2_DATA_DIR`:
+
+```text
+/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite
+/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite-wal
+/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite-shm
+```
+
+Kopia online:
+
+```bash
+cd /opt/secure-p2p/app/server
+npm run backup-sqlite -- --out /backup/secure-chat.sqlite
+```
+
+Kopia offline: zatrzymaj `secure-p2p`, skopiuj komplet `.sqlite`, `.sqlite-wal`
+i `.sqlite-shm`, a potem uruchom usluge. Restore wykonuj z kompletu plikow z
+tej samej chwili albo z pliku `.backup`.

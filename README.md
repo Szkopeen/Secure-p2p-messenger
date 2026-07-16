@@ -15,27 +15,29 @@ Najuczciwszy opis obecnej wersji:
 > przeznaczony dla malej, zaufanej grupy.
 
 To nie jest jeszcze odpowiednik Signala ani system dla scenariuszy wysokiego
-ryzyka. Szczegoly sa w [docs/SECURITY_ROADMAP_PL.md](docs/SECURITY_ROADMAP_PL.md).
+ryzyka. Szczegoly sa w [docs/SECURITY_ROADMAP_PL.md](docs/SECURITY_ROADMAP_PL.md)
+i [docs/THREAT_MODEL_PL.md](docs/THREAT_MODEL_PL.md).
 
 ## Status projektu
 
 - Tryb aktywnego P2P/WebRTC zostal usuniety z klienta.
 - Web build nie jest juz zakresem projektu.
 - Obslugiwane platformy klienta: Windows, Android, Linux.
-- Backend jest nadal lekki i plikowy, oparty o Node.js oraz JSON.
-- Produkcyjny adres testowy instancji: `https://chat.szkpn.pl`.
+- Backend jest lekki, oparty o Node.js i SQLite w trybie WAL.
 - Techniczna nazwa paczki Flutter nadal brzmi `secure_p2p_messenger`.
 
 ## Struktura repozytorium
 
 - `client/` - aplikacja Flutter dla Windows, Android i Linux.
 - `server/` - serwer Node.js: konta, WebSocket, zaszyfrowana historia,
-  aktualizacje, publiczna lista uzytkownikow i API administracyjne.
+  aktualizacje, wyszukiwanie po dokladnym loginie i API administracyjne.
 - `docs/OD_ZERA_DO_DZIALANIA_PL.md` - instalacja serwera od zera na Ubuntu/RPi.
 - `docs/DEPLOYMENT_PL.md` - wdrozenie i usluga systemd.
 - `docs/AKTUALIZACJE_PL.md` - publikowanie aktualizacji aplikacji.
 - `docs/FINALNE_BUILDY_PL.md` - komendy do tworzenia buildow.
+- `docs/RELEASE_PROCESS_PL.md` - powtarzalny, podpisany proces wydawniczy.
 - `docs/SECURITY_ROADMAP_PL.md` - aktualny model zaufania i roadmapa security.
+- `docs/THREAT_MODEL_PL.md` - pelny model zagrozen aktualnej wersji.
 - `docs/ZDALNY_DOSTEP_PI_PL.md` - zdalny dostep do Raspberry Pi poza domem.
 
 ## Aktualna architektura
@@ -52,7 +54,8 @@ Caddy TLS reverse proxy
 Node.js Secure Chat server
         |
         v
-Pliki JSON: konta, vaulty, wiadomosci, kolejki, aktualizacje
+SQLite WAL w V2_DATA_DIR: konta, sesje, vaulty, rozmowy, zaproszenia,
+wiadomosci, kolejki i metadane aktualizacji
 ```
 
 Serwer dostarcza synchronizacje i przechowywanie, ale tresc wiadomosci oraz
@@ -65,8 +68,9 @@ Projekt nie zapewnia anonimowosci.
 - Rejestracja i logowanie kont.
 - Osobny sekret vaultu, oddzielony od hasla logowania.
 - Synchronizacja wielu urzadzen jednego konta.
-- Lista uzytkownikow opt-in i dodawanie kontaktow.
-- Rozmowy 1:1 oraz grupy w trakcie stabilizacji po zmianie architektury.
+- Wyszukiwanie kontaktu po dokladnym loginie, bez globalnej listy kont.
+- Rozmowy 1:1; grupy sa wylaczone do czasu wdrozenia bezpiecznego protokolu
+  grupowego.
 - Wiadomosci tekstowe, wieloliniowe, odpowiedzi, edycja, reakcje i usuwanie.
 - Pliki, obrazy, audio i wideo.
 - Profilowe uzytkownika z limitem rozmiaru.
@@ -116,8 +120,9 @@ Wykonane elementy zabezpieczen:
 
 ## Znane ograniczenia
 
-- Backend oparty o pliki JSON jest dobry do prototypu i malej instancji, ale nie
-  do duzej publicznej uslugi.
+- SQLite w trybie WAL wystarcza dla malej self-hosted instancji, ale duza
+  publiczna usluga wymaga osobnego planu skalowania, testow restore i
+  prawdopodobnie migracji do PostgreSQL albo wydzielonego workera storage.
 - Pierwsze dodanie kontaktu nadal wymaga zaufania do danych z serwera do czasu
   porownania safety number poza serwerem.
 - Nie ma jeszcze publicznego key transparency logu.
@@ -125,8 +130,9 @@ Wykonane elementy zabezpieczen:
   ukrywa haslo logowania przed aktywnie zlosliwym serwerem.
 - Nie ma jeszcze Double Ratchet ani MLS, wiec forward secrecy i
   post-compromise security sa ograniczone.
-- Uniewaznienie urzadzenia blokuje nowe wiadomosci i sesje, ale pelne odciecie
-  dostepu wymaga jeszcze rotacji kluczy rozmow i rewrapu dla aktywnych urzadzen.
+- Uniewaznienie urzadzenia blokuje nowe wiadomosci i sesje oraz rotuje klucze
+  rozmow 1:1. Grupy pozostaja wylaczone do czasu wdrozenia bezpiecznego MLS
+  albo audytowanego protokolu sender-key.
 - Kopie danych serwera zawieraja zaszyfrowane, ale wrazliwe dane uzytkownikow.
 - Projekt wymaga dalszych testow integracyjnych, migracji i audytu przed uzyciem
   w sytuacjach wysokiego ryzyka.
@@ -136,7 +142,7 @@ Wykonane elementy zabezpieczen:
 Minimalnie:
 
 ```bash
-cd /opt/secure-p2p/app/server
+cd /srv/secure-chat/server
 npm install
 cp .env.example .env
 nano .env
@@ -150,36 +156,65 @@ HOST=127.0.0.1
 PORT=8443
 REGISTRATION_MODE=disabled
 ADMIN_TOKEN=losowy-token-admin-minimum-32-znaki
+SESSION_TTL_HOURS=72
+SESSION_IDLE_TTL_HOURS=24
+METRICS_STORAGE_CACHE_SECONDS=15
 MAX_CONNECTIONS_PER_USER=12
-V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
-UPDATE_MANIFEST_FILE=/opt/secure-p2p/app/server/updates/manifest.json
-UPDATE_FILES_DIR=/opt/secure-p2p/app/server/updates/files
+V2_DATA_DIR=/srv/secure-chat/server/data-v2
+UPDATE_MANIFEST_FILE=/srv/secure-chat/server/updates/manifest.json
+UPDATE_FILES_DIR=/srv/secure-chat/server/updates/files
 ```
 
 W normalnym wdrozeniu Node.js slucha lokalnie na `127.0.0.1:8443`, a publiczny
 TLS robi Caddy:
 
 ```text
-https://chat.szkpn.pl -> Caddy -> 127.0.0.1:8443
+https://chat.example.com -> Caddy -> 127.0.0.1:8443
 ```
 
-Diagnostyka na Pi:
+Diagnostyka na serwerze:
 
 ```bash
-sudo systemctl status secure-p2p-relay --no-pager
-sudo journalctl -u secure-p2p-relay -n 100 --no-pager
+sudo systemctl status secure-p2p --no-pager
+sudo journalctl -u secure-p2p -n 100 --no-pager
 sudo systemctl status caddy --no-pager
-curl https://chat.szkpn.pl/healthz
+curl https://chat.example.com/healthz
+curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.example.com/metrics
 ```
+
+`/healthz` jest publicznym, prostym liveness checkiem i zwraca tylko status
+OK. Szczegolowe metryki KDF i storage sa pod `/metrics`, wymagaja
+`x-admin-token` i cache'uja kosztowne dane storage.
+
+## Backup i restore SQLite
+
+Aktywne dane cloud sa w `V2_DATA_DIR`, domyslnie:
+
+```text
+/srv/secure-chat/server/data-v2/secure-chat.sqlite
+/srv/secure-chat/server/data-v2/secure-chat.sqlite-wal
+/srv/secure-chat/server/data-v2/secure-chat.sqlite-shm
+```
+
+Do kopii online uzyj skryptu serwera:
+
+```bash
+cd /srv/secure-chat/server
+npm run backup-sqlite -- --out /backup/secure-chat.sqlite
+```
+
+Do kopii offline zatrzymaj usluge, skopiuj plik `.sqlite` razem z `.sqlite-wal`
+i `.sqlite-shm`, a potem uruchom usluge ponownie. Restore wykonuj na komplecie
+plikow z tej samej chwili albo z pliku utworzonego przez `.backup`.
 
 ## Build klienta
 
 Przygotowanie:
 
 ```powershell
-cd "C:\Users\ulkhh\Documents\New project\client"
+cd client
 flutter pub get
-flutter analyze
+dart analyze
 ```
 
 Windows:
@@ -207,7 +242,7 @@ W projekcie nie budujemy juz wersji webowej.
 
 1. Uruchom serwer i sprawdz `/healthz`.
 2. Uruchom dwie aplikacje na dwoch kontach.
-3. Dodaj uzytkownika z listy globalnej do kontaktow.
+3. Wyszukaj drugi login dokladnie i dodaj go do kontaktow.
 4. Porownaj safety number poza aplikacja.
 5. Wyslij tekst, odpowiedz, edycje, reakcje i plik.
 6. Zamknij aplikacje i sprawdz, czy historia zostala lokalnie.
@@ -234,7 +269,8 @@ poza serwerem produkcyjnym. Publiczny klucz jest wbudowywany w klienta przez:
 --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=...
 ```
 
-Szczegoly sa w [docs/AKTUALIZACJE_PL.md](docs/AKTUALIZACJE_PL.md).
+Szczegoly sa w [docs/AKTUALIZACJE_PL.md](docs/AKTUALIZACJE_PL.md) i
+[docs/RELEASE_PROCESS_PL.md](docs/RELEASE_PROCESS_PL.md).
 
 ## Zdalny dostep do Raspberry Pi
 
@@ -246,14 +282,14 @@ Skrot:
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname szkpn-pi
+sudo tailscale up --hostname secure-chat-server
 tailscale ip -4
 ```
 
 Potem na laptopie z Tailscale:
 
 ```powershell
-ssh szkpn@ADRES_TAILSCALE_PI
+ssh user@TAILSCALE_IP
 ```
 
 Pelna instrukcja jest w [docs/ZDALNY_DOSTEP_PI_PL.md](docs/ZDALNY_DOSTEP_PI_PL.md).

@@ -13,7 +13,7 @@ import 'package:secure_p2p_messenger/src/models/message.dart';
 
 void main() {
   const accountId = 'uuid-alice';
-  const serverOrigin = 'https://chat.szkpn.pl';
+  const serverOrigin = 'https://chat.example.com';
 
   test('wektor klient-serwer ma identyczny canonical JSON i SHA-256', () {
     final vector = jsonDecode(
@@ -49,21 +49,21 @@ void main() {
 
   group('Origin serwera', () {
     test('jest kanonizowany przed uzyciem w podpisie', () {
-      expect(canonicalCloudOrigin('https://CHAT.SZKPN.PL/'), serverOrigin);
+      expect(canonicalCloudOrigin('https://CHAT.EXAMPLE.COM/'), serverOrigin);
       expect(
-        canonicalCloudOrigin('https://chat.szkpn.pl:443/api?x=1#fragment'),
+        canonicalCloudOrigin('https://chat.example.com:443/api?x=1#fragment'),
         serverOrigin,
       );
-      expect(canonicalCloudOrigin('wss://chat.szkpn.pl/v2/ws'), serverOrigin);
+      expect(canonicalCloudOrigin('wss://chat.example.com/v2/ws'), serverOrigin);
       expect(
-        canonicalCloudOrigin('https://chat.szkpn.pl:8443/api'),
-        'https://chat.szkpn.pl:8443',
+        canonicalCloudOrigin('https://chat.example.com:8443/api'),
+        'https://chat.example.com:8443',
       );
-      expect(canonicalCloudOrigin('https://chat.szkpn.pl.'), serverOrigin);
-      expect(canonicalCloudOrigin('https://chat.szkpn.pl:443'), serverOrigin);
+      expect(canonicalCloudOrigin('https://chat.example.com.'), serverOrigin);
+      expect(canonicalCloudOrigin('https://chat.example.com:443'), serverOrigin);
       expect(
-        canonicalCloudOrigin('https://chat.szkpn.pl:444'),
-        'https://chat.szkpn.pl:444',
+        canonicalCloudOrigin('https://chat.example.com:444'),
+        'https://chat.example.com:444',
       );
       expect(
         canonicalCloudOrigin('http://localhost:8080/api'),
@@ -78,16 +78,16 @@ void main() {
         'https://xn--bcher-kva.example',
       );
       expect(
-        () => canonicalCloudOrigin('http://chat.szkpn.pl'),
+        () => canonicalCloudOrigin('http://chat.example.com'),
         throwsArgumentError,
       );
       expect(
-        () => canonicalCloudOrigin('https://user:password@chat.szkpn.pl'),
+        () => canonicalCloudOrigin('https://user:password@chat.example.com'),
         throwsArgumentError,
       );
       expect(() => canonicalCloudOrigin('/relative/path'), throwsArgumentError);
       expect(
-        () => canonicalCloudOrigin('ftp://chat.szkpn.pl'),
+        () => canonicalCloudOrigin('ftp://chat.example.com'),
         throwsArgumentError,
       );
     });
@@ -656,7 +656,7 @@ void main() {
       expect(
         await crypto.verifyKeyAgreementSignature(
           accountId: accountId,
-          serverOrigin: 'https://chat.szkpn.pl:8443',
+          serverOrigin: 'https://chat.example.com:8443',
           identityPublicKey: vault.identityPublicKey,
           keyAgreementPublicKey: vault.keyAgreementPublicKey,
           signature: vault.keyAgreementPublicKeySignature,
@@ -745,7 +745,7 @@ void main() {
       expect(
         await crypto.verifyIdentityRotationProof(
           accountId: accountId,
-          serverOrigin: 'https://chat.szkpn.pl:8443',
+          serverOrigin: 'https://chat.example.com:8443',
           proof: rotation.proof,
         ),
         isFalse,

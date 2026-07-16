@@ -133,6 +133,38 @@ function signedProtocolFixture() {
   return { auth, certificate, device, identity, payload, user };
 }
 
+function signedMemberKeyEnvelope({
+  auth,
+  identity,
+  conversationId = 'conversation-1',
+  keyEpoch = 1,
+  recipientUserId = auth.user.userId
+}) {
+  const unsigned = {
+    v: 1,
+    protocolVersion: 1,
+    algorithm: 'X25519-HKDF-SHA256-AES-256-GCM',
+    conversationId,
+    keyEpoch,
+    senderUserId: auth.user.userId,
+    senderDeviceId: auth.session.deviceId,
+    recipientUserId,
+    senderPublicKey: auth.user.keyAgreementPublicKey,
+    senderIdentityPublicKey: auth.user.identityPublicKey,
+    nonce: `nonce-${keyEpoch}`,
+    ciphertext: `ciphertext-${keyEpoch}`,
+    mac: `mac-${keyEpoch}`
+  };
+  return {
+    ...unsigned,
+    signature: crypto.sign(
+      null,
+      Buffer.from(security.canonicalJson(unsigned)),
+      identity.privateKey
+    ).toString('base64url')
+  };
+}
+
 function resignMessage(payload, privateKey) {
   const unsigned = { ...payload };
   delete unsigned.deviceCertificate;
@@ -326,29 +358,7 @@ test('serwer odrzuca wygasly certyfikat i podpis innego urzadzenia', () => {
 
 test('memberKeys wymagaja kluczy konta i poprawnego podpisu', () => {
   const { auth, identity } = signedProtocolFixture();
-  const unsigned = {
-    v: 1,
-    protocolVersion: 1,
-    algorithm: 'X25519-HKDF-SHA256-AES-256-GCM',
-    conversationId: 'conversation-1',
-    keyEpoch: 1,
-    senderUserId: auth.user.userId,
-    senderDeviceId: auth.session.deviceId,
-    recipientUserId: auth.user.userId,
-    senderPublicKey: auth.user.keyAgreementPublicKey,
-    senderIdentityPublicKey: auth.user.identityPublicKey,
-    nonce: 'nonce',
-    ciphertext: 'ciphertext',
-    mac: 'mac'
-  };
-  const envelope = {
-    ...unsigned,
-    signature: crypto.sign(
-      null,
-      Buffer.from(security.canonicalJson(unsigned)),
-      identity.privateKey
-    ).toString('base64url')
-  };
+  const envelope = signedMemberKeyEnvelope({ auth, identity });
   assert.equal(security.validateMemberKeys(
     { [auth.user.userId]: envelope },
     [auth.user.userId],
@@ -369,6 +379,80 @@ test('memberKeys wymagaja kluczy konta i poprawnego podpisu', () => {
     [auth.user.userId],
     auth
   ), /podpis|kluczy/);
+});
+
+test('rotacja klucza rozmowy podbija epoke i odrzuca stare wiadomosci', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-rotate-'));
+  const store = new V2Store({ dataDir, limits: { minFreeDiskBytes: 0 } });
+  const { auth, identity, payload, user } = signedProtocolFixture();
+  user.username = `rotate-${crypto.randomBytes(6).toString('hex')}`;
+  user.displayName = 'Rotate test';
+  user.devices = {};
+  user.updatedAt = new Date().toISOString();
+  store.users.users[user.userId] = user;
+  store.persistUsers();
+  const session = store.createSession(user, auth.session.deviceId, 'test');
+  store.conversations.conversations['conversation-1'] = {
+    conversationId: 'conversation-1',
+    type: 'direct',
+    memberIds: [user.userId],
+    keyEpoch: 1,
+    memberKeys: {
+      [user.userId]: signedMemberKeyEnvelope({ auth, identity, keyEpoch: 1 })
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.persistConversations();
+
+  const rotatedEnvelope = signedMemberKeyEnvelope({
+    auth,
+    identity,
+    keyEpoch: 2
+  });
+  const rotated = await httpRequest(
+    store,
+    'PUT',
+    '/v2/conversations/conversation-1/keys',
+    {
+      token: session.token,
+      body: {
+        expectedKeyEpoch: 1,
+        memberKeys: { [user.userId]: rotatedEnvelope }
+      }
+    }
+  );
+  assert.equal(rotated.status, 200);
+  assert.equal(rotated.body.conversation.keyEpoch, 2);
+  assert.deepEqual(
+    rotated.body.conversation.memberKeys[user.userId],
+    rotatedEnvelope
+  );
+
+  const staleRotation = await httpRequest(
+    store,
+    'PUT',
+    '/v2/conversations/conversation-1/keys',
+    {
+      token: session.token,
+      body: {
+        expectedKeyEpoch: 1,
+        memberKeys: { [user.userId]: rotatedEnvelope }
+      }
+    }
+  );
+  assert.equal(staleRotation.status, 409);
+
+  const staleMessage = await httpRequest(store, 'POST', '/v2/messages', {
+    token: session.token,
+    body: {
+      conversationId: 'conversation-1',
+      messageId: payload.messageId,
+      payload
+    }
+  });
+  assert.equal(staleMessage.status, 409);
+  assert.match(staleMessage.body.error, /epoki/);
 });
 
 test('licznik i previousMessageHash nie pozwalaja na replay ani fork', () => {
@@ -417,6 +501,65 @@ test('licznik i previousMessageHash nie pozwalaja na replay ani fork', () => {
     2,
     'payload-hash-1'
   ), null);
+});
+
+test('SQLite wymusza unikalny licznik strumienia urzadzenia', () => {
+  const { store } = fixture();
+  const base = {
+    conversationId: 'conversation-unique',
+    senderUserId: 'sender-unique',
+    senderDeviceId: 'device-unique',
+    messageCounter: 1,
+    payloadHash: 'payload-hash-unique',
+    payloadBytes: 10,
+    createdAt: new Date().toISOString(),
+    payload: {}
+  };
+  store.persistMessages({ ...base, seq: 1, messageId: 'unique-message-1' });
+  assert.throws(
+    () => store.persistMessages({
+      ...base,
+      seq: 2,
+      messageId: 'unique-message-2',
+      payloadHash: 'payload-hash-fork'
+    }),
+    /constraint|UNIQUE/i
+  );
+});
+
+test('publiczny profil moze ukryc liste urzadzen przed katalogiem', () => {
+  const { store, user } = fixture();
+  user.devices = {
+    device: {
+      deviceName: 'Laptop',
+      deviceCertificate: {
+        v: 1,
+        accountId: user.userId,
+        serverOrigin: 'https://chat.example',
+        deviceId: 'device',
+        deviceSigningPublicKey: 'x'.repeat(32),
+        deviceEpoch: 1,
+        createdAt: new Date().toISOString(),
+        signature: 's'.repeat(32)
+      }
+    }
+  };
+  user.deviceList = {
+    v: 1,
+    accountId: user.userId,
+    serverOrigin: 'https://chat.example',
+    deviceListEpoch: 1,
+    previousDeviceListHash: '',
+    identityRotationEpoch: 0,
+    devices: [],
+    revokedDevices: [],
+    signature: 's'.repeat(32),
+    updatedAt: new Date().toISOString()
+  };
+  const minimal = store.publicUser(user, { includeDevices: false });
+  assert.deepEqual(minimal.devices, {});
+  assert.equal(minimal.deviceList, null);
+  assert.equal(minimal.deviceListHash, '');
 });
 
 test('endpoint HTTP przyjmuje tylko podpisany ciag wiadomosci z aktualna epoka', async () => {
@@ -521,5 +664,112 @@ test('quota bajtowa blokuje konto przed wyczerpaniem dysku', () => {
   assert.match(
     security.storageQuotaError(store, 'quota-user', 'conversation-2', 3)?.error || '',
     /Konto/
+  );
+});
+
+test('backup SQLite online odtwarza dane z WAL i wykrywa uszkodzona kopie', () => {
+  const { dataDir, store } = fixture();
+  const conversationId = 'conversation-backup';
+  store.conversations.conversations[conversationId] = {
+    conversationId,
+    type: 'direct',
+    memberIds: ['backup-user'],
+    keyEpoch: 1,
+    memberKeys: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.persistConversation(store.conversations.conversations[conversationId]);
+  for (let seq = 1; seq <= 25; seq += 1) {
+    store.persistMessages({
+      conversationId,
+      seq,
+      messageId: `backup-message-${seq}`,
+      senderUserId: 'backup-user',
+      senderDeviceId: 'backup-device',
+      messageCounter: seq,
+      payloadHash: `backup-hash-${seq}`,
+      payloadBytes: 12,
+      createdAt: new Date(Date.now() + seq).toISOString(),
+      payload: { seq }
+    });
+  }
+
+  assert.deepEqual(store.database.integrityCheck(), ['ok']);
+  const backupFile = path.join(dataDir, 'backup.sqlite');
+  store.database.backupTo(backupFile);
+
+  const restoreDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-restore-'));
+  fs.copyFileSync(backupFile, path.join(restoreDir, 'secure-chat.sqlite'));
+  const restored = new V2Store({ dataDir: restoreDir });
+  assert.deepEqual(restored.database.integrityCheck(), ['ok']);
+  const restoredMessages = restored.messagesForConversation(conversationId, 0, 30);
+  assert.equal(restoredMessages.length, 25);
+  assert.equal(restoredMessages.at(-1).messageId, 'backup-message-25');
+
+  const corruptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-corrupt-'));
+  fs.writeFileSync(path.join(corruptDir, 'secure-chat.sqlite'), crypto.randomBytes(256));
+  assert.throws(() => new V2Store({ dataDir: corruptDir }), /malformed|file is not a database|database/i);
+});
+
+test('dynamiczny zapis wielu wiadomosci zachowuje sekwencje i limity strumienia', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-load-'));
+  const store = new V2Store({
+    dataDir,
+    limits: {
+      messageBytes: 1024,
+      messagesPerConversation: 300,
+      conversationBytes: 1024 * 1024,
+      accountBytes: 1024 * 1024,
+      instanceBytes: 1024 * 1024,
+      dailyAccountBytes: 1024 * 1024,
+      minFreeDiskBytes: 0
+    }
+  });
+  const conversationId = 'conversation-load';
+  store.conversations.conversations[conversationId] = {
+    conversationId,
+    type: 'direct',
+    memberIds: ['load-user'],
+    keyEpoch: 1,
+    memberKeys: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.persistConversation(store.conversations.conversations[conversationId]);
+
+  let previousHash = security.genesisHash;
+  for (let counter = 1; counter <= 300; counter += 1) {
+    const payloadHash = `load-hash-${counter}`;
+    const message = store.persistMessageAndConversation(
+      {
+        conversationId,
+        messageId: `load-message-${counter}`,
+        senderUserId: 'load-user',
+        senderDeviceId: 'load-device',
+        messageCounter: counter,
+        payloadHash,
+        payloadBytes: 32,
+        createdAt: new Date(Date.now() + counter).toISOString(),
+        payload: { counter }
+      },
+      {
+        ...store.conversations.conversations[conversationId],
+        updatedAt: new Date().toISOString()
+      },
+      {
+        previousMessageHash: previousHash,
+        genesisHash: security.genesisHash
+      }
+    );
+    assert.equal(message.seq, counter);
+    previousHash = payloadHash;
+  }
+
+  assert.equal(store.database.messageCount(conversationId), 300);
+  assert.equal(store.database.nextMessageSequence(conversationId), 301);
+  assert.match(
+    security.storageQuotaError(store, 'load-user', conversationId, 32)?.error || '',
+    /Rozmowa/
   );
 });

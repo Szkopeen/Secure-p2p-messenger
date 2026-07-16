@@ -5,8 +5,6 @@ import '../app_state.dart';
 import '../crypto/codec.dart';
 import '../models/cloud_account.dart';
 import '../models/contact.dart';
-import '../models/contact_invite.dart';
-import '../models/group.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
 import 'settings_screen.dart';
@@ -22,17 +20,7 @@ class HomeScreen extends StatelessWidget {
       animation: appState,
       builder: (context, _) {
         final totalUnread = appState.totalUnreadCount;
-        final pendingGroupInvites = appState.groups
-            .where((group) => group.pendingInvite)
-            .toList(growable: false);
-        final contactInvites = appState.contactInvites;
-        final activeGroups = appState.groups
-            .where((group) => !group.pendingInvite)
-            .toList(growable: false);
-        final hasContent = appState.contacts.isNotEmpty ||
-            contactInvites.isNotEmpty ||
-            pendingGroupInvites.isNotEmpty ||
-            activeGroups.isNotEmpty;
+        final hasContent = appState.contacts.isNotEmpty;
         return Scaffold(
           appBar: AppBar(
             title: Row(
@@ -47,13 +35,7 @@ class HomeScreen extends StatelessWidget {
             ),
             actions: [
               IconButton(
-                tooltip:
-                    'Grupy sa wylaczone do czasu wdrozenia bezpiecznego rekey/MLS',
-                onPressed: () => _showCreateGroupDialog(context),
-                icon: const Icon(Icons.group_off_outlined),
-              ),
-              IconButton(
-                tooltip: 'Globalna lista',
+                tooltip: 'Wyszukaj kontakt',
                 onPressed: () => _openCloudUsers(context),
                 icon: const Icon(Icons.public),
               ),
@@ -85,7 +67,7 @@ class HomeScreen extends StatelessWidget {
               _IdentityPanel(appState: appState),
               if (appState.status != null)
                 Material(
-                  color: appState.relayConnected
+                  color: appState.cloudConnected
                       ? Theme.of(context).colorScheme.secondaryContainer
                       : Theme.of(context).colorScheme.errorContainer,
                   child: SizedBox(
@@ -108,25 +90,6 @@ class HomeScreen extends StatelessWidget {
                     ? const Center(child: Text('Brak kontaktow'))
                     : ListView(
                         children: [
-                          if (pendingGroupInvites.isNotEmpty) ...[
-                            const _SectionHeader(title: 'Zaproszenia do grup'),
-                            for (final group in pendingGroupInvites)
-                              _GroupInviteTile(
-                                appState: appState,
-                                group: group,
-                                subtitle: _groupSubtitle(group),
-                              ),
-                          ],
-                          if (contactInvites.isNotEmpty) ...[
-                            const _SectionHeader(
-                              title: 'Zaproszenia do kontaktow',
-                            ),
-                            for (final invite in contactInvites)
-                              _ContactInviteTile(
-                                appState: appState,
-                                invite: invite,
-                              ),
-                          ],
                           if (appState.contacts.isNotEmpty) ...[
                             const _SectionHeader(title: 'Kontakty'),
                             for (final contact in appState.contacts)
@@ -141,15 +104,6 @@ class HomeScreen extends StatelessWidget {
                                           .messagesFor(contact.userId)
                                           .last,
                                 ),
-                              ),
-                          ],
-                          if (activeGroups.isNotEmpty) ...[
-                            const _SectionHeader(title: 'Grupy'),
-                            for (final group in activeGroups)
-                              _GroupTile(
-                                appState: appState,
-                                group: group,
-                                subtitle: _groupSubtitle(group),
                               ),
                           ],
                         ],
@@ -221,112 +175,6 @@ class HomeScreen extends StatelessWidget {
     }
   }
 
-  Future<void> _showCreateGroupDialog(BuildContext context) async {
-    final name = TextEditingController();
-    final selected = <String>{};
-    String? error;
-
-    final selectableContacts = appState.contacts;
-
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: const Text('Utworz grupe'),
-              content: SizedBox(
-                width: 520,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: name,
-                      decoration: const InputDecoration(
-                        labelText: 'Nazwa grupy',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    if (selectableContacts.isEmpty)
-                      const Text('Brak kontaktow do zaproszenia.')
-                    else
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 320),
-                        child: ListView(
-                          shrinkWrap: true,
-                          children: [
-                            for (final contact in selectableContacts)
-                              CheckboxListTile(
-                                value: selected.contains(contact.userId),
-                                onChanged: (value) {
-                                  setState(() {
-                                    if (value == true) {
-                                      selected.add(contact.userId);
-                                    } else {
-                                      selected.remove(contact.userId);
-                                    }
-                                  });
-                                },
-                                title: Text(contact.displayName),
-                                subtitle: Text(
-                                  appState.isContactOnline(contact.userId)
-                                      ? '${contact.userId} / online'
-                                      : '${contact.userId} / offline, zaproszenie poczeka',
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    if (error != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        error!,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Anuluj'),
-                ),
-                FilledButton(
-                  onPressed: selectableContacts.isEmpty
-                      ? null
-                      : () async {
-                          try {
-                            final members = selectableContacts
-                                .where(
-                                  (contact) =>
-                                      selected.contains(contact.userId),
-                                )
-                                .toList(growable: false);
-                            await appState.createGroup(
-                              name: name.text,
-                              members: members,
-                            );
-                            if (dialogContext.mounted) {
-                              Navigator.of(dialogContext).pop();
-                            }
-                          } catch (exception) {
-                            setState(() => error = exception.toString());
-                          }
-                        },
-                  child: const Text('Utworz'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    name.dispose();
-  }
-
   String _contactSubtitle(Contact contact, ChatMessage? last) {
     if (last == null) return '${contact.userId} / Cloud';
     if (last.retracted) return 'Wiadomosc usunieta';
@@ -339,43 +187,7 @@ class HomeScreen extends StatelessWidget {
       PlainPayloadType.pin => 'Przypieto wiadomosc',
       PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
       PlainPayloadType.edit => 'Edytowano wiadomosc',
-      PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
-      PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
-      PlainPayloadType.groupText => last.payload.text ?? '',
-      PlainPayloadType.groupLeave => 'Uzytkownik wyszedl z grupy',
     };
-  }
-
-  String _groupSubtitle(GroupConversation group) {
-    final messages = appState.messagesFor(group.groupId);
-    if (group.pendingInvite) {
-      return 'Zaproszenie od ${appState.displayNameForUser(group.invitedBy ?? '')}';
-    }
-    if (messages.isNotEmpty) {
-      final last = messages.last;
-      if (last.direction == MessageDirection.system) {
-        return last.payload.text ?? '';
-      }
-      final prefix = last.direction == MessageDirection.inbound
-          ? '${appState.displayNameForUser(last.senderId ?? '')}: '
-          : '';
-      final preview = switch (last.payload.type) {
-        PlainPayloadType.text => last.payload.text ?? '',
-        PlainPayloadType.file =>
-          'Plik: ${last.payload.fileName ?? 'zalacznik'}',
-        PlainPayloadType.retraction => 'Wiadomosc usunieta',
-        PlainPayloadType.reaction => 'Reakcja na wiadomosc',
-        PlainPayloadType.pin => 'Przypieto wiadomosc',
-        PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
-        PlainPayloadType.edit => 'Edytowano wiadomosc',
-        PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
-        PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
-        PlainPayloadType.groupText => last.payload.text ?? '',
-        PlainPayloadType.groupLeave => 'Uzytkownik wyszedl z grupy',
-      };
-      return '$prefix$preview';
-    }
-    return 'Zaakceptowalo ${group.acceptedMemberIds.length} z ${group.memberIds.length}';
   }
 }
 
@@ -570,172 +382,6 @@ class _CloudUserTile extends StatelessWidget {
   }
 }
 
-class _ContactInviteTile extends StatelessWidget {
-  const _ContactInviteTile({required this.appState, required this.invite});
-
-  final AppState appState;
-  final ContactInvite invite;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      leading: const CircleAvatar(child: Icon(Icons.person_add_alt_1)),
-      title: Text(invite.displayName),
-      subtitle: Text('${invite.userId} chce dodac Cie do kontaktow.'),
-      trailing: Wrap(
-        spacing: 4,
-        children: [
-          IconButton(
-            tooltip: 'Odrzuc',
-            onPressed: () => appState.rejectContactInvite(invite),
-            icon: const Icon(Icons.close),
-          ),
-          IconButton.filled(
-            tooltip: 'Akceptuj',
-            onPressed: () => appState.acceptContactInvite(invite),
-            icon: const Icon(Icons.check),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GroupInviteTile extends StatelessWidget {
-  const _GroupInviteTile({
-    required this.appState,
-    required this.group,
-    required this.subtitle,
-  });
-
-  final AppState appState;
-  final GroupConversation group;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: colors.primaryContainer,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: colors.primary),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    Icons.mark_email_unread_outlined,
-                    color: colors.onPrimaryContainer,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          group.name,
-                          style: Theme.of(context)
-                              .textTheme
-                              .titleMedium
-                              ?.copyWith(color: colors.onPrimaryContainer),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          subtitle,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(color: colors.onPrimaryContainer),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: () =>
-                        appState.respondToGroupInvite(group, false),
-                    icon: const Icon(Icons.close),
-                    label: const Text('Odrzuc'),
-                  ),
-                  FilledButton.icon(
-                    onPressed: () => appState.respondToGroupInvite(group, true),
-                    icon: const Icon(Icons.check),
-                    label: const Text('Akceptuj'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _GroupTile extends StatelessWidget {
-  const _GroupTile({
-    required this.appState,
-    required this.group,
-    required this.subtitle,
-  });
-
-  final AppState appState;
-  final GroupConversation group;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    final unread = appState.unreadCountFor(group.groupId);
-    return ListTile(
-      leading: Badge.count(
-        count: unread,
-        isLabelVisible: unread > 0,
-        child: const CircleAvatar(child: Icon(Icons.groups_outlined)),
-      ),
-      title: Text(group.name),
-      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: group.pendingInvite
-          ? Wrap(
-              spacing: 4,
-              children: [
-                IconButton(
-                  tooltip: 'Odrzuc',
-                  onPressed: () => appState.respondToGroupInvite(group, false),
-                  icon: const Icon(Icons.close),
-                ),
-                IconButton.filled(
-                  tooltip: 'Akceptuj',
-                  onPressed: () => appState.respondToGroupInvite(group, true),
-                  icon: const Icon(Icons.check),
-                ),
-              ],
-            )
-          : const Icon(Icons.chevron_right),
-      onTap: group.pendingInvite
-          ? null
-          : () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => ChatScreen(appState: appState, group: group),
-                ),
-              );
-            },
-    );
-  }
-}
-
 class _UnreadBadge extends StatelessWidget {
   const _UnreadBadge({required this.count, required this.child});
 
@@ -773,7 +419,7 @@ class _IdentityPanel extends StatelessWidget {
             _AvatarView(
               bytesBase64: appState.ownProfile?.avatarBytesBase64,
               fallback: initial,
-              online: appState.relayConnected,
+              online: appState.cloudConnected,
             ),
             const SizedBox(width: 12),
             Expanded(

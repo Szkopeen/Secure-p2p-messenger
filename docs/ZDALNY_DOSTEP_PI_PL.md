@@ -26,7 +26,7 @@ sudo systemctl status ssh --no-pager
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname szkpn-pi
+sudo tailscale up --hostname secure-chat-server
 ```
 
 Po drugim poleceniu pojawi sie link logowania. Otworz go, zaloguj sie i dodaj Pi
@@ -78,21 +78,21 @@ tailscale status
 Z PowerShella:
 
 ```powershell
-ssh szkpn@ADRES_TAILSCALE_PI
+ssh user@TAILSCALE_IP
 ```
 
 Przyklad:
 
 ```powershell
-ssh szkpn@100.80.12.34
+ssh user@100.64.0.10
 ```
 
 Potem mozesz normalnie sprawdzac serwer:
 
 ```bash
-sudo systemctl status secure-p2p-relay --no-pager
+sudo systemctl status secure-p2p --no-pager
 sudo systemctl status caddy --no-pager
-curl https://chat.szkpn.pl/healthz
+curl https://chat.example.com/healthz
 ```
 
 ## 6. Test przed wyjazdem
@@ -104,7 +104,7 @@ Zrob to jeszcze bedac w domu:
 3. Polacz sie po SSH przez adres `100.x.y.z`.
 4. Odlacz laptop od domowego Wi-Fi albo wlacz hotspot z telefonu.
 5. Sprobuj polaczyc sie drugi raz po tym samym adresie Tailscale.
-6. Sprawdz status `secure-p2p-relay` i `caddy`.
+6. Sprawdz status `secure-p2p` i `caddy`.
 
 Jezeli punkt 5 dziala przez hotspot, jutro poza domem tez powinno dzialac.
 
@@ -117,7 +117,7 @@ sudo tailscale set --ssh
 ```
 
 Wtedy Tailscale moze zarzadzac autoryzacja SSH przez tailnet. Na jutro
-bezpieczniej i prosciej zostac przy zwyklym `ssh szkpn@100.x.y.z` tunelowanym
+bezpieczniej i prosciej zostac przy zwyklym `ssh user@100.x.y.z` tunelowanym
 przez Tailscale, bo wymaga mniej konfiguracji polityk dostepu.
 
 ## Czego nie robic
@@ -125,6 +125,5 @@ przez Tailscale, bo wymaga mniej konfiguracji polityk dostepu.
 - Nie wystawiaj portu 22 publicznie na routerze.
 - Nie loguj sie po SSH jako root.
 - Nie zostawiaj Pi bez zasilania albo na Wi-Fi, ktore potrafi sie rozlaczyc.
-- Nie wylaczaj Caddy ani `secure-p2p-relay` przed wyjazdem.
+- Nie wylaczaj Caddy ani `secure-p2p` przed wyjazdem.
 - Nie kasuj lokalnego dostepu LAN, dopoki nie sprawdzisz Tailscale przez hotspot.
-

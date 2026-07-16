@@ -20,6 +20,8 @@ HOST=127.0.0.1
 PORT=8443
 REGISTRATION_MODE=disabled
 ADMIN_TOKEN=TU_WKLEJ_LOSOWY_SEKRET_ADMIN_MINIMUM_32_ZNAKI
+SESSION_TTL_HOURS=72
+SESSION_IDLE_TTL_HOURS=24
 V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
 ```
 
@@ -47,12 +49,14 @@ W aplikacji wpisuj adres HTTPS, np. `https://chat.twojadomena.pl`.
 4. Ustaw `REGISTRATION_MODE=disabled`.
 5. Zrestartuj usluge.
 
-Docelowy system zaproszen powinien byc osobny, jednorazowy i hashowany po stronie serwera. Do czasu jego wdrozenia uzywaj tylko `disabled` albo kontrolowanego `open`.
+Docelowo uzywaj `REGISTRATION_MODE=invite` i tworz jednorazowe zaproszenia
+przez endpoint administracyjny. `open` wlaczaj tylko na krotkie testy.
 
 ## 4. Sprawdzenie
 
 ```bash
 curl https://chat.twojadomena.pl/healthz
+curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.twojadomena.pl/metrics
 npm run check
 ```
 
@@ -62,11 +66,33 @@ Po stronie klienta:
 flutter test
 ```
 
-Nastepnie uruchom dwa klienty, zaloguj dwa konta, dodaj kontakt, porownaj safety number i wyslij wiadomosc testowa.
+Nastepnie uruchom dwa klienty, zaloguj dwa konta, wyszukaj kontakt po
+dokladnym loginie, porownaj safety number i wyslij wiadomosc testowa.
 
-## 5. Uwagi bezpieczenstwa
+## 5. Backup SQLite
+
+Aktywne dane cloud sa w `V2_DATA_DIR`, zwykle:
+
+```text
+/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite
+/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite-wal
+/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite-shm
+```
+
+Kopia online:
+
+```bash
+cd /opt/secure-p2p/app/server
+npm run backup-sqlite -- --out /backup/secure-chat.sqlite
+```
+
+Kopia offline: zatrzymaj usluge, skopiuj komplet `.sqlite`, `.sqlite-wal` i
+`.sqlite-shm`, a po restore przywroc komplet z tej samej chwili.
+
+## 6. Uwagi bezpieczenstwa
 
 - WebSocket uzywa jednorazowego ticketu z `/v2/ws-ticket`, a nie tokenu w URL.
 - Sekret vaultu nie jest wysylany do serwera.
-- Backend plikowy JSON nadal jest prototypowy i wymaga migracji do SQLite/PostgreSQL przed wieksza produkcja.
+- Backend uzywa SQLite WAL i per-record zapisow encji. To nadal mala
+  self-hosted instancja, nie masowa publiczna usluga.
 - Projekt nie jest odpowiednikiem Signala i nie jest przeznaczony dla scenariuszy wysokiego ryzyka.

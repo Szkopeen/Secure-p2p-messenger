@@ -74,7 +74,10 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Token sesji cloud WebSocket nie jest juz wysylany ani w query stringu URL,
   ani w naglowku handshake. Klient pobiera krotko zyjacy, jednorazowy ticket
   przez HTTPS i zuzywa go jako pierwsza ramke WebSocket.
-- Legacy relay ze wspolnym sekretem zostal usuniety z aktywnej sciezki serwera.
+- Legacy relay ze wspolnym sekretem, stary handshake, stare eksporty konta i
+  stary klient relay zostaly usuniete z aktywnej sciezki klienta i serwera.
+- Grupy sa wylaczone do czasu wdrozenia bezpiecznej rotacji kluczy/MLS; klient
+  nie wysyla juz starych pakietow grupowych.
 - Dodano podpisana, wersjonowana liste urzadzen konta:
   `deviceListEpoch`, `previousDeviceListHash`, aktywne urzadzenia,
   uniewaznione urzadzenia i podpis aktualna tozsamoscia Ed25519 konta.
@@ -89,6 +92,31 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Nowe wiadomosci podpisane przez uniewaznione albo nieaktywne urzadzenie sa
   odrzucane. Wczesniej zapisane wiadomosci historyczne pozostaja w lokalnej
   historii.
+- Po uniewaznieniu urzadzenia klient rotuje klucze aktywnych rozmow 1:1,
+  podbija `keyEpoch` i rewrapuje nowy klucz dla pozostalych aktywnych
+  uczestnikow rozmowy.
+- Backend uzywa SQLite WAL dla kont, sesji, rozmow, zaproszen, vaultow i
+  wiadomosci. Najwazniejsze niezmienniki strumienia sa wymuszane przez bazowy
+  unikalny indeks `(conversation, sender, device, counter)` oraz transakcyjny
+  append `BEGIN IMMEDIATE`.
+- Zapisy uzytkownikow, sesji, rozmow i zaproszen sa wykonywane per rekord, a
+  nie przez synchroniczne przepisywanie calej tabeli encji.
+- Sesje bearer maja konfigurowalny TTL i idle timeout, domyslnie 72h/24h, a
+  endpoint `/v2/sessions` pozwala zobaczyc aktywne sesje.
+- Publiczny `/healthz` jest prostym liveness checkiem. Szczegoly KDF i storage
+  sa przeniesione do `/metrics`, chronione `x-admin-token` i cache'owane dla
+  kosztownych metryk storage.
+- Katalog uzytkownikow nie zwraca juz globalnej listy. Wyszukiwanie wymaga
+  dokladnego loginu, jest rate-limitowane i nie ujawnia listy urzadzen osobom
+  spoza wspolnej rozmowy albo wlasnego konta.
+- Dodano skrypt `npm run backup-sqlite -- --out ...`, ktory wykonuje backup
+  online przez SQLite `VACUUM INTO` i sprawdza integralnosc zrodlowej bazy oraz
+  utworzonej kopii.
+- Dodano test restore kopii SQLite z WAL oraz test uszkodzonej kopii bazy.
+- Dodano dynamiczny test wielu zapisow wiadomosci w jednym strumieniu z
+  kontrola sekwencji, limitow i konfliktow licznika.
+- Dodano pelny model zagrozen oraz proces wydawniczy z commitem, wersjami
+  narzedzi, testami, hashami artefaktow i podpisanym manifestem release.
 
 Uwaga migracyjna: stare konta mialy vault szyfrowany haslem logowania. Przy
 pierwszym logowaniu po tej zmianie mozna wpisac to samo haslo jako `Haslo
@@ -106,26 +134,22 @@ sekretem.
    pierwsze galezie rotacji miedzy grupy kontaktow, zanim zobacza one wspolny
    lancuch.
 5. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
-6. Anty-replay dziala dla nowych wiadomosci po aktualizacji; backend
-   przejsciowo przyjmuje tez format legacy bez licznikow, zeby aktualizacja
-   serwera nie odciela starszych klientow.
-7. Uniewaznienie urzadzenia blokuje nowe podpisane wiadomosci i sesje, ale nie
-   odbiera jeszcze dostepu do przyszlych szyfrogramow, jesli skompromitowane
-   urzadzenie nadal posiada klucze rozmow.
-8. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
+6. Rekey po uniewaznieniu obejmuje aktywne rozmowy 1:1; grupy sa wylaczone do
+   czasu wdrozenia bezpiecznego protokolu grupowego.
+7. Brak Double Ratchet, czyli brak nowego klucza wiadomosci dla kazdego
    komunikatu.
-9. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
+8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
-10. Backend nadal uzywa plikow JSON i synchronicznych zapisow, co jest dobre dla
-   prototypu, ale nie dla duzej uslugi.
+9. SQLite jest odpowiedni dla malej self-hosted instancji, ale duza publiczna
+   usluga wymaga osobnego planu obciazeniowego i prawdopodobnie migracji do
+   PostgreSQL albo osobnego workera storage.
 
 ## Priorytet 1: prawdziwsze E2EE wzgledem serwera
 
 1. Wdrozyc OPAQUE albo inny protokol logowania, w ktorym serwer nie otrzymuje
    sekretu pozwalajacego odszyfrowac vault.
 2. Dodac key transparency log dla publicznych tozsamosci Ed25519.
-3. Po uniewaznieniu urzadzenia rotowac klucze aktywnych rozmow i opakowywac je
-   wylacznie dla pozostalych aktywnych urzadzen.
+3. Rozszerzyc rekey po uniewaznieniu na przyszly bezpieczny protokol grupowy.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.
 
@@ -140,9 +164,13 @@ sekretem.
 
 1. Dodac panel sesji i liste aktywnych urzadzen.
 2. Dodac wylogowanie konkretnego urzadzenia.
-3. Przeniesc backend z JSON do PostgreSQL.
-4. Dodac migracje, transakcje, rate limiting, limity przechowywania i paginacje.
-5. Dodac testy integracyjne, fuzzing parserow i CI dla Windows, Android oraz
+3. Utrzymac regularne backupy online, testy restore SQLite/WAL i testy
+   uszkodzenia bazy w CI.
+4. Przeniesc backend do PostgreSQL albo osobnego workera storage przed duza
+   publiczna instancja.
+5. Dodac migracje, rate limiting, limity przechowywania i paginacje tam, gdzie
+   beda wymagane przez skale.
+6. Dodac testy integracyjne, fuzzing parserow i CI dla Windows, Android oraz
    Linux.
 
 ## Czego nie obiecywac testerom

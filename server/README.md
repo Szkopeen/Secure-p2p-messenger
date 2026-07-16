@@ -14,6 +14,10 @@ Serwer nie powinien znac tresci rozmow, plikow ani prywatnych kluczy
 uzytkownikow. Nadal widzi jednak metadane techniczne: konta, relacje, czas,
 rozmiary pakietow i adresy IP.
 
+Dane cloud sa przechowywane w SQLite w `V2_DATA_DIR`. Baza pracuje w trybie
+WAL, wiec przy backupie offline kopiuj plik `.sqlite` razem z `.sqlite-wal` i
+`.sqlite-shm`.
+
 ## Start lokalny
 
 ```bash
@@ -33,15 +37,18 @@ Ustaw co najmniej:
 ```bash
 REGISTRATION_MODE=disabled
 ADMIN_TOKEN=drugi-losowy-ciag-minimum-32-znaki
+SESSION_TTL_HOURS=72
+SESSION_IDLE_TTL_HOURS=24
+METRICS_STORAGE_CACHE_SECONDS=15
 ```
 
 WebSocket `/v2/ws` nie przyjmuje dlugotrwalego tokenu w URL ani w naglowku.
 Klient najpierw pobiera krotko zyjacy, jednorazowy ticket przez `/v2/ws-ticket`,
 a potem wysyla go jako pierwsza ramke WebSocket.
 
-## Wdrozenie na Pi
+## Wdrozenie
 
-W aktualnym wdrozeniu usluga systemd uruchamia:
+W typowym wdrozeniu usluga systemd uruchamia:
 
 ```bash
 npm start
@@ -50,7 +57,7 @@ npm start
 w katalogu:
 
 ```text
-/opt/secure-p2p/app/server
+/srv/secure-chat/server
 ```
 
 Serwer powinien sluchac lokalnie na `127.0.0.1:8443`, a publiczny ruch HTTPS/WSS
@@ -59,10 +66,14 @@ powinien przechodzic przez Caddy.
 Diagnostyka:
 
 ```bash
-sudo systemctl status secure-p2p-relay --no-pager
-sudo journalctl -u secure-p2p-relay -n 100 --no-pager
-curl https://chat.szkpn.pl/healthz
+sudo systemctl status secure-p2p --no-pager
+sudo journalctl -u secure-p2p -n 100 --no-pager
+curl https://chat.example.com/healthz
+curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.example.com/metrics
 ```
+
+`/healthz` zwraca tylko prosty status liveness. Szczegolowe metryki KDF i
+storage sa dostepne przez `/metrics` z naglowkiem `x-admin-token`.
 
 ## Najwazniejsze katalogi danych
 
@@ -74,16 +85,31 @@ Domyslnie z `.env.example`:
 ./updates
 ```
 
-Na produkcyjnym Pi zwykle:
+Na produkcyjnym serwerze zwykle:
 
 ```text
-/opt/secure-p2p/app/server/data
-/opt/secure-p2p/app/server/data-v2
-/opt/secure-p2p/app/server/updates
+/srv/secure-chat/server/data
+/srv/secure-chat/server/data-v2
+/srv/secure-chat/server/updates
 ```
 
-Te katalogi zawieraja zaszyfrowane, ale wrazliwe dane. Rob kopie zapasowe przed
-aktualizacjami backendu.
+Aktywna baza cloud zwykle lezy tutaj:
+
+```text
+/srv/secure-chat/server/data-v2/secure-chat.sqlite
+/srv/secure-chat/server/data-v2/secure-chat.sqlite-wal
+/srv/secure-chat/server/data-v2/secure-chat.sqlite-shm
+```
+
+Te katalogi zawieraja zaszyfrowane, ale wrazliwe dane. Do kopii online uzyj:
+
+```bash
+cd /srv/secure-chat/server
+npm run backup-sqlite -- --out /backup/secure-chat.sqlite
+```
+
+Do kopii offline zatrzymaj usluge, skopiuj komplet plikow `.sqlite`,
+`.sqlite-wal` i `.sqlite-shm`, a po restore przywroc komplet z tej samej chwili.
 
 ## Zaproszenia
 
@@ -92,10 +118,10 @@ przez uwierzytelniony endpoint. Token jest zwracany tylko raz, a w SQLite
 przechowywany jest wylacznie jego hash:
 
 ```bash
-curl -X POST https://chat.szkpn.pl/v2/admin/invites \
+curl -X POST https://chat.example.com/v2/admin/invites \
   -H "x-admin-token: $ADMIN_TOKEN" \
   -H "content-type: application/json" \
-  -d '{"maxUses":1,"expiresInSeconds":86400,"restrictedUsername":"alice"}'
+  -d '{"maxUses":1,"expiresInSeconds":86400,"restrictedUsername":"example-user"}'
 ```
 
 ## Aktualizacje aplikacji

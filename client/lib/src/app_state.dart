@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart' as crypto_hash;
-import 'package:cryptography/cryptography.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -13,21 +12,13 @@ import 'package:uuid/uuid.dart';
 import 'crypto/codec.dart';
 import 'crypto/cloud_crypto.dart';
 import 'crypto/cloud_origin.dart';
-import 'crypto/crypto_service.dart';
 import 'crypto/safety_number.dart';
 import 'models/cloud_account.dart';
 import 'models/contact.dart';
-import 'models/contact_invite.dart';
-import 'models/directory_entry.dart';
-import 'models/encrypted_packet.dart';
-import 'models/group.dart';
 import 'models/identity.dart';
 import 'models/message.dart';
-import 'models/session.dart';
 import 'models/update_info.dart';
 import 'models/user_profile.dart';
-import 'network/relay_client.dart';
-import 'platform/file_exporter.dart';
 import 'platform/media_cache.dart';
 import 'security/update_signature_verifier.dart';
 import 'services/cloud_api_client.dart';
@@ -38,41 +29,22 @@ import 'storage/secure_store.dart';
 enum _CloudReplayDecision { accept, buffer }
 
 class AppState extends ChangeNotifier {
-  AppState({SecureStore? store, CryptoService? crypto})
-      : _store = store ?? SecureStore(),
-        _crypto = crypto ?? CryptoService() {
+  AppState({SecureStore? store}) : _store = store ?? SecureStore() {
     _messageArchive = MessageArchive(secureStore: _store);
   }
 
   static const maxPlainFileBytes = 8 * 1024 * 1024;
   static const maxCloudPlainFileBytes = 48 * 1024;
   static const maxProfileImageBytes = 1024 * 1024;
-  static const _accountExportIterations = 310000;
-  static const _accountExportAad = 'secure-p2p-account-transfer/v1';
-  static const _deviceSyncProtocol = 'secure-p2p-device-sync/v1';
-  static const _deviceSyncAad = 'secure-p2p-device-sync-message/v1';
-
   final SecureStore _store;
-  final CryptoService _crypto;
   final CloudCrypto _cloudCrypto = CloudCrypto();
   final UpdateSignatureVerifier _updateSignatureVerifier =
       const UpdateSignatureVerifier();
   late final MessageArchive _messageArchive;
   final Uuid _uuid = const Uuid();
-  final AesGcm _accountExportAead = AesGcm.with256bits();
-  final AesGcm _deviceSyncAead = AesGcm.with256bits();
   Future<void> _persistQueue = Future<void>.value();
   final List<Contact> _contacts = [];
-  final List<ContactInvite> _contactInvites = [];
-  final List<GroupConversation> _groups = [];
-  final List<DirectoryEntry> _directoryEntries = [];
   final Map<String, List<ChatMessage>> _messages = {};
-  final Map<String, SessionState> _sessions = {};
-  final Map<String, PendingSession> _pendingSessions = {};
-  final Map<String, String> _relayEnvelopeToMessage = {};
-  final Map<String, String> _signalEnvelopeToContact = {};
-  final Map<String, bool> _relayPresence = {};
-  final Map<String, ChatMessage> _pendingDeviceSyncMessages = {};
   final Map<String, CloudConversation> _cloudConversations = {};
   final Map<String, String> _cloudContactToConversation = {};
   final Map<String, int> _cloudLastSeq = {};
@@ -82,7 +54,6 @@ class AppState extends ChangeNotifier {
   final Set<String> _cloudGapFetches = {};
   final Map<String, Future<void>> _cloudSendQueues = {};
   final List<CloudPublicUser> _cloudUsers = [];
-  final Set<String> _pendingInviteHandshakeContacts = {};
 
   IdentityKeyMaterial? _identity;
   CloudSession? _cloudSession;
@@ -94,20 +65,10 @@ class AppState extends ChangeNotifier {
   CloudApiClient? _cloudClient;
   StreamSubscription<CloudEvent>? _cloudSubscription;
   UserProfile? _ownProfile;
-  RelaySettings? _relaySettings;
-  RelayClient? _relay;
-  StreamSubscription<RelayEvent>? _relaySubscription;
   Timer? _presenceTimer;
-  bool _relayConnected = false;
+  bool _cloudConnected = false;
   bool _initializing = true;
-  bool _retryingGroupInvites = false;
-  bool _applyingDeviceSync = false;
-  bool _sentDeviceSyncSnapshotThisRun = false;
-  bool _directoryEnabled = false;
-  bool _loadingDirectory = false;
-  Timer? _deviceSyncTimer;
   String? _status;
-  String? _directoryStatus;
   String _currentVersionLabel = '';
   int _currentBuildNumber = 0;
   AvailableUpdate? _availableUpdate;
@@ -116,13 +77,12 @@ class AppState extends ChangeNotifier {
   double? _updateDownloadProgress;
   String? _updateStatus;
   String? _downloadedUpdatePath;
-  int _relayMaxPayloadBytes = 16 * 1024 * 1024;
 
   bool get initializing => _initializing;
   bool get hasIdentity => _identity != null;
   bool get cloudMode => _cloudSession != null;
   bool get hasAccount => cloudMode;
-  bool get relayConnected => _relayConnected;
+  bool get cloudConnected => _cloudConnected;
   String? get status => _status;
   String? get ownUserId => _cloudSession?.userId ?? _identity?.userId;
   String? get ownDeviceId => _cloudSession?.deviceId ?? _identity?.deviceId;
@@ -134,17 +94,9 @@ class AppState extends ChangeNotifier {
       _cloudVault?.identityPublicKey ??
       (_identity == null ? null : b64(_identity!.publicKey.bytes));
   UserProfile? get ownProfile => _ownProfile;
-  RelaySettings? get relaySettings => _relaySettings;
   List<Contact> get contacts => List.unmodifiable(_contacts);
-  List<ContactInvite> get contactInvites => List.unmodifiable(_contactInvites);
-  List<GroupConversation> get groups => List.unmodifiable(_groups);
-  List<DirectoryEntry> get directoryEntries =>
-      List.unmodifiable(_directoryEntries);
   List<CloudPublicUser> get cloudUsers => List.unmodifiable(_cloudUsers);
   CloudDeviceList? get ownCloudDeviceList => _ownCloudDeviceList;
-  bool get directoryEnabled => _directoryEnabled;
-  bool get loadingDirectory => _loadingDirectory;
-  String? get directoryStatus => _directoryStatus;
   String get currentVersionLabel => _currentVersionLabel;
   AvailableUpdate? get availableUpdate => _availableUpdate;
   bool get checkingForUpdate => _checkingForUpdate;
@@ -172,22 +124,7 @@ class AppState extends ChangeNotifier {
 
   bool isContactOnline(String contactId) {
     if (cloudMode) return true;
-    return _relayPresence[contactId] == true;
-  }
-
-  static String? accountTransferPassphraseError(String passphrase) {
-    final value = passphrase.trim();
-    if (value.length < 8) return 'Minimum 8 znakow.';
-    if (!RegExp(r'[A-Z]').hasMatch(value)) {
-      return 'Dodaj przynajmniej jedna duza litere.';
-    }
-    if (!RegExp(r'[0-9]').hasMatch(value)) {
-      return 'Dodaj przynajmniej jedna liczbe.';
-    }
-    if (!RegExp(r'[^A-Za-z0-9]').hasMatch(value)) {
-      return 'Dodaj przynajmniej jeden znak specjalny.';
-    }
-    return null;
+    return false;
   }
 
   String displayNameForUser(String userId) {
@@ -220,19 +157,11 @@ class AppState extends ChangeNotifier {
       _cloudSession = await _store.loadCloudSession();
       _identity = null;
       _ownProfile = await _store.loadOwnProfile();
-      _relaySettings = null;
       _contacts
         ..clear()
         ..addAll(await _store.loadContacts());
-      _contactInvites
-        ..clear()
-        ..addAll(await _store.loadContactInvites());
-      _groups
-        ..clear()
-        ..addAll(await _store.loadGroups());
-      _directoryEnabled = await _store.loadDirectoryEnabled();
       await _loadArchivedMessages();
-      await _loadSessions();
+      await _clearLegacySessions();
       await _loadCloudReplayStates();
       _initializing = false;
       notifyListeners();
@@ -245,16 +174,6 @@ class AppState extends ChangeNotifier {
       _initializing = false;
       _setStatus('Nie udalo sie wczytac konfiguracji: $error');
     }
-  }
-
-  Future<void> createIdentityAndConnect({
-    required String userId,
-    required String serverUrl,
-    required String legacyRelaySecret,
-  }) async {
-    throw UnsupportedError(
-      'Stary tryb relay zostal usuniety. Uzyj konta cloud.',
-    );
   }
 
   Future<void> registerCloudAccount({
@@ -395,8 +314,6 @@ class AppState extends ChangeNotifier {
     CloudSession session,
     CloudVault vault,
   ) async {
-    await _relaySubscription?.cancel();
-    await _relay?.dispose();
     await _cloudSubscription?.cancel();
     await _cloudClient?.dispose();
 
@@ -409,15 +326,8 @@ class AppState extends ChangeNotifier {
       token: session.token,
     );
     _identity = null;
-    _relaySettings = null;
-    _relay = null;
     _contacts.clear();
-    _groups.clear();
-    _contactInvites.clear();
-    _directoryEntries.clear();
     _messages.clear();
-    _sessions.clear();
-    _pendingSessions.clear();
     _cloudConversations.clear();
     _cloudContactToConversation.clear();
     _cloudLastSeq.clear();
@@ -425,7 +335,7 @@ class AppState extends ChangeNotifier {
     _cloudGapFetches.clear();
     _cloudSendQueues.clear();
     await _loadCloudReplayStates();
-    _relayConnected = false;
+    _cloudConnected = false;
     await _store.saveCloudSession(session);
     await _persistMessages();
     notifyListeners();
@@ -437,212 +347,8 @@ class AppState extends ChangeNotifier {
   String _cloudSignatureOrigin(String serverUrl) =>
       canonicalCloudOrigin(serverUrl);
 
-  Future<void> exportAccountPackage(String passphrase) async {
-    final identity = _requireIdentity();
-    final settings = _relaySettings;
-    if (settings == null) {
-      throw StateError('Brak ustawien relay do eksportu.');
-    }
-    final normalizedPassphrase = passphrase.trim();
-    _validateAccountTransferPassphrase(normalizedPassphrase);
-
-    final privateKeyBytes = await identity.keyPair.extractPrivateKeyBytes();
-    final localArchiveKey = await _localArchiveKeyBase64();
-    final clearJson = jsonEncode({
-      'v': 1,
-      'exportedAt': DateTime.now().toUtc().toIso8601String(),
-      'identity': {
-        'userId': identity.userId,
-        'privateKey': b64(privateKeyBytes),
-        'publicKey': b64(identity.publicKey.bytes),
-      },
-      'relaySettings': settings.toJson(),
-      'contacts': _contacts.map((contact) => contact.toJson()).toList(),
-      'groups': _groups.map((group) => group.toJson()).toList(),
-      'directoryEnabled': _directoryEnabled,
-      'ownProfile': _ownProfile?.toJson(),
-      'localArchiveKey': localArchiveKey,
-      'messages':
-          _allMessagesSnapshot().map((message) => message.toJson()).toList(),
-    });
-
-    final salt = secureRandomBytes(16);
-    final nonce = secureRandomBytes(12);
-    final key = await _deriveAccountExportKey(
-      normalizedPassphrase,
-      salt,
-      parameters: CloudCrypto.defaultVaultKdf,
-    );
-    final box = await _accountExportAead.encrypt(
-      utf8Bytes(clearJson),
-      secretKey: key,
-      nonce: nonce,
-      aad: utf8Bytes(_accountExportAad),
-    );
-    final envelope = jsonEncode({
-      'v': 2,
-      'type': 'secure-p2p-account-transfer',
-      'algorithm': 'AES-256-GCM',
-      'kdf': CloudCrypto.defaultVaultKdf,
-      'salt': b64(salt),
-      'nonce': b64(box.nonce),
-      'ciphertext': b64(box.cipherText),
-      'mac': b64(box.mac.bytes),
-    });
-
-    await saveReceivedFile(
-      fileName: 'secure-p2p-account-${identity.userId}.sp2p',
-      bytes: utf8Bytes(envelope),
-      mimeType: 'application/json',
-    );
-  }
-
-  Future<void> importAccountPackageFromFile(String passphrase) async {
-    final result = await FilePicker.platform.pickFiles(
-      allowMultiple: false,
-      withData: true,
-      type: FileType.any,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final bytes = result.files.single.bytes;
-    if (bytes == null) {
-      throw StateError('Nie mozna odczytac pliku konta na tej platformie.');
-    }
-    await importAccountPackage(bytes: bytes, passphrase: passphrase);
-  }
-
-  Future<void> importAccountPackage({
-    required Uint8List bytes,
-    required String passphrase,
-  }) async {
-    final normalizedPassphrase = passphrase.trim();
-    _validateAccountTransferPassphrase(normalizedPassphrase);
-
-    final envelope = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
-    if (envelope['type'] != 'secure-p2p-account-transfer') {
-      throw const FormatException('To nie jest pakiet konta Secure Chat.');
-    }
-    final salt = unb64(envelope['salt'] as String);
-    final rawKdf = envelope['kdf'];
-    final Map<String, dynamic>? kdfParameters;
-    if (rawKdf is Map) {
-      kdfParameters = rawKdf.cast<String, dynamic>();
-    } else if (envelope['v'] == 1 && rawKdf == 'PBKDF2-HMAC-SHA256') {
-      if (envelope['iterations'] != _accountExportIterations) {
-        throw const FormatException(
-            'Nieprawidlowe parametry starego eksportu.');
-      }
-      kdfParameters = null;
-    } else {
-      throw const FormatException('Nieobslugiwany KDF eksportu konta.');
-    }
-    final key = await _deriveAccountExportKey(
-      normalizedPassphrase,
-      salt,
-      parameters: kdfParameters,
-    );
-    final box = SecretBox(
-      unb64(envelope['ciphertext'] as String),
-      nonce: unb64(envelope['nonce'] as String),
-      mac: Mac(unb64(envelope['mac'] as String)),
-    );
-    final clearBytes = await _accountExportAead.decrypt(
-      box,
-      secretKey: key,
-      aad: utf8Bytes(_accountExportAad),
-    );
-    final clear = jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
-    final identityJson = (clear['identity'] as Map).cast<String, dynamic>();
-    final publicKey = SimplePublicKey(
-      unb64(identityJson['publicKey'] as String),
-      type: KeyPairType.ed25519,
-    );
-    final importedIdentity = IdentityKeyMaterial(
-      userId: identityJson['userId'] as String,
-      deviceId: _uuid.v4(),
-      keyPair: SimpleKeyPairData(
-        unb64(identityJson['privateKey'] as String),
-        publicKey: publicKey,
-        type: KeyPairType.ed25519,
-      ),
-      publicKey: publicKey,
-    );
-    final importedRelaySettings = RelaySettings.fromJson(
-      (clear['relaySettings'] as Map).cast<String, dynamic>(),
-    );
-    final importedContacts = ((clear['contacts'] as List?) ?? const [])
-        .map((item) => Contact.fromJson((item as Map).cast<String, dynamic>()))
-        .toList(growable: false);
-    final importedGroups = ((clear['groups'] as List?) ?? const [])
-        .map(
-          (item) =>
-              GroupConversation.fromJson((item as Map).cast<String, dynamic>()),
-        )
-        .toList(growable: false);
-    final importedDirectoryEnabled = clear['directoryEnabled'] == true;
-    final profileJson = clear['ownProfile'];
-    final importedProfile = profileJson == null
-        ? null
-        : UserProfile.fromJson((profileJson as Map).cast<String, dynamic>());
-    final importedLocalArchiveKey = clear['localArchiveKey'] as String?;
-    final importedMessages = ((clear['messages'] as List?) ?? const [])
-        .map(
-          (item) => ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
-        )
-        .toList(growable: false);
-
-    await _relaySubscription?.cancel();
-    await _relay?.dispose();
-    await _store.wipeLocalSecrets();
-    await _messageArchive.delete();
-
-    _identity = importedIdentity;
-    _relaySettings = importedRelaySettings;
-    _ownProfile = importedProfile;
-    _contacts
-      ..clear()
-      ..addAll(importedContacts);
-    _groups
-      ..clear()
-      ..addAll(importedGroups);
-    _contactInvites.clear();
-    _directoryEntries.clear();
-    _directoryEnabled = importedDirectoryEnabled;
-    _messages.clear();
-    _sessions.clear();
-    _pendingSessions.clear();
-    _relayEnvelopeToMessage.clear();
-    _signalEnvelopeToContact.clear();
-    _relayPresence.clear();
-    _pendingDeviceSyncMessages.clear();
-    _deviceSyncTimer?.cancel();
-    _pendingInviteHandshakeContacts.clear();
-    _relayConnected = false;
-    _retryingGroupInvites = false;
-    _sentDeviceSyncSnapshotThisRun = false;
-
-    await _store.saveIdentity(importedIdentity);
-    if (_isValidArchiveKey(importedLocalArchiveKey)) {
-      await _store.saveLocalArchiveKey(importedLocalArchiveKey!);
-    }
-    await _store.saveRelaySettings(importedRelaySettings);
-    await _store.saveContacts(_contacts);
-    await _store.saveGroups(_groups);
-    await _store.saveContactInvites(_contactInvites);
-    await _store.saveDirectoryEnabled(_directoryEnabled);
-    if (importedProfile != null) {
-      await _store.saveOwnProfile(importedProfile);
-    }
-    _mergeSyncedMessages(importedMessages);
-    await _persistMessages();
-    notifyListeners();
-    await connectRelay();
-    unawaited(checkForUpdate(silent: true));
-  }
-
   Future<void> checkForUpdate({bool silent = false}) async {
-    final updateServerUrl =
-        _cloudSession?.serverUrl ?? _relaySettings?.serverUrl;
+    final updateServerUrl = _cloudSession?.serverUrl;
     if (updateServerUrl == null) return;
     final platform = _updatePlatform();
     if (platform == null) {
@@ -772,12 +478,6 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> connectRelay() async {
-    throw UnsupportedError(
-      'Stary tryb relay zostal usuniety. Uzyj konta cloud.',
-    );
-  }
-
   Future<void> connectCloud() async {
     final session = _cloudSession;
     if (session == null) return;
@@ -787,7 +487,7 @@ class AppState extends ChangeNotifier {
       serverUrl: session.serverUrl,
       token: session.token,
     );
-    _relayConnected = false;
+    _cloudConnected = false;
     _setStatus('Laczenie z kontem...');
 
     final encryptedVault = await _cloudClient!.vault();
@@ -806,7 +506,7 @@ class AppState extends ChangeNotifier {
       (event) => unawaited(_handleCloudEvent(event)),
     );
     await _cloudClient!.connectEvents();
-    _relayConnected = true;
+    _cloudConnected = true;
     _setStatus('Konto polaczone.');
     notifyListeners();
   }
@@ -1172,7 +872,7 @@ class AppState extends ChangeNotifier {
   Future<void> _handleCloudEvent(CloudEvent event) async {
     switch (event) {
       case CloudReady():
-        _relayConnected = true;
+        _cloudConnected = true;
         _setStatus('Konto polaczone.');
         break;
       case CloudConversationEvent():
@@ -1187,7 +887,7 @@ class AppState extends ChangeNotifier {
         }
         break;
       case CloudProblem():
-        _relayConnected = false;
+        _cloudConnected = false;
         _setStatus(event.message);
         break;
     }
@@ -1676,6 +1376,38 @@ class AppState extends ChangeNotifier {
     final direction = stored.senderUserId == session.userId
         ? MessageDirection.outbound
         : MessageDirection.inbound;
+    final handledControlPayload = _applyCloudControlPayload(
+      peerId: peerId,
+      senderUserId: stored.senderUserId,
+      direction: direction,
+      payload: decrypted.payload,
+      createdAt: decrypted.createdAt,
+    );
+    if (handledControlPayload) {
+      if (replayDecision == _CloudReplayDecision.accept) {
+        await _rememberCloudReplayState(
+          conversationId: stored.conversationId,
+          senderUserId: stored.senderUserId,
+          senderDeviceId: senderDeviceId,
+          lastCounter: decrypted.messageCounter!,
+          lastMessageHash: decrypted.messageHash,
+          requiresDeviceSignature: deviceSignatureVerified,
+        );
+      }
+      final currentSeq = _cloudLastSeq[stored.conversationId] ?? 0;
+      if (stored.seq > currentSeq) {
+        _cloudLastSeq[stored.conversationId] = stored.seq;
+      }
+      if (drainBuffered && replayDecision == _CloudReplayDecision.accept) {
+        await _drainCloudReplayBuffer(
+          conversationId: stored.conversationId,
+          senderUserId: stored.senderUserId,
+          senderDeviceId: senderDeviceId,
+        );
+      }
+      if (notify) notifyListeners();
+      return;
+    }
     final added = _addMessage(
       ChatMessage(
         id: decrypted.messageId,
@@ -1726,6 +1458,65 @@ class AppState extends ChangeNotifier {
     if (notify) notifyListeners();
   }
 
+  bool _applyCloudControlPayload({
+    required String peerId,
+    required String senderUserId,
+    required MessageDirection direction,
+    required PlainPayload payload,
+    required DateTime createdAt,
+  }) {
+    final targetMessageId = payload.targetMessageId;
+    switch (payload.type) {
+      case PlainPayloadType.text:
+        return false;
+      case PlainPayloadType.file:
+        return false;
+      case PlainPayloadType.retraction:
+        if (targetMessageId == null) return true;
+        _markMessageRetracted(
+          peerId,
+          targetMessageId,
+          allowedDirection: direction,
+          fallbackCreatedAt: createdAt,
+          fallbackTransport: 'cloud',
+        );
+        return true;
+      case PlainPayloadType.reaction:
+        if (targetMessageId == null) return true;
+        _applyReaction(
+          peerId,
+          targetMessageId,
+          senderUserId,
+          payload.reactionEmoji,
+        );
+        return true;
+      case PlainPayloadType.pin:
+        if (targetMessageId == null) return true;
+        _applyPin(peerId, targetMessageId, payload.pinPinned == true);
+        return true;
+      case PlainPayloadType.receipt:
+        if (targetMessageId == null) return true;
+        if (direction == MessageDirection.inbound) {
+          _applyReceipt(
+            peerId,
+            targetMessageId,
+            payload.receiptKind ?? ReceiptKind.delivered,
+          );
+        }
+        return true;
+      case PlainPayloadType.edit:
+        if (targetMessageId == null) return true;
+        _applyEdit(
+          peerId,
+          targetMessageId,
+          payload.editedText ?? '',
+          allowedDirection: direction,
+          editedAt: createdAt,
+        );
+        return true;
+    }
+  }
+
   Future<void> _sendCloudPayload(Contact contact, PlainPayload payload) async {
     final session = _cloudSession;
     final client = _cloudClient;
@@ -1746,6 +1537,35 @@ class AppState extends ChangeNotifier {
         session: session,
         client: client,
         conversationId: conversationId,
+        recordLocally: true,
+      ),
+    );
+  }
+
+  Future<void> _sendCloudControlPayload(
+    Contact contact,
+    PlainPayload payload,
+  ) async {
+    final session = _cloudSession;
+    final client = _cloudClient;
+    if (session == null || client == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    await _startCloudDirectContact(contact);
+    final conversationId = _cloudContactToConversation[contact.userId];
+    if (conversationId == null) {
+      throw StateError('Nie mozna utworzyc rozmowy cloud.');
+    }
+    final queueKey = '$conversationId|${session.userId}|${session.deviceId}';
+    await _enqueueCloudSend(
+      queueKey,
+      () => _sendCloudPayloadLocked(
+        contact: contact,
+        payload: payload,
+        session: session,
+        client: client,
+        conversationId: conversationId,
+        recordLocally: false,
       ),
     );
   }
@@ -1756,6 +1576,7 @@ class AppState extends ChangeNotifier {
     required CloudSession session,
     required CloudApiClient client,
     required String conversationId,
+    required bool recordLocally,
   }) async {
     final conversation = _cloudConversations[conversationId];
     if (conversation == null) {
@@ -1786,20 +1607,25 @@ class AppState extends ChangeNotifier {
       payload: payload,
     );
     final messageId = requiredString(encrypted, 'messageId');
-    _addMessage(
-      ChatMessage(
-        id: messageId,
-        contactId: contact.userId,
-        direction: MessageDirection.outbound,
-        payload: payload,
-        createdAt: DateTime.parse(
-          requiredString(asStringKeyMap(encrypted['aad'], 'aad'), 'createdAt'),
+    if (recordLocally) {
+      _addMessage(
+        ChatMessage(
+          id: messageId,
+          contactId: contact.userId,
+          direction: MessageDirection.outbound,
+          payload: payload,
+          createdAt: DateTime.parse(
+            requiredString(
+              asStringKeyMap(encrypted['aad'], 'aad'),
+              'createdAt',
+            ),
+          ),
+          status: MessageStatus.pending,
+          senderId: session.userId,
+          transport: 'cloud',
         ),
-        status: MessageStatus.pending,
-        senderId: session.userId,
-        transport: 'cloud',
-      ),
-    );
+      );
+    }
     final stored = await client.sendMessage(
       conversationId: conversationId,
       messageId: messageId,
@@ -1813,12 +1639,14 @@ class AppState extends ChangeNotifier {
       lastMessageHash: _cloudCrypto.cloudMessageHash(encrypted),
       requiresDeviceSignature: true,
     );
-    _updateMessage(
-      contact.userId,
-      messageId,
-      MessageStatus.sent,
-      transport: 'cloud',
-    );
+    if (recordLocally) {
+      _updateMessage(
+        contact.userId,
+        messageId,
+        MessageStatus.sent,
+        transport: 'cloud',
+      );
+    }
     final currentSeq = _cloudLastSeq[conversationId] ?? 0;
     if (stored.seq > currentSeq) _cloudLastSeq[conversationId] = stored.seq;
   }
@@ -1859,11 +1687,7 @@ class AppState extends ChangeNotifier {
       ),
     );
     _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
-    _contactInvites.removeWhere((item) => item.userId == contact.userId);
-    _directoryEntries.removeWhere((item) => item.userId == contact.userId);
     await _store.saveContacts(_contacts);
-    await _store.saveContactInvites(_contactInvites);
-    if (_relayConnected) _relay?.queryProfiles([contact.userId]);
     notifyListeners();
   }
 
@@ -1956,92 +1780,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setDirectoryEnabled(bool enabled) async {
-    _directoryEnabled = enabled;
-    await _store.saveDirectoryEnabled(enabled);
-    _syncDirectoryVisibility();
-    if (enabled) {
-      refreshDirectory();
-    } else {
-      _directoryEntries.clear();
-      _directoryStatus = 'Ukryto z globalnej listy uzytkownikow.';
-      notifyListeners();
-    }
-  }
-
-  void refreshDirectory() {
-    final relay = _relay;
-    if (!_relayConnected || relay == null) {
-      _directoryStatus = 'Najpierw polacz sie z relay.';
-      notifyListeners();
-      return;
-    }
-    _loadingDirectory = true;
-    _directoryStatus = 'Odswiezam globalna liste...';
-    notifyListeners();
-    relay.queryDirectory();
-  }
-
-  Future<void> sendContactInvite(DirectoryEntry entry) async {
-    final identity = _requireIdentity();
-    final relay = _requireRelay();
-    if (!_relayConnected) {
-      throw StateError('Najpierw polacz sie z relay.');
-    }
-    if (entry.userId == identity.userId) {
-      throw StateError('To jest Twoje konto.');
-    }
-
-    await addContact(
-      Contact(
-        userId: entry.userId,
-        displayName: entry.displayName,
-        identityPublicKey: entry.identityPublicKey,
-      ),
-    );
-    relay.sendContactRequest(to: entry.userId, displayName: identity.userId);
-    _directoryStatus =
-        'Wyslano zaproszenie do ${entry.displayName}. Jesli jest offline, poczeka na serwerze.';
-    notifyListeners();
-  }
-
-  Future<void> acceptContactInvite(ContactInvite invite) async {
-    await addContact(
-      Contact(
-        userId: invite.userId,
-        displayName: invite.displayName,
-        identityPublicKey: invite.identityPublicKey,
-      ),
-    );
-    _contactInvites.removeWhere((item) => item.requestId == invite.requestId);
-    await _store.saveContactInvites(_contactInvites);
-    _setStatus('Dodano kontakt ${invite.displayName}.');
-    notifyListeners();
-  }
-
-  Future<void> rejectContactInvite(ContactInvite invite) async {
-    _contactInvites.removeWhere((item) => item.requestId == invite.requestId);
-    await _store.saveContactInvites(_contactInvites);
-    notifyListeners();
-  }
-
   Future<void> removeContact(Contact contact) async {
     final removed = _contacts.any((item) => item.userId == contact.userId);
     _contacts.removeWhere((item) => item.userId == contact.userId);
-    _contactInvites.removeWhere((item) => item.userId == contact.userId);
-    _directoryEntries.removeWhere((item) => item.userId == contact.userId);
-    _sessions.remove(contact.userId);
-    _pendingSessions.remove(contact.userId);
-    _relayEnvelopeToMessage.removeWhere((_, to) => to == contact.userId);
-    _signalEnvelopeToContact.removeWhere((_, to) => to == contact.userId);
-    _relayPresence.remove(contact.userId);
-    _pendingInviteHandshakeContacts.remove(contact.userId);
     _messages.remove(contact.userId);
 
     if (!removed) return;
     await _store.saveContacts(_contacts);
-    await _store.saveContactInvites(_contactInvites);
-    await _saveSessions();
     await _persistMessages();
     notifyListeners();
   }
@@ -2078,14 +1823,12 @@ class AppState extends ChangeNotifier {
       updatedAt: DateTime.now().toUtc(),
     );
     await _store.saveOwnProfile(_ownProfile!);
-    if (_relayConnected) _relay?.updateProfile(_ownProfile!);
     notifyListeners();
   }
 
   Future<void> clearProfileImage() async {
     _ownProfile = UserProfile(updatedAt: DateTime.now().toUtc());
     await _store.saveOwnProfile(_ownProfile!);
-    if (_relayConnected) _relay?.updateProfile(_ownProfile!);
     notifyListeners();
   }
 
@@ -2107,374 +1850,23 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  Future<GroupConversation> createGroup({
-    required String name,
-    required List<Contact> members,
-  }) async {
-    if (cloudMode) {
-      throw StateError(
-        'Grupy sa wylaczone do czasu wdrozenia bezpiecznej rotacji kluczy/MLS.',
-      );
-    }
-    final identity = _requireIdentity();
-    final groupName = name.trim().isEmpty ? 'Nowa grupa' : name.trim();
-    final selectedMembers = members
-        .where((contact) => contact.userId != identity.userId)
-        .fold<Map<String, Contact>>({}, (map, contact) {
-          map[contact.userId] = contact;
-          return map;
-        })
-        .values
-        .toList(growable: false);
-
-    if (selectedMembers.isEmpty) {
-      throw ArgumentError('Wybierz przynajmniej jednego kontaktu.');
-    }
-
-    final memberIds = <String>{
-      identity.userId,
-      for (final member in selectedMembers) member.userId,
-    }.toList(growable: false);
-    final group = GroupConversation(
-      groupId: _uuid.v4(),
-      name: groupName,
-      memberIds: memberIds,
-      acceptedMemberIds: [identity.userId],
-      createdAt: DateTime.now().toUtc(),
-    );
-
-    _groups.add(group);
-    await _store.saveGroups(_groups);
-    _addSystemMessage(
-      group.groupId,
-      'Utworzono grupe "$groupName". Zaproszenia beda wysylane automatycznie.',
-    );
-    notifyListeners();
-
-    var sentInvites = 0;
-    for (final member in selectedMembers) {
-      if (await _trySendGroupInvite(group.groupId, member.userId)) {
-        sentInvites += 1;
-      }
-    }
-    final waiting = selectedMembers.length - sentInvites;
-    if (waiting > 0) {
-      _addSystemMessage(
-        group.groupId,
-        'Zaproszenia dla $waiting osob czekaja na wyslanie.',
-      );
-    }
-
-    return group;
-  }
-
-  Future<void> inviteContactsToGroup({
-    required GroupConversation group,
-    required List<Contact> contacts,
-  }) async {
-    final identity = _requireIdentity();
-    if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
-      throw StateError('Nie mozesz zapraszac do niezaakceptowanej grupy.');
-    }
-
-    final selected = contacts
-        .where(
-          (contact) =>
-              contact.userId != identity.userId &&
-              !group.memberIds.contains(contact.userId),
-        )
-        .fold<Map<String, Contact>>({}, (map, contact) {
-          map[contact.userId] = contact;
-          return map;
-        })
-        .values
-        .toList(growable: false);
-
-    if (selected.isEmpty) {
-      throw ArgumentError('Wybierz przynajmniej jeden nowy kontakt.');
-    }
-
-    final index = _groups.indexWhere((item) => item.groupId == group.groupId);
-    if (index < 0) return;
-
-    final updatedMemberIds = <String>{
-      ..._groups[index].memberIds,
-      for (final contact in selected) contact.userId,
-    }.toList(growable: false);
-    _groups[index] = _groups[index].copyWith(memberIds: updatedMemberIds);
-    await _store.saveGroups(_groups);
-    _addSystemMessage(
-      group.groupId,
-      'Dodano ${selected.length} osob do zaproszen grupy.',
-    );
-
-    for (final contact in selected) {
-      await _trySendGroupInvite(group.groupId, contact.userId);
-    }
-    await _broadcastGroupRoster(_groups[index]);
-    notifyListeners();
-  }
-
-  Future<void> respondToGroupInvite(
-    GroupConversation group,
-    bool accepted,
-  ) async {
-    final identity = _requireIdentity();
-    final inviterId = group.invitedBy;
-    if (inviterId == null) return;
-    final inviter = _contactById(inviterId);
-    if (inviter == null) {
-      throw StateError('Nie znaleziono kontaktu, ktory zaprosil do grupy.');
-    }
-
-    await _sendHiddenPayload(
-      inviter,
-      PlainPayload.groupInviteResponse(
-        groupId: group.groupId,
-        groupAccepted: accepted,
-      ),
-    );
-
-    final index = _groups.indexWhere((item) => item.groupId == group.groupId);
-    if (index < 0) return;
-    if (!accepted) {
-      _groups.removeAt(index);
-      _messages.remove(group.groupId);
-      await _store.saveGroups(_groups);
-      await _persistMessages();
-      notifyListeners();
-      return;
-    }
-
-    final acceptedIds = <String>{
-      ..._groups[index].acceptedMemberIds,
-      identity.userId,
-    }.toList(growable: false);
-    _groups[index] = _groups[index].copyWith(
-      acceptedMemberIds: acceptedIds,
-      pendingInvite: false,
-    );
-    await _store.saveGroups(_groups);
-    _addSystemMessage(group.groupId, 'Dolaczyles do grupy.');
-    notifyListeners();
-  }
-
-  Future<void> sendGroupText(
-    GroupConversation group,
-    String text, {
-    String? replyToMessageId,
-    String? replyPreview,
-  }) async {
-    final trimmed = text.trim();
-    if (trimmed.isEmpty) return;
-    await _sendGroupVisiblePayload(
-      group,
-      visiblePayload: PlainPayload.text(
-        trimmed,
-        replyToMessageId: replyToMessageId,
-        replyPreview: replyPreview,
-      ),
-      wirePayload: (messageId) => PlainPayload.groupText(
-        groupId: group.groupId,
-        groupMessageId: messageId,
-        text: trimmed,
-        replyToMessageId: replyToMessageId,
-        replyPreview: replyPreview,
-      ),
-    );
-  }
-
-  Future<void> sendGroupFile(
-    GroupConversation group, {
-    String? replyToMessageId,
-    String? replyPreview,
-  }) async {
-    final result = await FilePicker.platform.pickFiles(
-      allowMultiple: false,
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return;
-
-    final file = result.files.single;
-    final bytes = file.bytes;
-    if (bytes == null) {
-      throw StateError('Nie mozna odczytac pliku na tej platformie.');
-    }
-    await sendGroupFileBytes(
-      group,
-      fileName: file.name,
-      bytes: bytes,
-      mimeType: _guessMimeType(file.name),
-      replyToMessageId: replyToMessageId,
-      replyPreview: replyPreview,
-    );
-  }
-
-  Future<void> sendGroupFileBytes(
-    GroupConversation group, {
-    required String fileName,
-    required Uint8List bytes,
-    String? mimeType,
-    String? replyToMessageId,
-    String? replyPreview,
-  }) async {
-    final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
-    final effectiveLimit = cloudMode
-        ? maxCloudPlainFileBytes
-        : relayAwareLimit < maxPlainFileBytes
-            ? relayAwareLimit
-            : maxPlainFileBytes;
-    if (bytes.length > effectiveLimit) {
-      throw StateError(
-        'Plik jest za duzy. Limit: ${_fileLimitLabel(effectiveLimit)}.',
-      );
-    }
-
-    final payload = PlainPayload.file(
-      fileName: fileName,
-      mimeType: mimeType ?? _guessMimeType(fileName),
-      fileSize: bytes.length,
-      fileBytesBase64: b64(bytes),
-      replyToMessageId: replyToMessageId,
-      replyPreview: replyPreview,
-    );
-    await _sendGroupVisiblePayload(
-      group,
-      visiblePayload: payload,
-      wirePayload: (messageId) => PlainPayload.file(
-        fileName: fileName,
-        mimeType: mimeType ?? _guessMimeType(fileName),
-        fileSize: bytes.length,
-        fileBytesBase64: b64(bytes),
-        groupId: group.groupId,
-        groupMessageId: messageId,
-        replyToMessageId: replyToMessageId,
-        replyPreview: replyPreview,
-      ),
-    );
-  }
-
-  Future<void> _sendGroupVisiblePayload(
-    GroupConversation group, {
-    required PlainPayload visiblePayload,
-    required PlainPayload Function(String messageId) wirePayload,
-  }) async {
-    final identity = _requireIdentity();
-    final currentGroup = _groupById(group.groupId) ?? group;
-    if (currentGroup.pendingInvite ||
-        !currentGroup.isAcceptedBy(identity.userId)) {
-      throw StateError('Najpierw zaakceptuj zaproszenie do grupy.');
-    }
-
-    final messageId = _uuid.v4();
-    _addMessage(
-      ChatMessage(
-        id: messageId,
-        contactId: currentGroup.groupId,
-        direction: MessageDirection.outbound,
-        payload: visiblePayload,
-        createdAt: DateTime.now().toUtc(),
-        status: MessageStatus.pending,
-        senderId: identity.userId,
-      ),
-    );
-
-    var sent = 0;
-    final recipientIds = currentGroup.acceptedMemberIds
-        .where((userId) => userId != identity.userId)
-        .toList(growable: false);
-    for (final userId in recipientIds) {
-      final contact = _contactById(userId);
-      if (contact == null) continue;
-      await _sendHiddenPayload(contact, wirePayload(messageId));
-      sent += 1;
-    }
-
-    _updateMessage(
-      currentGroup.groupId,
-      messageId,
-      sent > 0 || recipientIds.isEmpty
-          ? MessageStatus.sent
-          : MessageStatus.failed,
-      transport: 'group',
-      error: sent > 0 || recipientIds.isEmpty
-          ? null
-          : 'Brak zaakceptowanych odbiorcow.',
-    );
-  }
-
-  Future<void> markGroupRead(GroupConversation group) async {
-    final list = _messages[group.groupId];
-    if (list == null) return;
-
-    var changed = false;
-    final changedMessages = <ChatMessage>[];
-    for (var index = 0; index < list.length; index += 1) {
-      final message = list[index];
-      if (!_isUnreadIncomingMessage(message)) continue;
-      list[index] = message.copyWith(status: MessageStatus.read);
-      changedMessages.add(list[index]);
-      changed = true;
-    }
-    if (!changed) return;
-    await _persistMessages();
-    _scheduleDeviceSyncForMany(changedMessages);
-    notifyListeners();
-  }
-
-  Future<void> leaveGroup(GroupConversation group) async {
-    final identity = _requireIdentity();
-    if (group.pendingInvite) {
-      await respondToGroupInvite(group, false);
-      return;
-    }
-
-    final recipients = group.memberIds
-        .where((userId) => userId != identity.userId)
-        .toList(growable: false);
-    for (final userId in recipients) {
-      final contact = _contactById(userId);
-      if (contact == null) continue;
-      try {
-        await _sendHiddenPayload(
-          contact,
-          PlainPayload.groupLeave(groupId: group.groupId),
-        );
-      } catch (_) {
-        // Wyjscie z grupy ma zadzialac lokalnie nawet gdy czesc osob jest offline.
-      }
-    }
-    await deleteGroupLocally(group);
-  }
-
-  Future<void> deleteGroupLocally(GroupConversation group) async {
-    _groups.removeWhere((item) => item.groupId == group.groupId);
-    _messages.remove(group.groupId);
-    await _store.saveGroups(_groups);
-    await _persistMessages();
-    notifyListeners();
-  }
-
   Future<void> markConversationRead(Contact contact) async {
     final list = _messages[contact.userId];
     if (list == null) return;
 
     final readMessageIds = <String>[];
-    final changedMessages = <ChatMessage>[];
     var changed = false;
     for (var index = 0; index < list.length; index += 1) {
       final message = list[index];
       if (!_isUnreadIncomingMessage(message)) continue;
 
       list[index] = message.copyWith(status: MessageStatus.read);
-      changedMessages.add(list[index]);
       readMessageIds.add(message.id);
       changed = true;
     }
 
     if (!changed) return;
     await _persistMessages();
-    _scheduleDeviceSyncForMany(changedMessages);
     notifyListeners();
 
     for (final messageId in readMessageIds) {
@@ -2508,18 +1900,18 @@ class AppState extends ChangeNotifier {
     }
     if (trimmed == (message.payload.text ?? '').trim()) return;
 
-    final identity = _requireIdentity();
-    final session = await _ensureSession(contact);
-    final packet = await _crypto.encryptPayload(
-      session: session,
-      from: identity.userId,
-      to: contact.userId,
-      payload: PlainPayload.edit(
+    if (!cloudMode) {
+      throw StateError(
+        'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.',
+      );
+    }
+    await _sendCloudControlPayload(
+      contact,
+      PlainPayload.edit(
         targetMessageId: message.id,
         editedText: trimmed,
       ),
     );
-    await _sendEncryptedPacket(contact, packet);
     _applyEdit(
       contact.userId,
       message.id,
@@ -2542,15 +1934,15 @@ class AppState extends ChangeNotifier {
       );
     }
 
-    final identity = _requireIdentity();
-    final session = await _ensureSession(contact);
-    final packet = await _crypto.encryptPayload(
-      session: session,
-      from: identity.userId,
-      to: contact.userId,
-      payload: PlainPayload.retraction(targetMessageId: message.id),
+    if (!cloudMode) {
+      throw StateError(
+        'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.',
+      );
+    }
+    await _sendCloudControlPayload(
+      contact,
+      PlainPayload.retraction(targetMessageId: message.id),
     );
-    await _sendEncryptedPacket(contact, packet);
     _markMessageRetracted(
       contact.userId,
       message.id,
@@ -2592,25 +1984,26 @@ class AppState extends ChangeNotifier {
       throw StateError('Nie mozna zareagowac na te wiadomosc.');
     }
 
-    final identity = _requireIdentity();
     final normalizedEmoji = emoji?.trim();
-    final session = await _ensureSession(contact);
-    final packet = await _crypto.encryptPayload(
-      session: session,
-      from: identity.userId,
-      to: contact.userId,
-      payload: PlainPayload.reaction(
+    if (!cloudMode) {
+      throw StateError(
+        'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.',
+      );
+    }
+    final senderId = ownUserId ?? _requireIdentity().userId;
+    await _sendCloudControlPayload(
+      contact,
+      PlainPayload.reaction(
         targetMessageId: message.id,
         reactionEmoji: normalizedEmoji == null || normalizedEmoji.isEmpty
             ? null
             : normalizedEmoji,
       ),
     );
-    await _sendEncryptedPacket(contact, packet);
     _applyReaction(
       contact.userId,
       message.id,
-      identity.userId,
+      senderId,
       normalizedEmoji,
     );
   }
@@ -2627,153 +2020,16 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    final identity = _requireIdentity();
-    final session = await _ensureSession(contact);
-    final packet = await _crypto.encryptPayload(
-      session: session,
-      from: identity.userId,
-      to: contact.userId,
-      payload: PlainPayload.pin(targetMessageId: message.id, pinPinned: pinned),
+    if (!cloudMode) {
+      throw StateError(
+        'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.',
+      );
+    }
+    await _sendCloudControlPayload(
+      contact,
+      PlainPayload.pin(targetMessageId: message.id, pinPinned: pinned),
     );
-    await _sendEncryptedPacket(contact, packet);
     _applyPin(contact.userId, message.id, pinned);
-  }
-
-  Future<void> editGroupMessage(
-    GroupConversation group,
-    ChatMessage message,
-    String text,
-  ) async {
-    final identity = _requireIdentity();
-    if (message.contactId != group.groupId) {
-      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
-    }
-    if (message.direction != MessageDirection.outbound ||
-        message.senderId != identity.userId) {
-      throw StateError('Mozesz edytowac tylko wlasne wiadomosci.');
-    }
-    if (message.retracted || message.payload.type != PlainPayloadType.text) {
-      throw StateError('Tej wiadomosci nie mozna edytowac.');
-    }
-    if (message.status == MessageStatus.failed) {
-      throw StateError(
-        'Ta wiadomosc nie zostala wyslana. Usun ja lokalnie albo wyslij ponownie.',
-      );
-    }
-
-    final trimmed = text.trim();
-    if (trimmed.isEmpty) {
-      throw ArgumentError('Edytowana wiadomosc nie moze byc pusta.');
-    }
-    if (trimmed == (message.payload.text ?? '').trim()) return;
-
-    await _sendGroupControlPayload(
-      group,
-      PlainPayload.edit(
-        targetMessageId: message.id,
-        editedText: trimmed,
-        groupId: group.groupId,
-      ),
-    );
-    _applyGroupEdit(group.groupId, message.id, trimmed, identity.userId);
-  }
-
-  Future<void> retractGroupMessage(
-    GroupConversation group,
-    ChatMessage message,
-  ) async {
-    final identity = _requireIdentity();
-    if (message.contactId != group.groupId) {
-      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
-    }
-    if (message.direction != MessageDirection.outbound ||
-        message.senderId != identity.userId) {
-      throw StateError('Mozesz cofnac tylko wlasna wyslana wiadomosc.');
-    }
-    if (message.retracted) return;
-    if (message.status == MessageStatus.failed) {
-      throw StateError(
-        'Ta wiadomosc nie zostala dostarczona. Usun ja lokalnie.',
-      );
-    }
-
-    await _sendGroupControlPayload(
-      group,
-      PlainPayload.retraction(
-        targetMessageId: message.id,
-        groupId: group.groupId,
-      ),
-    );
-    _markGroupMessageRetracted(group.groupId, message.id, identity.userId);
-  }
-
-  Future<void> reactToGroupMessage(
-    GroupConversation group,
-    ChatMessage message,
-    String? emoji,
-  ) async {
-    final identity = _requireIdentity();
-    if (message.contactId != group.groupId) {
-      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
-    }
-    if (message.direction == MessageDirection.system || message.retracted) {
-      throw StateError('Nie mozna zareagowac na te wiadomosc.');
-    }
-
-    final normalizedEmoji = emoji?.trim();
-    await _sendGroupControlPayload(
-      group,
-      PlainPayload.reaction(
-        targetMessageId: message.id,
-        reactionEmoji: normalizedEmoji == null || normalizedEmoji.isEmpty
-            ? null
-            : normalizedEmoji,
-        groupId: group.groupId,
-      ),
-    );
-    _applyReaction(group.groupId, message.id, identity.userId, normalizedEmoji);
-  }
-
-  Future<void> setGroupMessagePinned(
-    GroupConversation group,
-    ChatMessage message,
-    bool pinned,
-  ) async {
-    if (message.contactId != group.groupId) {
-      throw ArgumentError('Wiadomosc nie nalezy do tej grupy.');
-    }
-    if (message.direction == MessageDirection.system || message.retracted) {
-      return;
-    }
-
-    await _sendGroupControlPayload(
-      group,
-      PlainPayload.pin(
-        targetMessageId: message.id,
-        pinPinned: pinned,
-        groupId: group.groupId,
-      ),
-    );
-    _applyPin(group.groupId, message.id, pinned);
-  }
-
-  Future<void> _sendGroupControlPayload(
-    GroupConversation group,
-    PlainPayload payload,
-  ) async {
-    final identity = _requireIdentity();
-    final currentGroup = _groupById(group.groupId) ?? group;
-    if (currentGroup.pendingInvite ||
-        !currentGroup.isAcceptedBy(identity.userId)) {
-      throw StateError('Najpierw zaakceptuj zaproszenie do grupy.');
-    }
-
-    for (final userId in currentGroup.acceptedMemberIds) {
-      if (userId == identity.userId) continue;
-      final contact = _contactById(userId);
-      if (contact == null) continue;
-      await _sendHiddenPayload(contact, payload);
-    }
   }
 
   Future<void> sendFile(
@@ -2810,12 +2066,8 @@ class AppState extends ChangeNotifier {
     String? replyToMessageId,
     String? replyPreview,
   }) async {
-    final relayAwareLimit = (_relayMaxPayloadBytes * 0.45).floor();
-    final effectiveLimit = cloudMode
-        ? maxCloudPlainFileBytes
-        : relayAwareLimit < maxPlainFileBytes
-            ? relayAwareLimit
-            : maxPlainFileBytes;
+    final effectiveLimit =
+        cloudMode ? maxCloudPlainFileBytes : maxPlainFileBytes;
     if (bytes.length > effectiveLimit) {
       throw StateError(
         'Plik jest za duzy. Limit: ${_fileLimitLabel(effectiveLimit)}.',
@@ -2836,8 +2088,6 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> wipeLocalData() async {
-    await _relaySubscription?.cancel();
-    await _relay?.dispose();
     await _cloudSubscription?.cancel();
     await _cloudClient?.dispose();
     await _store.wipeLocalSecrets();
@@ -2848,19 +2098,8 @@ class AppState extends ChangeNotifier {
     _ownCloudDeviceList = null;
     _cloudClient = null;
     _ownProfile = null;
-    _relaySettings = null;
-    _relay = null;
     _contacts.clear();
-    _contactInvites.clear();
-    _groups.clear();
-    _directoryEntries.clear();
     _messages.clear();
-    _sessions.clear();
-    _pendingSessions.clear();
-    _relayEnvelopeToMessage.clear();
-    _signalEnvelopeToContact.clear();
-    _relayPresence.clear();
-    _pendingDeviceSyncMessages.clear();
     _cloudConversations.clear();
     _cloudContactToConversation.clear();
     _cloudLastSeq.clear();
@@ -2871,15 +2110,8 @@ class AppState extends ChangeNotifier {
     _cloudDeviceKey = null;
     _ownCloudDeviceList = null;
     _cloudUsers.clear();
-    _deviceSyncTimer?.cancel();
-    _pendingInviteHandshakeContacts.clear();
     _presenceTimer?.cancel();
-    _relayConnected = false;
-    _retryingGroupInvites = false;
-    _sentDeviceSyncSnapshotThisRun = false;
-    _directoryEnabled = false;
-    _loadingDirectory = false;
-    _directoryStatus = null;
+    _cloudConnected = false;
     await _messageArchive.delete();
     _setStatus('Wyczyszczono lokalne dane.');
   }
@@ -2889,46 +2121,8 @@ class AppState extends ChangeNotifier {
       await _sendCloudPayload(contact, payload);
       return;
     }
-    final identity = _requireIdentity();
-    final session = await _ensureSession(contact);
-    final packet = await _crypto.encryptPayload(
-      session: session,
-      from: identity.userId,
-      to: contact.userId,
-      payload: payload,
-    );
-
-    _addMessage(
-      ChatMessage(
-        id: packet.messageId,
-        contactId: contact.userId,
-        direction: MessageDirection.outbound,
-        payload: payload,
-        createdAt: DateTime.now().toUtc(),
-        status: MessageStatus.pending,
-      ),
-    );
-
-    await _sendEncryptedPacket(
-      contact,
-      packet,
-      visibleMessageId: packet.messageId,
-    );
-  }
-
-  Future<void> _sendEncryptedPacket(
-    Contact contact,
-    EncryptedPacket packet, {
-    String? visibleMessageId,
-  }) async {
-    final relay = _requireRelay();
-    final relayEnvelopeId = relay.sendRelay(
-      to: contact.userId,
-      payload: packet.toJson(),
-    );
-    if (visibleMessageId != null) {
-      _relayEnvelopeToMessage[relayEnvelopeId] = visibleMessageId;
-    }
+    throw StateError(
+        'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.');
   }
 
   Future<void> _sendReceipt(
@@ -2942,891 +2136,13 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  Future<void> _sendHiddenPayload(Contact contact, PlainPayload payload) async {
-    final identity = _requireIdentity();
-    final session = await _ensureSession(contact);
-    final packet = await _crypto.encryptPayload(
-      session: session,
-      from: identity.userId,
-      to: contact.userId,
-      payload: payload,
-    );
-    await _sendEncryptedPacket(contact, packet);
-  }
-
-  Future<void> _retryPendingGroupInvites() async {
-    final identity = _identity;
-    if (identity == null || !_relayConnected) return;
-    if (_retryingGroupInvites) return;
-    _retryingGroupInvites = true;
-
-    try {
-      for (final group in List<GroupConversation>.of(_groups)) {
-        if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
-          continue;
-        }
-        final pendingMemberIds = group.memberIds.where((userId) {
-          return userId != identity.userId &&
-              !group.acceptedMemberIds.contains(userId) &&
-              !group.invitedMemberIds.contains(userId);
-        }).toList(growable: false);
-
-        for (final memberId in pendingMemberIds) {
-          await _trySendGroupInvite(group.groupId, memberId);
-        }
-      }
-    } finally {
-      _retryingGroupInvites = false;
-    }
-  }
-
-  Future<bool> _trySendGroupInvite(String groupId, String memberId) async {
-    final group = _groupById(groupId);
-    final contact = _contactById(memberId);
-    final identity = _identity;
-    if (group == null || contact == null || identity == null) return false;
-    if (group.invitedMemberIds.contains(memberId) ||
-        group.acceptedMemberIds.contains(memberId) ||
-        memberId == identity.userId) {
-      return true;
-    }
-
-    if (!_sessions.containsKey(memberId)) {
-      if (!isContactOnline(memberId)) {
-        _beginSessionForPendingInvite(contact);
-        return false;
-      }
-      try {
-        await _ensureSession(contact);
-      } catch (_) {
-        return false;
-      }
-    }
-
-    try {
-      await _sendHiddenPayload(
-        contact,
-        PlainPayload.groupInvite(
-          groupId: group.groupId,
-          groupName: group.name,
-          groupMemberIds: group.memberIds,
-          groupAcceptedMemberIds: group.acceptedMemberIds,
-          groupMemberInfos: _groupMemberInfos(group),
-        ),
-      );
-      _markGroupInviteSent(groupId, memberId);
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  Future<void> _broadcastAcceptedGroupRosters() async {
-    final identity = _identity;
-    if (identity == null || !_relayConnected) return;
-    for (final group in List<GroupConversation>.of(_groups)) {
-      if (group.pendingInvite || !group.isAcceptedBy(identity.userId)) {
-        continue;
-      }
-      await _broadcastGroupRoster(group);
-    }
-  }
-
-  Future<void> _broadcastGroupRoster(
-    GroupConversation group, {
-    String? exceptUserId,
-  }) async {
-    final identity = _identity;
-    if (identity == null) return;
-    final payload = PlainPayload.groupInvite(
-      groupId: group.groupId,
-      groupName: group.name,
-      groupMemberIds: group.memberIds,
-      groupAcceptedMemberIds: group.acceptedMemberIds,
-      groupMemberInfos: _groupMemberInfos(group),
-    );
-
-    for (final userId in group.acceptedMemberIds) {
-      if (userId == identity.userId || userId == exceptUserId) continue;
-      final contact = _contactById(userId);
-      if (contact == null) continue;
-      try {
-        await _sendHiddenPayload(contact, payload);
-      } catch (_) {
-        // Aktualna lista grupy zostanie ponowiona przy kolejnym polaczeniu.
-      }
-    }
-  }
-
-  List<GroupMemberInfo> _groupMemberInfos(GroupConversation group) {
-    final identity = _identity;
-    final result = <String, GroupMemberInfo>{};
-    if (identity != null && group.memberIds.contains(identity.userId)) {
-      result[identity.userId] = GroupMemberInfo(
-        userId: identity.userId,
-        displayName: identity.userId,
-        identityPublicKey: b64(identity.publicKey.bytes),
-      );
-    }
-
-    for (final userId in group.memberIds) {
-      final contact = _contactById(userId);
-      if (contact == null) continue;
-      result[userId] = GroupMemberInfo(
-        userId: contact.userId,
-        displayName: contact.displayName,
-        identityPublicKey: contact.identityPublicKey,
-      );
-    }
-    return result.values.toList(growable: false);
-  }
-
-  Future<void> _mergeGroupMemberInfos(
-    Iterable<GroupMemberInfo> memberInfos,
-  ) async {
-    final identity = _identity;
-    var changed = false;
-
-    for (final info in memberInfos) {
-      if (info.userId.isEmpty || info.identityPublicKey.isEmpty) continue;
-      if (identity != null && info.userId == identity.userId) continue;
-      final existing = _contactById(info.userId);
-      if (existing != null) {
-        // Nie nadpisujemy istniejacego klucza publicznego, zeby nie robic
-        // cichej podmiany tozsamosci przez zaproszenie grupowe.
-        continue;
-      }
-
-      _contacts.add(
-        Contact(
-          userId: info.userId,
-          displayName:
-              info.displayName.trim().isEmpty ? info.userId : info.displayName,
-          identityPublicKey: info.identityPublicKey,
-        ),
-      );
-      changed = true;
-    }
-
-    if (!changed) return;
-    _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
-    await _store.saveContacts(_contacts);
-    if (_relayConnected) {
-      _relay?.queryProfiles(
-        _contacts.map((contact) => contact.userId).toList(),
-      );
-    }
-  }
-
-  void _beginSessionForPendingInvite(Contact contact) {
-    if (_sessions.containsKey(contact.userId) ||
-        _pendingSessions.containsKey(contact.userId) ||
-        _pendingInviteHandshakeContacts.contains(contact.userId)) {
-      return;
-    }
-    _pendingInviteHandshakeContacts.add(contact.userId);
-
-    unawaited(
-      _ensureSession(contact).then((_) {
-        _pendingInviteHandshakeContacts.remove(contact.userId);
-        unawaited(_retryPendingGroupInvites());
-      }).catchError((_) {
-        // Zaproszenie pozostaje oczekujace i zostanie ponowione przy obecnosci.
-      }),
-    );
-  }
-
-  void _markGroupInviteSent(String groupId, String memberId) {
-    final index = _groups.indexWhere((group) => group.groupId == groupId);
-    if (index < 0) return;
-    final group = _groups[index];
-    if (group.invitedMemberIds.contains(memberId)) return;
-
-    _groups[index] = group.copyWith(
-      invitedMemberIds: <String>{
-        ...group.invitedMemberIds,
-        memberId,
-      }.toList(growable: false),
-    );
-    unawaited(_store.saveGroups(_groups));
-    notifyListeners();
-  }
-
   Future<void> _sendControlPayload(
     Contact contact,
     PlainPayload payload,
   ) async {
-    final identity = _identity;
-    final session = _sessions[contact.userId];
-    if (identity == null || session == null || _relay == null) return;
-    if (!_relayConnected) return;
-
-    try {
-      final packet = await _crypto.encryptPayload(
-        session: session,
-        from: identity.userId,
-        to: contact.userId,
-        payload: payload,
-      );
-      await _sendEncryptedPacket(contact, packet);
-    } catch (_) {
-      // Potwierdzenia i edycje sterujace nie moga blokowac odbioru wiadomosci.
+    if (cloudMode) {
+      await _sendCloudControlPayload(contact, payload);
     }
-  }
-
-  Future<SessionState> _ensureSession(Contact contact) async {
-    final existing = _sessions[contact.userId];
-    if (existing != null) return existing;
-
-    final pending = _pendingSessions[contact.userId];
-    if (pending != null) {
-      return pending.completer.future.timeout(const Duration(seconds: 20));
-    }
-
-    final identity = _requireIdentity();
-    final relay = _requireRelay();
-    final init = await _crypto.createHandshakeInit(
-      identity: identity,
-      contact: contact,
-    );
-    _pendingSessions[contact.userId] = init.pendingSession;
-    final signalId = relay.sendSignal(
-      to: contact.userId,
-      signalType: 'crypto-handshake-init',
-      payload: init.wirePayload,
-    );
-    _signalEnvelopeToContact[signalId] = contact.userId;
-    _addSystemMessage(contact.userId, 'Rozpoczeto nowa sesje E2EE.');
-
-    return init.pendingSession.completer.future.timeout(
-      const Duration(seconds: 20),
-      onTimeout: () {
-        _pendingSessions.remove(contact.userId);
-        throw TimeoutException('Kontakt nie odpowiedzial na handshake E2EE.');
-      },
-    );
-  }
-
-  // Retained only to decode archives produced by pre-cloud clients. It is not
-  // connected to any live transport; removing it requires an archive migration.
-  // ignore: unused_element
-  Future<void> _handleRelayEvent(RelayEvent event) async {
-    switch (event) {
-      case RelayReady():
-        _relayConnected = true;
-        _relayMaxPayloadBytes = event.maxPayloadBytes;
-        _setStatus('Relay polaczony.');
-        _relay?.updateProfile(
-          _ownProfile ?? UserProfile(updatedAt: DateTime.now().toUtc()),
-        );
-        final contactIds = _contacts.map((contact) => contact.userId).toList();
-        _relay?.queryPresence(contactIds);
-        _relay?.queryProfiles(contactIds);
-        _syncDirectoryVisibility();
-        _relay?.queryDirectory();
-        _startPresencePolling();
-        unawaited(_retryPendingGroupInvites());
-        unawaited(_broadcastAcceptedGroupRosters());
-        unawaited(_flushDeviceSyncMessages());
-        if (!_sentDeviceSyncSnapshotThisRun) {
-          _sentDeviceSyncSnapshotThisRun = true;
-          unawaited(_broadcastDeviceSyncSnapshot());
-        }
-        break;
-      case RelayDeliver():
-        if (event.kind == 'signal') {
-          await _handleSignal(event);
-        } else if (event.kind == 'relay') {
-          if (event.from == _identity?.userId &&
-              _isDeviceSyncPayload(event.payload)) {
-            await _handleDeviceSyncPayload(event.payload);
-          } else {
-            await _handleEncryptedPacket(
-              event.from,
-              event.payload,
-              transport: 'relay',
-            );
-          }
-        }
-        break;
-      case RelaySent():
-        final messageId = _relayEnvelopeToMessage.remove(event.id);
-        if (messageId != null) {
-          final accepted = event.deliveredConnections > 0 || event.queued;
-          _updateMessage(
-            event.to,
-            messageId,
-            accepted ? MessageStatus.sent : MessageStatus.failed,
-            transport: event.queued ? 'relay queued' : 'relay',
-            error: accepted ? null : 'Kontakt offline.',
-          );
-        }
-        final signalContactId = _signalEnvelopeToContact.remove(event.id);
-        if (signalContactId != null &&
-            event.deliveredConnections == 0 &&
-            !event.queued) {
-          final pending = _pendingSessions.remove(signalContactId);
-          pending?.completer.completeError(
-            StateError(
-              'Kontakt $signalContactId jest offline albo ma inny identyfikator.',
-            ),
-          );
-          _setStatus(
-            'Nie dostarczono handshake do $signalContactId. Sprawdz dokladny userId kontaktu.',
-          );
-        }
-        break;
-      case RelayPresence():
-        _relayPresence
-          ..clear()
-          ..addAll(event.contacts);
-        notifyListeners();
-        unawaited(_retryPendingGroupInvites());
-        break;
-      case RelayProfile():
-        await _applyContactProfile(event.userId, event.profile);
-        break;
-      case RelayDirectory():
-        _directoryEntries
-          ..clear()
-          ..addAll(
-            event.entries.where((entry) {
-              return entry.userId != _identity?.userId &&
-                  _contactById(entry.userId) == null;
-            }),
-          );
-        _loadingDirectory = false;
-        _directoryStatus =
-            'Lista zawiera ${_directoryEntries.length} publicznych uzytkownikow spoza kontaktow.';
-        notifyListeners();
-        break;
-      case RelayContactRequest():
-        await _handleContactRequest(event);
-        break;
-      case RelayProblem():
-        _relayConnected = false;
-        _relayPresence.clear();
-        _presenceTimer?.cancel();
-        _setStatus(event.message);
-        break;
-    }
-  }
-
-  void _startPresencePolling() {
-    _presenceTimer?.cancel();
-    _presenceTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!_relayConnected) return;
-      _relay?.queryPresence(
-        _contacts.map((contact) => contact.userId).toList(),
-      );
-    });
-  }
-
-  void _syncDirectoryVisibility() {
-    final identity = _identity;
-    final relay = _relay;
-    if (identity == null || relay == null || !_relayConnected) return;
-    relay.updateDirectory(
-      enabled: _directoryEnabled,
-      displayName: identity.userId,
-    );
-  }
-
-  Future<void> _handleContactRequest(RelayContactRequest event) async {
-    final identity = _identity;
-    if (identity == null || event.from == identity.userId) return;
-    if (_contactById(event.from) != null) return;
-
-    final existingIndex = _contactInvites.indexWhere(
-      (invite) => invite.userId == event.from,
-    );
-    final invite = ContactInvite(
-      requestId: event.id,
-      userId: event.from,
-      displayName: event.displayName.trim().isEmpty
-          ? event.from
-          : event.displayName.trim(),
-      identityPublicKey: event.identityPublicKey,
-      createdAt: event.sentAt,
-    );
-    if (existingIndex >= 0) {
-      _contactInvites[existingIndex] = invite;
-    } else {
-      _contactInvites.add(invite);
-    }
-    await _store.saveContactInvites(_contactInvites);
-    _setStatus('Masz nowe zaproszenie do kontaktow od ${invite.displayName}.');
-    notifyListeners();
-  }
-
-  Future<void> _handleSignal(RelayDeliver event) async {
-    final contact = _contactById(event.from);
-    if (contact == null) {
-      _setStatus('Odrzucono sygnal od nieznanego kontaktu: ${event.from}.');
-      return;
-    }
-
-    switch (event.signalType) {
-      case 'crypto-handshake-init':
-        final identity = _requireIdentity();
-        final pending = _pendingSessions[contact.userId];
-        final localInitiatedSessionWins =
-            identity.userId.compareTo(contact.userId) < 0;
-        if (pending != null && localInitiatedSessionWins) {
-          _setStatus(
-            'Odebrano rownolegly handshake od ${contact.userId}; kontynuujemy lokalna sesje.',
-          );
-          return;
-        }
-        final accept = await _crypto.acceptHandshakeInit(
-          identity: identity,
-          contact: contact,
-          wirePayload: event.payload,
-        );
-        _sessions[contact.userId] = accept.session;
-        _pendingInviteHandshakeContacts.remove(contact.userId);
-        await _saveSessions();
-        final abandonedPending = _pendingSessions.remove(contact.userId);
-        abandonedPending?.completer.complete(accept.session);
-        final signalId = _requireRelay().sendSignal(
-          to: contact.userId,
-          signalType: 'crypto-handshake-accept',
-          payload: accept.wirePayload,
-        );
-        _signalEnvelopeToContact[signalId] = contact.userId;
-        _addSystemMessage(contact.userId, 'Utworzono nowa sesje E2EE.');
-        unawaited(_retryPendingGroupInvites());
-        break;
-      case 'crypto-handshake-accept':
-        final pending = _pendingSessions.remove(contact.userId);
-        if (pending == null) return;
-        final identity = _requireIdentity();
-        final session = await _crypto.finishHandshakeAccept(
-          identity: identity,
-          contact: contact,
-          pending: pending,
-          wirePayload: event.payload,
-        );
-        _sessions[contact.userId] = session;
-        _pendingInviteHandshakeContacts.remove(contact.userId);
-        await _saveSessions();
-        pending.completer.complete(session);
-        _addSystemMessage(contact.userId, 'Sesja E2EE jest gotowa.');
-        unawaited(_retryPendingGroupInvites());
-        break;
-    }
-  }
-
-  Future<void> _handleEncryptedPacket(
-    String from,
-    Map<String, dynamic> packetJson, {
-    required String transport,
-  }) async {
-    final identity = _requireIdentity();
-    final contact = _contactById(from);
-    final session = _sessions[from];
-    if (contact == null || session == null) {
-      _setStatus('Nie mozna odszyfrowac pakietu od $from bez aktywnej sesji.');
-      return;
-    }
-
-    try {
-      final packet = EncryptedPacket.fromJson(packetJson);
-      final decrypted = await _crypto.decryptPayload(
-        session: session,
-        expectedFrom: from,
-        expectedTo: identity.userId,
-        packet: packet,
-      );
-      if (decrypted.payload.type == PlainPayloadType.retraction) {
-        final groupId = decrypted.payload.groupId;
-        if (groupId != null && groupId.isNotEmpty) {
-          _markGroupMessageRetracted(
-            groupId,
-            decrypted.payload.targetMessageId!,
-            from,
-            fallbackCreatedAt: decrypted.createdAt,
-            fallbackTransport: transport,
-          );
-          return;
-        }
-        _markMessageRetracted(
-          from,
-          decrypted.payload.targetMessageId!,
-          allowedDirection: MessageDirection.inbound,
-          fallbackCreatedAt: decrypted.createdAt,
-          fallbackTransport: transport,
-        );
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.reaction) {
-        final groupId = decrypted.payload.groupId;
-        if (groupId != null && groupId.isNotEmpty) {
-          _applyReaction(
-            groupId,
-            decrypted.payload.targetMessageId!,
-            from,
-            decrypted.payload.reactionEmoji,
-          );
-          return;
-        }
-        _applyReaction(
-          from,
-          decrypted.payload.targetMessageId!,
-          from,
-          decrypted.payload.reactionEmoji,
-        );
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.pin) {
-        final groupId = decrypted.payload.groupId;
-        if (groupId != null && groupId.isNotEmpty) {
-          _applyPin(
-            groupId,
-            decrypted.payload.targetMessageId!,
-            decrypted.payload.pinPinned == true,
-          );
-          return;
-        }
-        _applyPin(
-          from,
-          decrypted.payload.targetMessageId!,
-          decrypted.payload.pinPinned == true,
-        );
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.receipt) {
-        _applyReceipt(
-          from,
-          decrypted.payload.targetMessageId!,
-          decrypted.payload.receiptKind ?? ReceiptKind.delivered,
-        );
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.edit) {
-        final groupId = decrypted.payload.groupId;
-        if (groupId != null && groupId.isNotEmpty) {
-          _applyGroupEdit(
-            groupId,
-            decrypted.payload.targetMessageId!,
-            decrypted.payload.editedText ?? '',
-            from,
-            editedAt: decrypted.createdAt,
-          );
-          return;
-        }
-        _applyEdit(
-          from,
-          decrypted.payload.targetMessageId!,
-          decrypted.payload.editedText ?? '',
-          allowedDirection: MessageDirection.inbound,
-          editedAt: decrypted.createdAt,
-        );
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.groupInvite) {
-        await _handleGroupInvite(from, decrypted.payload);
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.groupInviteResponse) {
-        await _handleGroupInviteResponse(from, decrypted.payload);
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.groupLeave) {
-        await _handleGroupLeave(from, decrypted.payload);
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.groupText) {
-        _handleGroupText(
-          from,
-          decrypted.payload,
-          decrypted.createdAt,
-          transport,
-        );
-        return;
-      }
-      if (decrypted.payload.type == PlainPayloadType.file &&
-          decrypted.payload.groupId != null) {
-        _handleGroupFile(
-          from,
-          decrypted.payload,
-          decrypted.createdAt,
-          transport,
-        );
-        return;
-      }
-      final added = _addMessage(
-        ChatMessage(
-          id: decrypted.messageId,
-          contactId: from,
-          direction: MessageDirection.inbound,
-          payload: decrypted.payload,
-          createdAt: decrypted.createdAt,
-          status: MessageStatus.delivered,
-          transport: transport,
-        ),
-      );
-      if (added) {
-        unawaited(
-          _sendReceipt(contact, decrypted.messageId, ReceiptKind.delivered),
-        );
-        unawaited(
-          DesktopNotifier.instance.notifyIncoming(
-            senderName: contact.displayName,
-            payload: decrypted.payload,
-          ),
-        );
-      }
-    } catch (error) {
-      _setStatus('Odrzucono pakiet: $error');
-    }
-  }
-
-  Future<void> _handleGroupInvite(String from, PlainPayload payload) async {
-    final identity = _requireIdentity();
-    final groupId = payload.groupId;
-    if (groupId == null || groupId.isEmpty) return;
-    await _mergeGroupMemberInfos(payload.groupMemberInfos ?? const []);
-    final memberIds = <String>{
-      ...?payload.groupMemberIds,
-      from,
-      identity.userId,
-    }.toList(growable: false);
-    final acceptedMemberIds = <String>{
-      from,
-      ...?payload.groupAcceptedMemberIds,
-    }.where((userId) => memberIds.contains(userId)).toList(growable: false);
-    if (!memberIds.contains(identity.userId)) return;
-
-    final existingIndex = _groups.indexWhere(
-      (group) => group.groupId == groupId,
-    );
-    if (existingIndex >= 0) {
-      final existing = _groups[existingIndex];
-      final nextMemberIds = <String>{
-        ...existing.memberIds,
-        ...memberIds,
-      }.toList(growable: false);
-      final nextAcceptedIds = <String>{
-        ...existing.acceptedMemberIds,
-        ...acceptedMemberIds
-      }
-          .where((userId) => nextMemberIds.contains(userId))
-          .toList(growable: false);
-      final wasAccepted = existing.isAcceptedBy(identity.userId);
-      final membershipChanged =
-          !setEquals(existing.memberIds.toSet(), nextMemberIds.toSet()) ||
-              !setEquals(
-                existing.acceptedMemberIds.toSet(),
-                nextAcceptedIds.toSet(),
-              );
-      _groups[existingIndex] = existing.copyWith(
-        name: payload.groupName ?? existing.name,
-        memberIds: nextMemberIds,
-        acceptedMemberIds: nextAcceptedIds,
-        invitedBy: existing.invitedBy ?? from,
-        pendingInvite: wasAccepted ? false : true,
-      );
-      await _store.saveGroups(_groups);
-      if (wasAccepted && membershipChanged) {
-        _addSystemMessage(groupId, 'Zaktualizowano sklad grupy.');
-      }
-      notifyListeners();
-      return;
-    }
-
-    final group = GroupConversation(
-      groupId: groupId,
-      name: payload.groupName ?? 'Grupa',
-      memberIds: memberIds,
-      acceptedMemberIds: acceptedMemberIds.isEmpty ? [from] : acceptedMemberIds,
-      createdAt: DateTime.now().toUtc(),
-      invitedBy: from,
-      pendingInvite: true,
-    );
-    _groups.add(group);
-    await _store.saveGroups(_groups);
-    _addSystemMessage(
-      groupId,
-      'Zaproszenie do grupy "${group.name}" od ${displayNameForUser(from)}.',
-    );
-    unawaited(
-      DesktopNotifier.instance.notifyIncoming(
-        senderName: displayNameForUser(from),
-        payload: PlainPayload.groupInvite(
-          groupId: group.groupId,
-          groupName: group.name,
-          groupMemberIds: group.memberIds,
-          groupAcceptedMemberIds: group.acceptedMemberIds,
-          groupMemberInfos: payload.groupMemberInfos ?? const [],
-        ),
-      ),
-    );
-    notifyListeners();
-  }
-
-  Future<void> _handleGroupInviteResponse(
-    String from,
-    PlainPayload payload,
-  ) async {
-    final groupId = payload.groupId;
-    if (groupId == null || groupId.isEmpty) return;
-    final index = _groups.indexWhere((group) => group.groupId == groupId);
-    if (index < 0) return;
-
-    final group = _groups[index];
-    if (!group.memberIds.contains(from)) return;
-
-    if (payload.groupAccepted == true) {
-      final acceptedIds = <String>{
-        ...group.acceptedMemberIds,
-        from,
-      }.toList(growable: false);
-      _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
-      _addSystemMessage(
-        groupId,
-        '${displayNameForUser(from)} dolaczyl do grupy.',
-      );
-      await _store.saveGroups(_groups);
-      await _broadcastGroupRoster(_groups[index]);
-    } else {
-      final acceptedIds = group.acceptedMemberIds
-          .where((userId) => userId != from)
-          .toList(growable: false);
-      _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
-      _addSystemMessage(
-        groupId,
-        '${displayNameForUser(from)} odrzucil zaproszenie do grupy.',
-      );
-    }
-    await _store.saveGroups(_groups);
-    notifyListeners();
-  }
-
-  Future<void> _handleGroupLeave(String from, PlainPayload payload) async {
-    final groupId = payload.groupId;
-    if (groupId == null || groupId.isEmpty) return;
-    final index = _groups.indexWhere((group) => group.groupId == groupId);
-    if (index < 0) return;
-
-    final group = _groups[index];
-    if (!group.memberIds.contains(from)) return;
-    final acceptedIds = group.acceptedMemberIds
-        .where((userId) => userId != from)
-        .toList(growable: false);
-    _groups[index] = group.copyWith(acceptedMemberIds: acceptedIds);
-    _addSystemMessage(groupId, '${displayNameForUser(from)} wyszedl z grupy.');
-    await _store.saveGroups(_groups);
-    notifyListeners();
-  }
-
-  void _handleGroupText(
-    String from,
-    PlainPayload payload,
-    DateTime createdAt,
-    String transport,
-  ) {
-    final groupId = payload.groupId;
-    final messageId = payload.groupMessageId;
-    if (groupId == null ||
-        groupId.isEmpty ||
-        messageId == null ||
-        messageId.isEmpty) {
-      return;
-    }
-    final group = _groupById(groupId);
-    final identity = _identity;
-    if (group == null ||
-        identity == null ||
-        group.pendingInvite ||
-        !group.isAcceptedBy(identity.userId) ||
-        !group.acceptedMemberIds.contains(from)) {
-      return;
-    }
-
-    final added = _addMessage(
-      ChatMessage(
-        id: messageId,
-        contactId: groupId,
-        direction: MessageDirection.inbound,
-        payload: PlainPayload.text(
-          payload.text ?? '',
-          replyToMessageId: payload.replyToMessageId,
-          replyPreview: payload.replyPreview,
-        ),
-        createdAt: createdAt,
-        status: MessageStatus.delivered,
-        senderId: from,
-        transport: transport,
-      ),
-    );
-    if (!added) return;
-    final contact = _contactById(from);
-    if (contact != null) {
-      unawaited(
-        DesktopNotifier.instance.notifyIncoming(
-          senderName: '${group.name} / ${contact.displayName}',
-          payload: PlainPayload.text(payload.text ?? ''),
-        ),
-      );
-    }
-  }
-
-  void _handleGroupFile(
-    String from,
-    PlainPayload payload,
-    DateTime createdAt,
-    String transport,
-  ) {
-    final groupId = payload.groupId;
-    final messageId = payload.groupMessageId;
-    if (groupId == null ||
-        groupId.isEmpty ||
-        messageId == null ||
-        messageId.isEmpty) {
-      return;
-    }
-    final group = _groupById(groupId);
-    final identity = _identity;
-    if (group == null ||
-        identity == null ||
-        group.pendingInvite ||
-        !group.isAcceptedBy(identity.userId) ||
-        !group.acceptedMemberIds.contains(from)) {
-      return;
-    }
-
-    final added = _addMessage(
-      ChatMessage(
-        id: messageId,
-        contactId: groupId,
-        direction: MessageDirection.inbound,
-        payload: PlainPayload.file(
-          fileName: payload.fileName ?? 'plik',
-          mimeType: payload.mimeType,
-          fileSize: payload.fileSize ?? 0,
-          fileBytesBase64: payload.fileBytesBase64 ?? '',
-          replyToMessageId: payload.replyToMessageId,
-          replyPreview: payload.replyPreview,
-        ),
-        createdAt: createdAt,
-        status: MessageStatus.delivered,
-        senderId: from,
-        transport: transport,
-      ),
-    );
-    if (!added) return;
-    unawaited(
-      DesktopNotifier.instance.notifyIncoming(
-        senderName: '${group.name} / ${displayNameForUser(from)}',
-        payload: PlainPayload.file(
-          fileName: payload.fileName ?? 'plik',
-          mimeType: payload.mimeType,
-          fileSize: payload.fileSize ?? 0,
-          fileBytesBase64: payload.fileBytesBase64 ?? '',
-        ),
-      ),
-    );
   }
 
   bool _addMessage(ChatMessage message) {
@@ -3838,7 +2154,6 @@ class AppState extends ChangeNotifier {
     list.add(message);
     _sortMessages(list);
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(message);
     notifyListeners();
     return true;
   }
@@ -3873,7 +2188,6 @@ class AppState extends ChangeNotifier {
         clearEditedAt: true,
       );
       unawaited(_persistMessages());
-      _scheduleDeviceSyncFor(list[index]);
       notifyListeners();
       return true;
     }
@@ -3891,54 +2205,6 @@ class AppState extends ChangeNotifier {
     );
     list.add(placeholder);
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(placeholder);
-    notifyListeners();
-    return true;
-  }
-
-  bool _markGroupMessageRetracted(
-    String groupId,
-    String messageId,
-    String senderId, {
-    DateTime? fallbackCreatedAt,
-    String? fallbackTransport,
-  }) {
-    final list = _messages.putIfAbsent(groupId, () => <ChatMessage>[]);
-    final index = list.indexWhere((message) => message.id == messageId);
-    if (index >= 0) {
-      final message = list[index];
-      if (message.senderId != senderId || message.retracted) {
-        return message.retracted;
-      }
-
-      list[index] = message.copyWith(
-        payload: const PlainPayload.text(''),
-        retracted: true,
-        pinned: false,
-        reactions: const {},
-        clearEditedAt: true,
-      );
-      unawaited(_persistMessages());
-      _scheduleDeviceSyncFor(list[index]);
-      notifyListeners();
-      return true;
-    }
-
-    final placeholder = ChatMessage(
-      id: messageId,
-      contactId: groupId,
-      direction: MessageDirection.inbound,
-      payload: const PlainPayload.text(''),
-      createdAt: fallbackCreatedAt ?? DateTime.now().toUtc(),
-      status: MessageStatus.delivered,
-      retracted: true,
-      senderId: senderId,
-      transport: fallbackTransport,
-    );
-    list.add(placeholder);
-    _sortMessages(list);
-    unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(placeholder);
     notifyListeners();
     return true;
   }
@@ -3974,43 +2240,6 @@ class AppState extends ChangeNotifier {
       editedAt: editedAt ?? DateTime.now().toUtc(),
     );
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(list[index]);
-    notifyListeners();
-    return true;
-  }
-
-  bool _applyGroupEdit(
-    String groupId,
-    String messageId,
-    String text,
-    String editorId, {
-    DateTime? editedAt,
-  }) {
-    final list = _messages[groupId];
-    if (list == null) return false;
-    final index = list.indexWhere((message) => message.id == messageId);
-    if (index < 0) return false;
-
-    final message = list[index];
-    if (message.senderId != editorId ||
-        message.retracted ||
-        message.payload.type != PlainPayloadType.text) {
-      return false;
-    }
-
-    final normalizedText = text.trim();
-    if (normalizedText.isEmpty) return false;
-
-    list[index] = message.copyWith(
-      payload: PlainPayload.text(
-        normalizedText,
-        replyToMessageId: message.payload.replyToMessageId,
-        replyPreview: message.payload.replyPreview,
-      ),
-      editedAt: editedAt ?? DateTime.now().toUtc(),
-    );
-    unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -4033,7 +2262,6 @@ class AppState extends ChangeNotifier {
 
     list[index] = message.copyWith(status: promotedStatus);
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -4064,7 +2292,6 @@ class AppState extends ChangeNotifier {
 
     list[index] = message.copyWith(reactions: reactions);
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
   }
@@ -4083,22 +2310,8 @@ class AppState extends ChangeNotifier {
     if (message.pinned == pinned) return true;
     list[index] = message.copyWith(pinned: pinned);
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
     return true;
-  }
-
-  void _addSystemMessage(String contactId, String text) {
-    _addMessage(
-      ChatMessage(
-        id: '${DateTime.now().microsecondsSinceEpoch}-$contactId',
-        contactId: contactId,
-        direction: MessageDirection.system,
-        payload: PlainPayload.text(text),
-        createdAt: DateTime.now().toUtc(),
-        status: MessageStatus.delivered,
-      ),
-    );
   }
 
   void _updateMessage(
@@ -4118,7 +2331,6 @@ class AppState extends ChangeNotifier {
       error: error,
     );
     unawaited(_persistMessages());
-    _scheduleDeviceSyncFor(list[index]);
     notifyListeners();
   }
 
@@ -4161,411 +2373,6 @@ class AppState extends ChangeNotifier {
       return left.id.compareTo(right.id);
     });
     return snapshot;
-  }
-
-  void _scheduleDeviceSyncFor(ChatMessage message) {
-    if (_applyingDeviceSync || _identity == null) return;
-    _pendingDeviceSyncMessages['${message.contactId}/${message.id}'] = message;
-    _deviceSyncTimer?.cancel();
-    _deviceSyncTimer = Timer(const Duration(milliseconds: 700), () {
-      unawaited(_flushDeviceSyncMessages());
-    });
-  }
-
-  void _scheduleDeviceSyncForMany(Iterable<ChatMessage> messages) {
-    for (final message in messages) {
-      if (_applyingDeviceSync || _identity == null) return;
-      _pendingDeviceSyncMessages['${message.contactId}/${message.id}'] =
-          message;
-    }
-    if (_pendingDeviceSyncMessages.isEmpty) return;
-    _deviceSyncTimer?.cancel();
-    _deviceSyncTimer = Timer(const Duration(milliseconds: 700), () {
-      unawaited(_flushDeviceSyncMessages());
-    });
-  }
-
-  Future<void> _flushDeviceSyncMessages() async {
-    if (_pendingDeviceSyncMessages.isEmpty) return;
-    if (!_relayConnected || _relay == null || _identity == null) return;
-
-    final messages = _pendingDeviceSyncMessages.values.toList(growable: false);
-    _pendingDeviceSyncMessages.clear();
-    await _sendDeviceSyncMessages(messages, syncType: 'messages');
-  }
-
-  Future<void> _broadcastDeviceSyncSnapshot() async {
-    if (!_relayConnected || _relay == null || _identity == null) return;
-    await _sendDeviceSyncMessages(_allMessagesSnapshot(), syncType: 'snapshot');
-  }
-
-  Future<void> _sendDeviceSyncMessages(
-    List<ChatMessage> messages, {
-    required String syncType,
-  }) async {
-    final identity = _identity;
-    final relay = _relay;
-    if (identity == null || relay == null || !_relayConnected) return;
-
-    final maxPayloadBytes = (_relayMaxPayloadBytes * 0.9).floor();
-    var index = 0;
-    var sentEmptySnapshot = false;
-
-    while (index < messages.length ||
-        (messages.isEmpty && syncType == 'snapshot' && !sentEmptySnapshot)) {
-      var end = messages.isEmpty
-          ? 0
-          : index + 25 > messages.length
-              ? messages.length
-              : index + 25;
-      Map<String, dynamic>? payload;
-      var payloadSize = 0;
-
-      while (true) {
-        final batch = messages.isEmpty
-            ? const <ChatMessage>[]
-            : messages.sublist(index, end);
-        payload = await _buildDeviceSyncPayload(
-          identity: identity,
-          syncType: syncType,
-          messages: batch,
-        );
-        payloadSize = utf8.encode(jsonEncode(payload)).length;
-        if (payloadSize <= maxPayloadBytes ||
-            messages.isEmpty ||
-            end <= index + 1) {
-          break;
-        }
-        final nextSize = ((end - index) / 2).floor();
-        end = index + (nextSize < 1 ? 1 : nextSize);
-      }
-
-      if (payloadSize > maxPayloadBytes) {
-        _setStatus(
-          'Pominieto synchronizacje jednej duzej wiadomosci miedzy urzadzeniami.',
-        );
-        if (messages.isEmpty) {
-          sentEmptySnapshot = true;
-        } else {
-          index += 1;
-        }
-        continue;
-      }
-
-      try {
-        relay.sendRelay(to: identity.userId, payload: payload);
-      } catch (_) {
-        if (messages.isNotEmpty) {
-          for (var i = index; i < end; i += 1) {
-            _pendingDeviceSyncMessages[
-                '${messages[i].contactId}/${messages[i].id}'] = messages[i];
-          }
-        }
-        return;
-      }
-
-      if (messages.isEmpty) {
-        sentEmptySnapshot = true;
-      } else {
-        index = end;
-      }
-    }
-  }
-
-  Future<Map<String, dynamic>> _buildDeviceSyncPayload({
-    required IdentityKeyMaterial identity,
-    required String syncType,
-    required List<ChatMessage> messages,
-  }) async {
-    final clearJson = jsonEncode({
-      'v': 1,
-      'type': syncType,
-      'senderDeviceId': identity.deviceId,
-      'createdAt': DateTime.now().toUtc().toIso8601String(),
-      'contacts': _contacts.map((contact) => contact.toJson()).toList(),
-      'groups': _groups.map((group) => group.toJson()).toList(),
-      'directoryEnabled': _directoryEnabled,
-      'ownProfile': _ownProfile?.toJson(),
-      'messages': messages.map((message) => message.toJson()).toList(),
-    });
-    final nonce = secureRandomBytes(12);
-    final box = await _deviceSyncAead.encrypt(
-      utf8Bytes(clearJson),
-      secretKey: await _localArchiveSecretKey(),
-      nonce: nonce,
-      aad: utf8Bytes(_deviceSyncAad),
-    );
-
-    return {
-      'v': 1,
-      'protocol': _deviceSyncProtocol,
-      'senderDeviceId': identity.deviceId,
-      'nonce': b64(box.nonce),
-      'ciphertext': b64(box.cipherText),
-      'mac': b64(box.mac.bytes),
-    };
-  }
-
-  bool _isDeviceSyncPayload(Map<String, dynamic> payload) {
-    return payload['protocol'] == _deviceSyncProtocol;
-  }
-
-  Future<void> _handleDeviceSyncPayload(Map<String, dynamic> payload) async {
-    final identity = _identity;
-    if (identity == null) return;
-    if (payload['senderDeviceId'] == identity.deviceId) return;
-
-    try {
-      final box = SecretBox(
-        unb64(payload['ciphertext'] as String),
-        nonce: unb64(payload['nonce'] as String),
-        mac: Mac(unb64(payload['mac'] as String)),
-      );
-      final clearBytes = await _deviceSyncAead.decrypt(
-        box,
-        secretKey: await _localArchiveSecretKey(),
-        aad: utf8Bytes(_deviceSyncAad),
-      );
-      final clear = jsonDecode(utf8.decode(clearBytes)) as Map<String, dynamic>;
-      if (clear['senderDeviceId'] == identity.deviceId) return;
-
-      _applyingDeviceSync = true;
-      var changed = false;
-      changed = _mergeSyncedContacts(clear['contacts'] as List?) || changed;
-      changed = _mergeSyncedGroups(clear['groups'] as List?) || changed;
-      changed = await _mergeSyncedProfile(clear['ownProfile']) || changed;
-      final directoryEnabled = clear['directoryEnabled'];
-      if (directoryEnabled is bool && directoryEnabled != _directoryEnabled) {
-        _directoryEnabled = directoryEnabled;
-        await _store.saveDirectoryEnabled(_directoryEnabled);
-        changed = true;
-      }
-      final syncedMessages = ((clear['messages'] as List?) ?? const [])
-          .map(
-            (item) =>
-                ChatMessage.fromJson((item as Map).cast<String, dynamic>()),
-          )
-          .toList(growable: false);
-      changed = _mergeSyncedMessages(syncedMessages) || changed;
-
-      if (!changed) return;
-      await _store.saveContacts(_contacts);
-      await _store.saveGroups(_groups);
-      await _persistMessages();
-      notifyListeners();
-    } catch (_) {
-      _setStatus(
-        'Nie udalo sie odszyfrowac synchronizacji z innego urzadzenia.',
-      );
-    } finally {
-      _applyingDeviceSync = false;
-    }
-  }
-
-  bool _mergeSyncedContacts(List<dynamic>? rawContacts) {
-    if (rawContacts == null) return false;
-    final identity = _identity;
-    var changed = false;
-    for (final item in rawContacts) {
-      final contact = Contact.fromJson((item as Map).cast<String, dynamic>());
-      if (identity != null && contact.userId == identity.userId) continue;
-      final index = _contacts.indexWhere(
-        (existing) => existing.userId == contact.userId,
-      );
-      if (index < 0) {
-        _contacts.add(contact);
-        changed = true;
-        continue;
-      }
-
-      final existing = _contacts[index];
-      if (existing.identityPublicKey != contact.identityPublicKey) continue;
-      if (existing.signingPublicKey?.isNotEmpty == true &&
-          contact.signingPublicKey?.isNotEmpty == true &&
-          existing.signingPublicKey != contact.signingPublicKey) {
-        continue;
-      }
-      final incomingProfileDate = contact.profileUpdatedAt;
-      final currentProfileDate = existing.profileUpdatedAt;
-      final useIncomingProfile = incomingProfileDate != null &&
-          (currentProfileDate == null ||
-              incomingProfileDate.isAfter(currentProfileDate));
-      final merged = Contact(
-        userId: existing.userId,
-        displayName: contact.displayName.isNotEmpty
-            ? contact.displayName
-            : existing.displayName,
-        identityPublicKey: existing.identityPublicKey,
-        signingPublicKey: existing.signingPublicKey?.isNotEmpty == true
-            ? existing.signingPublicKey
-            : contact.signingPublicKey,
-        keyAgreementPublicKeySignature:
-            existing.keyAgreementPublicKeySignature?.isNotEmpty == true
-                ? existing.keyAgreementPublicKeySignature
-                : contact.keyAgreementPublicKeySignature,
-        identityRotationProof:
-            existing.identityRotationProof ?? contact.identityRotationProof,
-        deviceList: existing.deviceList ?? contact.deviceList,
-        avatarMimeType: useIncomingProfile
-            ? contact.avatarMimeType
-            : existing.avatarMimeType,
-        avatarBytesBase64: useIncomingProfile
-            ? contact.avatarBytesBase64
-            : existing.avatarBytesBase64,
-        profileUpdatedAt: useIncomingProfile
-            ? contact.profileUpdatedAt
-            : existing.profileUpdatedAt,
-      );
-      if (jsonEncode(merged.toJson()) != jsonEncode(existing.toJson())) {
-        _contacts[index] = merged;
-        changed = true;
-      }
-    }
-    if (changed) {
-      _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
-    }
-    return changed;
-  }
-
-  bool _mergeSyncedGroups(List<dynamic>? rawGroups) {
-    if (rawGroups == null) return false;
-    var changed = false;
-    for (final item in rawGroups) {
-      final incoming = GroupConversation.fromJson(
-        (item as Map).cast<String, dynamic>(),
-      );
-      final index = _groups.indexWhere(
-        (group) => group.groupId == incoming.groupId,
-      );
-      if (index < 0) {
-        _groups.add(incoming);
-        changed = true;
-        continue;
-      }
-
-      final existing = _groups[index];
-      final merged = existing.copyWith(
-        name: incoming.name,
-        memberIds: <String>{
-          ...existing.memberIds,
-          ...incoming.memberIds,
-        }.toList(growable: false),
-        acceptedMemberIds: <String>{
-          ...existing.acceptedMemberIds,
-          ...incoming.acceptedMemberIds,
-        }.toList(growable: false),
-        invitedMemberIds: <String>{
-          ...existing.invitedMemberIds,
-          ...incoming.invitedMemberIds,
-        }.toList(growable: false),
-        invitedBy: existing.invitedBy ?? incoming.invitedBy,
-        pendingInvite: existing.pendingInvite && incoming.pendingInvite,
-      );
-      if (jsonEncode(merged.toJson()) != jsonEncode(existing.toJson())) {
-        _groups[index] = merged;
-        changed = true;
-      }
-    }
-    return changed;
-  }
-
-  Future<bool> _mergeSyncedProfile(Object? rawProfile) async {
-    if (rawProfile == null) return false;
-    final incoming = UserProfile.fromJson(
-      (rawProfile as Map).cast<String, dynamic>(),
-    );
-    final incomingDate = incoming.updatedAt;
-    final currentDate = _ownProfile?.updatedAt;
-    if (incomingDate != null &&
-        currentDate != null &&
-        !incomingDate.isAfter(currentDate)) {
-      return false;
-    }
-    _ownProfile = incoming;
-    await _store.saveOwnProfile(incoming);
-    if (_relayConnected) _relay?.updateProfile(incoming);
-    return true;
-  }
-
-  bool _mergeSyncedMessages(List<ChatMessage> incomingMessages) {
-    var changed = false;
-    for (final incoming in incomingMessages) {
-      final list = _messages.putIfAbsent(
-        incoming.contactId,
-        () => <ChatMessage>[],
-      );
-      final index = list.indexWhere((message) => message.id == incoming.id);
-      if (index < 0) {
-        list.add(incoming);
-        _sortMessages(list);
-        changed = true;
-        continue;
-      }
-
-      final merged = _mergeMessageVersions(list[index], incoming);
-      if (jsonEncode(merged.toJson()) != jsonEncode(list[index].toJson())) {
-        list[index] = merged;
-        _sortMessages(list);
-        changed = true;
-      }
-    }
-    return changed;
-  }
-
-  ChatMessage _mergeMessageVersions(
-    ChatMessage existing,
-    ChatMessage incoming,
-  ) {
-    final existingEditedAt = existing.editedAt;
-    final incomingEditedAt = incoming.editedAt;
-    final useIncomingBody = incoming.retracted ||
-        (incomingEditedAt != null &&
-            (existingEditedAt == null ||
-                incomingEditedAt.isAfter(existingEditedAt)));
-    final base = useIncomingBody ? incoming : existing;
-    final reactions = <String, String>{
-      ...existing.reactions,
-      ...incoming.reactions,
-    };
-
-    return base.copyWith(
-      status: _promoteStatus(existing.status, incoming.status),
-      retracted: existing.retracted || incoming.retracted,
-      pinned: incoming.pinned,
-      reactions: reactions,
-      editedAt: _newestDate(existing.editedAt, incoming.editedAt),
-      transport: incoming.transport ?? existing.transport,
-      error: incoming.error ?? existing.error,
-    );
-  }
-
-  DateTime? _newestDate(DateTime? left, DateTime? right) {
-    if (left == null) return right;
-    if (right == null) return left;
-    return right.isAfter(left) ? right : left;
-  }
-
-  Future<String> _localArchiveKeyBase64() async {
-    final existing = await _store.loadLocalArchiveKey();
-    if (_isValidArchiveKey(existing)) return existing!;
-
-    final keyBytes = secureRandomBytes(32);
-    final encoded = b64(keyBytes);
-    await _store.saveLocalArchiveKey(encoded);
-    return encoded;
-  }
-
-  Future<SecretKey> _localArchiveSecretKey() async {
-    return SecretKey(unb64(await _localArchiveKeyBase64()));
-  }
-
-  bool _isValidArchiveKey(String? value) {
-    if (value == null || value.isEmpty) return false;
-    try {
-      return unb64(value).length == 32;
-    } catch (_) {
-      return false;
-    }
   }
 
   Future<void> _loadPackageInfo() async {
@@ -4697,37 +2504,6 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<SecretKey> _deriveAccountExportKey(
-    String passphrase,
-    List<int> salt, {
-    required Map<String, dynamic>? parameters,
-  }) async {
-    if (parameters != null) {
-      final encoded = await _cloudCrypto.deriveVaultKey(
-        vaultSecret: passphrase,
-        salt: b64(salt),
-        parameters: parameters,
-      );
-      return SecretKey(unb64(encoded));
-    }
-    final kdf = Pbkdf2(
-      macAlgorithm: Hmac.sha256(),
-      iterations: _accountExportIterations,
-      bits: 256,
-    );
-    return kdf.deriveKey(
-      secretKey: SecretKey(utf8Bytes(passphrase)),
-      nonce: salt,
-    );
-  }
-
-  void _validateAccountTransferPassphrase(String passphrase) {
-    final error = accountTransferPassphraseError(passphrase);
-    if (error != null) {
-      throw ArgumentError(error);
-    }
-  }
-
   Future<void> _loadArchivedMessages() async {
     final archived = await _messageArchive.load();
     _messages.clear();
@@ -4745,16 +2521,8 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> _loadSessions() async {
-    _sessions.clear();
-    final storedSessions = await _store.loadSessions();
-    for (final session in storedSessions) {
-      _sessions[session.contactId] = session;
-    }
-  }
-
-  Future<void> _saveSessions() {
-    return _store.saveSessions(_sessions.values);
+  Future<void> _clearLegacySessions() {
+    return _store.clearLegacySessions();
   }
 
   Future<void> _loadCloudReplayStates() async {
@@ -5085,35 +2853,6 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  Future<void> _applyContactProfile(String userId, UserProfile profile) async {
-    final index = _contacts.indexWhere((contact) => contact.userId == userId);
-    if (index < 0) return;
-
-    final contact = _contacts[index];
-    final incomingUpdatedAt = profile.updatedAt;
-    final currentUpdatedAt = contact.profileUpdatedAt;
-    if (incomingUpdatedAt != null &&
-        currentUpdatedAt != null &&
-        !incomingUpdatedAt.isAfter(currentUpdatedAt)) {
-      return;
-    }
-
-    _contacts[index] = Contact(
-      userId: contact.userId,
-      displayName: contact.displayName,
-      identityPublicKey: contact.identityPublicKey,
-      signingPublicKey: contact.signingPublicKey,
-      keyAgreementPublicKeySignature: contact.keyAgreementPublicKeySignature,
-      identityRotationProof: contact.identityRotationProof,
-      deviceList: contact.deviceList,
-      avatarMimeType: profile.avatarMimeType,
-      avatarBytesBase64: profile.avatarBytesBase64,
-      profileUpdatedAt: incomingUpdatedAt ?? DateTime.now().toUtc(),
-    );
-    await _store.saveContacts(_contacts);
-    notifyListeners();
-  }
-
   Future<void> _persistMessages() {
     final snapshot = _allMessagesSnapshot();
     _persistQueue = _persistQueue
@@ -5129,25 +2868,10 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  GroupConversation? _groupById(String groupId) {
-    for (final group in _groups) {
-      if (group.groupId == groupId) return group;
-    }
-    return null;
-  }
-
   IdentityKeyMaterial _requireIdentity() {
     final identity = _identity;
     if (identity == null) throw StateError('Brak lokalnej tozsamosci.');
     return identity;
-  }
-
-  RelayClient _requireRelay() {
-    final relay = _relay;
-    if (relay == null || !_relayConnected) {
-      throw StateError('Relay nie jest polaczony.');
-    }
-    return relay;
   }
 
   void _setStatus(String message) {
@@ -5189,8 +2913,6 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _presenceTimer?.cancel();
-    unawaited(_relaySubscription?.cancel());
-    unawaited(_relay?.dispose());
     unawaited(_cloudSubscription?.cancel());
     unawaited(_cloudClient?.dispose());
     super.dispose();

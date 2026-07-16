@@ -14,18 +14,6 @@ class IdentityKeyMaterial {
   final SimplePublicKey publicKey;
 }
 
-class RelaySettings {
-  const RelaySettings({required this.serverUrl});
-
-  final String serverUrl;
-
-  Map<String, dynamic> toJson() => {'serverUrl': serverUrl};
-
-  factory RelaySettings.fromJson(Map<String, dynamic> json) {
-    return RelaySettings(serverUrl: json['serverUrl'] as String);
-  }
-}
-
 class AdminSettings {
   const AdminSettings({required this.serverUrl, required this.adminToken});
 

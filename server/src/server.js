@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -23,8 +24,30 @@ const v2Store = new V2Store({
     instanceBytes: config.instanceQuotaBytes,
     dailyAccountBytes: config.dailyAccountQuotaBytes,
     minFreeDiskBytes: config.minFreeDiskBytes
-  }
+  },
+  sessionTtlMs: config.sessionTtlHours * 60 * 60 * 1000,
+  sessionIdleTtlMs: config.sessionIdleTtlHours * 60 * 60 * 1000
 });
+
+let cachedStorageMetrics = null;
+let cachedStorageMetricsAt = 0;
+
+function timingSafeTextEqual(left, right) {
+  const a = Buffer.from(String(left || ''), 'utf8');
+  const b = Buffer.from(String(right || ''), 'utf8');
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+}
+
+function currentStorageMetrics() {
+  const now = Date.now();
+  const ttlMs = config.metricsStorageCacheSeconds * 1000;
+  if (cachedStorageMetrics && now - cachedStorageMetricsAt < ttlMs) {
+    return cachedStorageMetrics;
+  }
+  cachedStorageMetrics = storageMetrics(v2Store);
+  cachedStorageMetricsAt = now;
+  return cachedStorageMetrics;
+}
 
 function clientIp(req) {
   const remote = req.socket.remoteAddress || '';
@@ -102,11 +125,19 @@ const httpServer = http.createServer((req, res) => {
   req.clientIp = clientIp(req);
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   if (url.pathname === '/healthz') {
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (url.pathname === '/metrics') {
+    if (!config.adminToken || !timingSafeTextEqual(req.headers['x-admin-token'], config.adminToken)) {
+      sendJson(res, 401, { ok: false, error: 'Brak autoryzacji administratora.' });
+      return;
+    }
     sendJson(res, 200, {
       ok: true,
       time: new Date().toISOString(),
       kdf: kdfMetrics(),
-      storage: storageMetrics(v2Store)
+      storage: currentStorageMetrics()
     });
     return;
   }

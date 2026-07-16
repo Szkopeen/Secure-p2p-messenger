@@ -1,6 +1,6 @@
 # Aktualizacje aplikacji
 
-Relay udostepnia najnowsza wersje aplikacji przez HTTPS:
+Serwer Secure Chat udostepnia najnowsza wersje aplikacji przez HTTPS:
 
 - `/updates/manifest.json` - manifest z numerem wersji, SHA-256 i nazwami plikow.
 - `/updates/files/<plik>` - paczka ZIP albo APK do pobrania.
@@ -16,7 +16,7 @@ kluczem prywatnym, ktorego nie ma na serwerze.
 Zrob to raz, na zaufanym komputerze. Prywatnego klucza nie wrzucaj na GitHub.
 
 ```powershell
-cd "C:\Users\ulkhh\Documents\New project\server"
+cd server
 npm run generate-update-key -- --out .\secrets\update-signing-key.pem
 ```
 
@@ -47,7 +47,7 @@ Liczba po `+` to build. Musi byc wieksza niz w poprzedniej wydanej aplikacji.
 Windows:
 
 ```powershell
-cd "C:\Users\ulkhh\Documents\New project\client"
+cd client
 flutter clean
 flutter pub get
 flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
@@ -57,7 +57,7 @@ Compress-Archive -Path ".\build\windows\x64\runner\Release\*" -DestinationPath "
 Android:
 
 ```powershell
-cd "C:\Users\ulkhh\Documents\New project\client"
+cd client
 flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
 Copy-Item ".\build\app\outputs\flutter-apk\app-release.apk" "$env:USERPROFILE\Desktop\secure-p2p-android.apk" -Force
 ```
@@ -79,32 +79,36 @@ Najprosciej wrzuc pliki do katalogu domowego na Raspberry Pi, np. przez GitHub, 
 Przyklad z komputera Windows przez SCP:
 
 ```powershell
-scp "$env:USERPROFILE\Desktop\secure-p2p-windows.zip" szkpn@chat.szkpn.pl:~
-scp "$env:USERPROFILE\Desktop\secure-p2p-android.apk" szkpn@chat.szkpn.pl:~
+scp "$env:USERPROFILE\Desktop\secure-p2p-windows.zip" user@server.example.com:~
+scp "$env:USERPROFILE\Desktop\secure-p2p-android.apk" user@server.example.com:~
 ```
 
-## 3. Opublikuj manifest na serwerze
+## 3. Podpisz manifest na zaufanym komputerze
 
-Na Raspberry Pi:
+Prywatny klucz release trzymaj poza produkcyjnym serwerem. Na komputerze
+release wygeneruj manifest i katalog plikow:
 
 ```bash
-cd /opt/secure-p2p/app/server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --notes "Aktualizacja komunikatora"
+cd server
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Aktualizacja komunikatora"
 ```
 
 Jesli masz tez paczke Linux:
 
 ```bash
-cd /opt/secure-p2p/app/server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --notes "Aktualizacja komunikatora"
+cd server
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Aktualizacja komunikatora"
 ```
 
 `--build` musi byc wiekszy niz numer builda w aplikacji. Jesli aplikacja ma `version: 1.0.0+1`, kolejna publikacja powinna miec np. `--version 1.0.1 --build 2`.
 
-## 4. Sprawdz, czy relay widzi aktualizacje
+Potem wyslij na produkcje tylko `server/updates/manifest.json` i
+`server/updates/files/`. Prywatnego klucza nie wysylaj na serwer.
+
+## 4. Sprawdz, czy serwer widzi aktualizacje
 
 ```bash
-curl https://chat.szkpn.pl/updates/manifest.json
+curl https://chat.example.com/updates/manifest.json
 ```
 
 W aplikacji wejdz w `Ustawienia -> Aktualizacje` i kliknij odswiezanie.
@@ -113,7 +117,7 @@ W aplikacji wejdz w `Ustawienia -> Aktualizacje` i kliknij odswiezanie.
 
 Przycisk najpierw sprawdza podpis manifestu Ed25519. Jesli podpis jest
 niepoprawny albo go brakuje, aplikacja blokuje aktualizacje. Dopiero potem
-pobiera paczke z relay i sprawdza jej SHA-256 z manifestu. Windows i Linux
+pobiera paczke z serwera i sprawdza jej SHA-256 z manifestu. Windows i Linux
 probuja od razu otworzyc folder z pobranym plikiem. Android pobiera APK do
 katalogu aplikacji; system moze poprosic o zgode na instalowanie aplikacji
 spoza sklepu.

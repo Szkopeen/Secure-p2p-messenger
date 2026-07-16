@@ -5,11 +5,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../crypto/codec.dart';
 import '../models/contact.dart';
-import '../models/contact_invite.dart';
 import '../models/cloud_account.dart';
-import '../models/group.dart';
 import '../models/identity.dart';
-import '../models/session.dart';
 import '../models/user_profile.dart';
 
 class SecureStore {
@@ -20,15 +17,11 @@ class SecureStore {
   static const _identityDeviceId = 'identity.deviceId';
   static const _identityPrivateKey = 'identity.ed25519.private';
   static const _identityPublicKey = 'identity.ed25519.public';
-  static const _relaySettings = 'relay.settings';
   static const _adminSettings = 'admin.settings.v1';
   static const _contacts = 'contacts.v1';
-  static const _groups = 'groups.v1';
   static const _localArchiveKey = 'local.archive.key.v1';
   static const _ownProfile = 'profile.public.v1';
   static const _sessions = 'sessions.v1';
-  static const _directoryEnabled = 'directory.enabled.v1';
-  static const _contactInvites = 'contact.invites.v1';
   static const _cloudSession = 'cloud.session.v1';
   static const _cloudDeviceKey = 'cloud.deviceKey.v1';
   static const _cloudReplayStates = 'cloud.messageReplay.v1';
@@ -75,19 +68,6 @@ class SecureStore {
     );
   }
 
-  Future<void> saveRelaySettings(RelaySettings settings) async {
-    await _storage.write(
-      key: _relaySettings,
-      value: jsonEncode(settings.toJson()),
-    );
-  }
-
-  Future<RelaySettings?> loadRelaySettings() async {
-    final raw = await _storage.read(key: _relaySettings);
-    if (raw == null) return null;
-    return RelaySettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-  }
-
   Future<void> saveAdminSettings(AdminSettings settings) async {
     await _storage.write(
       key: _adminSettings,
@@ -114,25 +94,6 @@ class SecureStore {
     final list = jsonDecode(raw) as List<dynamic>;
     return list
         .map((item) => Contact.fromJson((item as Map).cast<String, dynamic>()))
-        .toList(growable: false);
-  }
-
-  Future<void> saveContactInvites(List<ContactInvite> invites) async {
-    await _storage.write(
-      key: _contactInvites,
-      value: jsonEncode(invites.map((invite) => invite.toJson()).toList()),
-    );
-  }
-
-  Future<List<ContactInvite>> loadContactInvites() async {
-    final raw = await _storage.read(key: _contactInvites);
-    if (raw == null || raw.isEmpty) return [];
-    final list = jsonDecode(raw) as List<dynamic>;
-    return list
-        .map(
-          (item) =>
-              ContactInvite.fromJson((item as Map).cast<String, dynamic>()),
-        )
         .toList(growable: false);
   }
 
@@ -208,33 +169,6 @@ class SecureStore {
     await _storage.write(key: _cloudVaultPins, value: jsonEncode(pins));
   }
 
-  Future<void> saveDirectoryEnabled(bool enabled) async {
-    await _storage.write(key: _directoryEnabled, value: enabled ? '1' : '0');
-  }
-
-  Future<bool> loadDirectoryEnabled() async {
-    return await _storage.read(key: _directoryEnabled) == '1';
-  }
-
-  Future<void> saveGroups(List<GroupConversation> groups) async {
-    await _storage.write(
-      key: _groups,
-      value: jsonEncode(groups.map((group) => group.toJson()).toList()),
-    );
-  }
-
-  Future<List<GroupConversation>> loadGroups() async {
-    final raw = await _storage.read(key: _groups);
-    if (raw == null || raw.isEmpty) return [];
-    final list = jsonDecode(raw) as List<dynamic>;
-    return list
-        .map(
-          (item) =>
-              GroupConversation.fromJson((item as Map).cast<String, dynamic>()),
-        )
-        .toList(growable: false);
-  }
-
   Future<void> saveOwnProfile(UserProfile profile) async {
     await _storage.write(key: _ownProfile, value: jsonEncode(profile.toJson()));
   }
@@ -245,32 +179,8 @@ class SecureStore {
     return UserProfile.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
-  Future<void> saveSessions(Iterable<SessionState> sessions) async {
-    final items = <Map<String, dynamic>>[];
-    for (final session in sessions) {
-      items.add({
-        'contactId': session.contactId,
-        'sessionId': session.sessionId,
-        'secretKey': b64(await session.secretKey.extractBytes()),
-        'createdAt': session.createdAt.toUtc().toIso8601String(),
-      });
-    }
-    await _storage.write(key: _sessions, value: jsonEncode(items));
-  }
-
-  Future<List<SessionState>> loadSessions() async {
-    final raw = await _storage.read(key: _sessions);
-    if (raw == null || raw.isEmpty) return [];
-    final list = jsonDecode(raw) as List<dynamic>;
-    return list.map((item) {
-      final json = (item as Map).cast<String, dynamic>();
-      return SessionState(
-        contactId: json['contactId'] as String,
-        sessionId: json['sessionId'] as String,
-        secretKey: SecretKey(unb64(json['secretKey'] as String)),
-        createdAt: DateTime.parse(json['createdAt'] as String),
-      );
-    }).toList(growable: false);
+  Future<void> clearLegacySessions() {
+    return _storage.delete(key: _sessions);
   }
 
   Future<void> wipeLocalSecrets() async {

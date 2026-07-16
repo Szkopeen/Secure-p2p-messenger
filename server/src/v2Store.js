@@ -16,7 +16,8 @@ const MAX_ACCOUNT_BYTES = 1024 * 1024 * 1024;
 const MAX_INSTANCE_BYTES = 10 * 1024 * 1024 * 1024;
 const MAX_DAILY_ACCOUNT_BYTES = 100 * 1024 * 1024;
 const MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_SESSION_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30 * 1000;
 const WS_TICKET_MAX_GLOBAL = 10_000;
 const WS_TICKET_MAX_PER_SESSION = 4;
@@ -657,8 +658,22 @@ function timingSafeTextEqual(left, right) {
   return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
 }
 
+function finiteNumber(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function sessionCreatedAtMs(session, fallback = Date.now()) {
+  return finiteNumber(Date.parse(session?.createdAt), fallback);
+}
+
+function sessionLastSeenAtMs(session, fallback = Date.now()) {
+  if (Number.isFinite(session?.lastSeenAtMs)) return session.lastSeenAtMs;
+  if (Number.isFinite(session?.lastSeenAtWriteMs)) return session.lastSeenAtWriteMs;
+  return sessionCreatedAtMs(session, fallback);
+}
+
 export class V2Store {
-  constructor({ dataDir, limits = {} }) {
+  constructor({ dataDir, limits = {}, sessionTtlMs, sessionIdleTtlMs } = {}) {
     this.dataDir = path.resolve(dataDir);
     fs.mkdirSync(this.dataDir, { recursive: true });
     this.limits = Object.freeze({
@@ -669,6 +684,10 @@ export class V2Store {
       instanceBytes: limits.instanceBytes ?? MAX_INSTANCE_BYTES,
       dailyAccountBytes: limits.dailyAccountBytes ?? MAX_DAILY_ACCOUNT_BYTES,
       minFreeDiskBytes: limits.minFreeDiskBytes ?? MIN_FREE_DISK_BYTES
+    });
+    this.sessionPolicy = Object.freeze({
+      ttlMs: sessionTtlMs ?? DEFAULT_SESSION_TTL_MS,
+      idleTtlMs: sessionIdleTtlMs ?? DEFAULT_SESSION_IDLE_TTL_MS
     });
     this.database = new SqliteStateStore(this.dataDir);
     this.usersFile = path.join(this.dataDir, 'users.json');
@@ -703,6 +722,7 @@ export class V2Store {
     this.database.replaceEntities('conversations', this.conversations.conversations);
     this.database.replaceEntities('invitations', this.invites.invites);
     this.database.writeState('normalized-state-v1', true);
+    this.normalizePersistedSessions();
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
     this.accountQueues = new Map();
@@ -753,20 +773,72 @@ export class V2Store {
     return { user, session, deviceId: pending.deviceId };
   }
 
+  normalizePersistedSessions() {
+    const now = Date.now();
+    for (const [hash, session] of Object.entries(this.sessions.sessions)) {
+      if (!session) continue;
+      let changed = false;
+      const createdAtMs = sessionCreatedAtMs(session, now);
+      const policyExpiry = createdAtMs + this.sessionPolicy.ttlMs;
+      if (!Number.isFinite(session.expiresAtMs) || session.expiresAtMs > policyExpiry) {
+        session.expiresAtMs = policyExpiry;
+        changed = true;
+      }
+      if (!Number.isFinite(session.lastSeenAtMs)) {
+        session.lastSeenAtMs = sessionLastSeenAtMs(session, now);
+        changed = true;
+      }
+      if (!Number.isFinite(session.lastSeenAtWriteMs)) {
+        session.lastSeenAtWriteMs = session.lastSeenAtMs;
+        changed = true;
+      }
+      if (changed) this.database.upsertSession(hash, session);
+    }
+  }
+
+  persistUser(user) {
+    if (!user?.userId) return;
+    this.database.upsertUser(user.userId, user);
+  }
+
   persistUsers() {
-    this.database.replaceEntities('users', this.users.users);
+    for (const user of Object.values(this.users.users)) this.persistUser(user);
+  }
+
+  persistSession(hash, session) {
+    if (!hash || !session) return;
+    this.database.upsertSession(hash, session);
+  }
+
+  deleteSession(hash) {
+    if (!hash) return;
+    this.database.deleteSession(hash);
   }
 
   persistSessions() {
-    this.database.replaceEntities('sessions', this.sessions.sessions);
+    for (const [hash, session] of Object.entries(this.sessions.sessions)) {
+      this.persistSession(hash, session);
+    }
+  }
+
+  persistConversation(conversation) {
+    if (!conversation?.conversationId) return;
+    this.database.upsertConversation(conversation.conversationId, conversation);
   }
 
   persistConversations() {
-    this.database.replaceEntities('conversations', this.conversations.conversations);
+    for (const conversation of Object.values(this.conversations.conversations)) {
+      this.persistConversation(conversation);
+    }
+  }
+
+  persistInvite(invite) {
+    if (!invite?.inviteId) return;
+    this.database.upsertInvite(invite.inviteId, invite);
   }
 
   persistInvites() {
-    this.database.replaceEntities('invitations', this.invites.invites);
+    for (const invite of Object.values(this.invites.invites)) this.persistInvite(invite);
   }
 
   createInvite({ createdBy = 'admin', restrictedUsername = '', expiresInSeconds = 86400,
@@ -774,7 +846,7 @@ export class V2Store {
     const token = crypto.randomBytes(32).toString('base64url');
     const inviteId = randomId();
     const now = Date.now();
-    this.invites.invites[inviteId] = {
+    const invite = {
       inviteId,
       tokenHash: tokenHash(token),
       expiresAt: new Date(now + Math.min(7 * 86400, Math.max(300, expiresInSeconds)) * 1000).toISOString(),
@@ -785,22 +857,18 @@ export class V2Store {
       createdAt: new Date(now).toISOString(),
       usedAt: null
     };
-    this.persistInvites();
-    return { inviteId, token, ...this.invites.invites[inviteId], tokenHash: undefined };
+    this.invites.invites[inviteId] = invite;
+    this.persistInvite(invite);
+    return { inviteId, token, ...invite, tokenHash: undefined };
   }
 
   consumeInvite(token, username) {
     const hash = tokenHash(token);
-    const invite = Object.values(this.invites.invites).find((item) =>
-      item.tokenHash === hash);
-    if (!invite || Date.parse(invite.expiresAt) <= Date.now() ||
-        invite.uses >= invite.maxUses ||
-        (invite.restrictedUsername && invite.restrictedUsername !== normalizeUsername(username))) {
+    const invite = this.database.consumeInviteAtomically(hash, normalizeUsername(username));
+    if (!invite) {
       return false;
     }
-    invite.uses += 1;
-    invite.usedAt = nowIso();
-    this.persistInvites();
+    this.invites.invites[invite.inviteId] = invite;
     return true;
   }
 
@@ -808,25 +876,27 @@ export class V2Store {
     this.database.appendMessage(message);
   }
 
-  persistMessageAndConversation(message) {
-    this.database.appendMessageAndUpdateConversation(
+  persistMessageAndConversation(message, conversation, streamCheck) {
+    return this.database.appendMessageAndUpdateConversation(
       message,
-      this.conversations.conversations[message.conversationId]
+      conversation || this.conversations.conversations[message.conversationId],
+      streamCheck
     );
   }
 
   pruneSessions() {
     const now = Date.now();
-    let changed = false;
     for (const [hash, session] of Object.entries(this.sessions.sessions)) {
-      if (!session || session.expiresAtMs <= now) {
+      const idleExpired = session &&
+        this.sessionPolicy.idleTtlMs > 0 &&
+        sessionLastSeenAtMs(session, now) + this.sessionPolicy.idleTtlMs <= now;
+      if (!session || session.expiresAtMs <= now || idleExpired) {
         delete this.sessions.sessions[hash];
+        this.deleteSession(hash);
         this.closeSessionSockets(hash, 'session_expired');
         this.revokeWsTicketsForSession(hash);
-        changed = true;
       }
     }
-    if (changed) this.persistSessions();
   }
 
   userByName(username) {
@@ -834,16 +904,18 @@ export class V2Store {
     return Object.values(this.users.users).find((user) => user.username === normalized) || null;
   }
 
-  publicUser(user) {
+  publicUser(user, { includeDevices = true } = {}) {
     const devices = {};
-    for (const [deviceId, device] of Object.entries(user.devices || {})) {
-      devices[deviceId] = {
-        deviceId,
-        deviceName: device.deviceName || 'Urzadzenie',
-        deviceCertificate: isValidDeviceCertificate(device.deviceCertificate)
-          ? device.deviceCertificate
-          : null
-      };
+    if (includeDevices) {
+      for (const [deviceId, device] of Object.entries(user.devices || {})) {
+        devices[deviceId] = {
+          deviceId,
+          deviceName: device.deviceName || 'Urzadzenie',
+          deviceCertificate: isValidDeviceCertificate(device.deviceCertificate)
+            ? device.deviceCertificate
+            : null
+        };
+      }
     }
     return {
       userId: user.userId,
@@ -853,10 +925,29 @@ export class V2Store {
       identityPublicKey: user.identityPublicKey || '',
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
       devices,
-      deviceList: isValidDeviceList(user.deviceList) ? user.deviceList : null,
-      deviceListHash: typeof user.deviceListHash === 'string' ? user.deviceListHash : '',
+      deviceList: includeDevices && isValidDeviceList(user.deviceList) ? user.deviceList : null,
+      deviceListHash: includeDevices && typeof user.deviceListHash === 'string' ? user.deviceListHash : '',
       identityRotationProof: user.identityRotationProof || null,
       updatedAt: user.updatedAt
+    };
+  }
+
+  publicSession(hash, session, currentHash = '') {
+    const user = this.users.users[session.userId];
+    const device = user?.devices?.[session.deviceId] || {};
+    const lastSeenAtMs = sessionLastSeenAtMs(session);
+    return {
+      sessionId: crypto.createHash('sha256').update(hash).digest('base64url').slice(0, 22),
+      current: hash === currentHash,
+      userId: session.userId,
+      deviceId: session.deviceId,
+      deviceName: device.deviceName || 'Urzadzenie',
+      createdAt: session.createdAt || new Date(lastSeenAtMs).toISOString(),
+      lastSeenAt: new Date(lastSeenAtMs).toISOString(),
+      expiresAt: new Date(session.expiresAtMs).toISOString(),
+      idleExpiresAt: this.sessionPolicy.idleTtlMs > 0
+        ? new Date(lastSeenAtMs + this.sessionPolicy.idleTtlMs).toISOString()
+        : null
     };
   }
 
@@ -865,25 +956,27 @@ export class V2Store {
       throw new Error('Urzadzenie zostalo uniewaznione.');
     }
     const token = crypto.randomBytes(32).toString('base64url');
-    const expiresAtMs = Date.now() + SESSION_TTL_MS;
+    const now = Date.now();
+    const expiresAtMs = now + this.sessionPolicy.ttlMs;
     user.devices ||= {};
     const previousDevice = user.devices[deviceId] || {};
     user.devices[deviceId] = {
       ...previousDevice,
       deviceId,
       deviceName: String(deviceName || 'Urzadzenie').slice(0, 80),
-      lastSeenAt: nowIso()
+      lastSeenAt: new Date(now).toISOString()
     };
     const hash = tokenHash(token);
     this.sessions.sessions[hash] = {
       userId: user.userId,
       deviceId,
-      createdAt: nowIso(),
-      lastSeenAtWriteMs: Date.now(),
+      createdAt: new Date(now).toISOString(),
+      lastSeenAtMs: now,
+      lastSeenAtWriteMs: now,
       expiresAtMs
     };
-    this.persistUsers();
-    this.persistSessions();
+    this.persistUser(user);
+    this.persistSession(hash, this.sessions.sessions[hash]);
     return { token, expiresAt: new Date(expiresAtMs).toISOString() };
   }
 
@@ -897,20 +990,21 @@ export class V2Store {
     if (!user) return null;
     if (isDeviceRevoked(user, session.deviceId)) {
       delete this.sessions.sessions[hash];
+      this.deleteSession(hash);
       this.closeSessionSockets(hash, 'device_revoked');
       this.revokeWsTicketsForSession(hash);
-      this.persistSessions();
       return null;
     }
     user.devices ||= {};
+    const now = Date.now();
+    session.lastSeenAtMs = now;
     if (user.devices[session.deviceId]) {
-      const now = Date.now();
       if (!Number.isFinite(session.lastSeenAtWriteMs) ||
           now - session.lastSeenAtWriteMs >= LAST_SEEN_WRITE_INTERVAL_MS) {
         user.devices[session.deviceId].lastSeenAt = nowIso();
         session.lastSeenAtWriteMs = now;
-        this.persistUsers();
-        this.persistSessions();
+        this.persistUser(user);
+        this.persistSession(hash, session);
       }
     }
     return { tokenHash: hash, session, user };
@@ -1062,9 +1156,9 @@ export class V2Store {
 
   revokeSession(sessionHash) {
     const existed = delete this.sessions.sessions[sessionHash];
+    if (existed) this.deleteSession(sessionHash);
     this.revokeWsTicketsForSession(sessionHash);
     this.closeSessionSockets(sessionHash, 'session_revoked');
-    if (existed) this.persistSessions();
     return existed;
   }
 
@@ -1073,13 +1167,13 @@ export class V2Store {
     for (const [hash, session] of Object.entries(this.sessions.sessions)) {
       if (session.userId === userId) {
         delete this.sessions.sessions[hash];
+        this.deleteSession(hash);
         this.revokeWsTicketsForSession(hash);
         this.closeSessionSockets(hash, 'session_revoked');
         changed = true;
       }
     }
     this.closeUserSockets(userId, 'session_revoked');
-    if (changed) this.persistSessions();
     return changed;
   }
 
@@ -1090,12 +1184,12 @@ export class V2Store {
     for (const [hash, session] of Object.entries(this.sessions.sessions)) {
       if (session.userId === userId && revoked.has(session.deviceId)) {
         delete this.sessions.sessions[hash];
+        this.deleteSession(hash);
         this.revokeWsTicketsForSession(hash);
         this.closeSessionSockets(hash, 'device_revoked');
         changed = true;
       }
     }
-    if (changed) this.persistSessions();
     const sockets = this.liveSockets.get(userId);
     if (!sockets) return;
     for (const ws of Array.from(sockets)) {
@@ -1199,7 +1293,6 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         console.error(JSON.stringify({ event: 'registration_session_failed', error: String(error?.stack || error) }));
         return sendJson(res, 403, { ok: false, error: 'REGISTRATION_FAILED' });
       }
-      store.persistUsers();
       return sendJson(res, 200, {
         ok: true,
         token: session.token,
@@ -1261,7 +1354,20 @@ export async function handleV2Http(store, req, res, url, options = {}) {
     if (!auth) return sendJson(res, 401, { ok: false, error: 'Brak logowania.' });
 
     if (method === 'GET' && url.pathname === '/v2/session') {
-      return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user), deviceId: auth.session.deviceId });
+      return sendJson(res, 200, {
+        ok: true,
+        user: store.publicUser(auth.user),
+        deviceId: auth.session.deviceId,
+        session: store.publicSession(auth.tokenHash, auth.session, auth.tokenHash)
+      });
+    }
+
+    if (method === 'GET' && url.pathname === '/v2/sessions') {
+      const sessions = Object.entries(store.sessions.sessions)
+        .filter(([, session]) => session.userId === auth.user.userId)
+        .map(([hash, session]) => store.publicSession(hash, session, auth.tokenHash))
+        .sort((a, b) => String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)));
+      return sendJson(res, 200, { ok: true, sessions });
     }
 
     if (method === 'POST' && url.pathname === '/v2/logout') {
@@ -1284,15 +1390,25 @@ export async function handleV2Http(store, req, res, url, options = {}) {
 
     if (method === 'GET' && url.pathname === '/v2/users') {
       const exactUsername = normalizeUsername(url.searchParams.get('username'));
+      if (!exactUsername) {
+        return sendJson(res, 200, { ok: true, users: [] });
+      }
+      if (!safeUsername(exactUsername)) {
+        return sendJson(res, 400, { ok: false, error: 'Wyszukiwanie wymaga dokladnego loginu.' });
+      }
+      if (!allowAuthAttempt(req, `directory:${exactUsername}`)) {
+        return sendJson(res, 429, { ok: false, error: 'Sprobuj ponownie pozniej.' });
+      }
       const visibleUserIds = new Set([auth.user.userId]);
       for (const conversation of store.conversationsForUser(auth.user.userId)) {
         for (const memberId of conversation.memberIds) visibleUserIds.add(memberId);
       }
       const users = Object.values(store.users.users)
         .filter((user) => user.userId !== auth.user.userId &&
-          (visibleUserIds.has(user.userId) ||
-            (exactUsername.length >= 3 && user.username === exactUsername)))
-        .map((user) => store.publicUser(user))
+          (visibleUserIds.has(user.userId) || user.username === exactUsername))
+        .map((user) => store.publicUser(user, {
+          includeDevices: visibleUserIds.has(user.userId)
+        }))
         .sort((a, b) => a.displayName.localeCompare(b.displayName));
       return sendJson(res, 200, { ok: true, users });
     }
@@ -1425,7 +1541,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         auth.user.deviceListHash = body.deviceListHash;
       }
       auth.user.updatedAt = nowIso();
-      store.persistUsers();
+      store.persistUser(auth.user);
       if (isValidDeviceList(body.deviceList)) {
         const nowRevoked = revokedDeviceIds(auth.user);
         const newlyRevoked = Array.from(nowRevoked).filter((deviceId) => !previouslyRevoked.has(deviceId));
@@ -1462,7 +1578,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         user.vaultEpoch = currentEpoch + 1;
         user.vaultHash = crypto.createHash('sha256').update(serialized).digest('base64url');
         user.updatedAt = nowIso();
-        store.persistUsers();
+        store.persistUser(user);
         store.broadcast([user.userId], { type: 'vault_updated', vaultEpoch: user.vaultEpoch, vaultHash: user.vaultHash });
         return sendJson(res, 200, { ok: true, vaultEpoch: user.vaultEpoch, vaultHash: user.vaultHash });
       });
@@ -1518,7 +1634,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
           updatedAt: nowIso()
         };
         store.conversations.conversations[conversation.conversationId] = conversation;
-        store.persistConversations();
+        store.persistConversation(conversation);
         store.broadcast(memberIds, { type: 'conversation', conversation });
       } else if (isObject(body.memberKeys)) {
         for (const [userId, envelope] of Object.entries(body.memberKeys)) {
@@ -1527,7 +1643,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
           }
         }
         conversation.updatedAt = nowIso();
-        store.persistConversations();
+        store.persistConversation(conversation);
       }
       return sendJson(res, 200, { ok: true, conversation });
     }
@@ -1559,7 +1675,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         conversation.memberKeys = body.memberKeys;
         conversation.keyEpoch = currentEpoch + 1;
         conversation.updatedAt = nowIso();
-        store.persistConversations();
+        store.persistConversation(conversation);
         store.broadcast(conversation.memberIds, { type: 'conversation', conversation, securityEvent: 'key_rotated' });
         return sendJson(res, 200, { ok: true, conversation });
       });
@@ -1616,23 +1732,10 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (quotaError) return sendJson(res, quotaError.status, { ok: false, error: quotaError.error });
       const counter = body.payload.aad.messageCounter;
       const previousHash = body.payload.aad.previousMessageHash;
-      const streamError = messageStreamError(
-        store.database,
-        conversationId,
-        auth.user.userId,
-        auth.session.deviceId,
-        counter,
-        previousHash
-      );
-      if (streamError) {
-        return sendJson(res, 409, { ok: false, error: streamError });
-      }
       const list = store.messages.messages[conversationId] || [];
-      const seq = store.database.nextMessageSequence(conversationId);
       const message = {
         messageId: String(body.messageId || randomId()),
         conversationId,
-        seq,
         senderUserId: auth.user.userId,
         senderDeviceId: auth.session.deviceId,
         messageCounter: counter,
@@ -1641,10 +1744,24 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         createdAt: nowIso(),
         payload: body.payload
       };
+      const nextConversation = { ...conversation, updatedAt: message.createdAt };
+      try {
+        store.persistMessageAndConversation(message, nextConversation, {
+          previousMessageHash: previousHash,
+          genesisHash: CLOUD_MESSAGE_GENESIS_HASH
+        });
+      } catch (error) {
+        if (error?.code === 'MESSAGE_STREAM_CONFLICT') {
+          return sendJson(res, 409, { ok: false, error: error.message });
+        }
+        if (String(error?.code || '').startsWith('SQLITE_CONSTRAINT')) {
+          return sendJson(res, 409, { ok: false, error: 'Wiadomosc narusza unikalnosc strumienia lub identyfikatora.' });
+        }
+        throw error;
+      }
       list.push(message);
       store.messages.messages[conversationId] = list;
-      conversation.updatedAt = message.createdAt;
-      store.persistMessageAndConversation(message);
+      conversation.updatedAt = nextConversation.updatedAt;
       store.broadcast(conversation.memberIds, { type: 'message', message });
       return sendJson(res, 200, { ok: true, message });
       });

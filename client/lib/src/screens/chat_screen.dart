@@ -11,7 +11,6 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../app_state.dart';
 import '../crypto/codec.dart';
 import '../models/contact.dart';
-import '../models/group.dart';
 import '../models/message.dart';
 import '../platform/file_exporter.dart';
 import '../platform/media_cache.dart';
@@ -19,14 +18,12 @@ import '../platform/media_cache.dart';
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
     required this.appState,
-    this.contact,
-    this.group,
+    required this.contact,
     super.key,
-  }) : assert(contact != null || group != null);
+  });
 
   final AppState appState;
-  final Contact? contact;
-  final GroupConversation? group;
+  final Contact contact;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -51,10 +48,8 @@ class _ChatScreenState extends State<ChatScreen> {
   int _searchResultIndex = 0;
 
   bool get _isSending => _pendingSends > 0;
-  bool get _isGroup => widget.group != null;
-  String get _conversationId => widget.contact?.userId ?? widget.group!.groupId;
-  String get _conversationTitle =>
-      widget.contact?.displayName ?? widget.group!.name;
+  String get _conversationId => widget.contact.userId;
+  String get _conversationTitle => widget.contact.displayName;
 
   @override
   void dispose() {
@@ -72,10 +67,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final messages = widget.appState.messagesFor(_conversationId);
         _visibleMessages = messages;
         final contact = widget.contact;
-        final group = widget.group;
-        final online = contact == null
-            ? false
-            : widget.appState.isContactOnline(contact.userId);
+        final online = widget.appState.isContactOnline(contact.userId);
         final searchResults = _searchResults(messages);
         final pinnedMessages =
             messages.where((message) => message.pinned).toList();
@@ -89,7 +81,6 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 _ContactAvatar(
                   contact: contact,
-                  group: group,
                   radius: 18,
                   online: online,
                 ),
@@ -104,11 +95,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        contact == null
-                            ? _groupStatus(group!)
-                            : online
-                                ? 'Online / Cloud'
-                                : 'Offline / Cloud',
+                        online ? 'Online / Cloud' : 'Offline / Cloud',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -138,12 +125,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 onSelected: (value) {
                   if (value == 'clear-local') {
                     unawaited(_confirmClearConversation());
-                  } else if (value == 'invite-members') {
-                    unawaited(_showInviteToGroupDialog());
-                  } else if (value == 'leave-group') {
-                    unawaited(_confirmLeaveGroup());
-                  } else if (value == 'delete-group-local') {
-                    unawaited(_confirmDeleteGroupLocally());
                   }
                 },
                 itemBuilder: (context) => [
@@ -154,30 +135,6 @@ class _ChatScreenState extends State<ChatScreen> {
                       label: 'Usun wiadomosci lokalnie',
                     ),
                   ),
-                  if (_isGroup) ...[
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: 'invite-members',
-                      child: _MessageMenuItem(
-                        icon: Icons.group_add_outlined,
-                        label: 'Dodaj osoby do grupy',
-                      ),
-                    ),
-                    const PopupMenuItem(
-                      value: 'leave-group',
-                      child: _MessageMenuItem(
-                        icon: Icons.logout,
-                        label: 'Wyjdz z grupy',
-                      ),
-                    ),
-                    const PopupMenuItem(
-                      value: 'delete-group-local',
-                      child: _MessageMenuItem(
-                        icon: Icons.delete_outline,
-                        label: 'Usun grupe lokalnie',
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ],
@@ -217,7 +174,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           return _MessageBubble(
                             appState: widget.appState,
                             contact: widget.contact,
-                            group: widget.group,
                             message: message,
                             senderName: _senderNameFor(message),
                             highlighted: message.id == _highlightedMessageId,
@@ -342,23 +298,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _inputFocus.requestFocus();
     _incrementPendingSends();
     try {
-      final group = widget.group;
-      final contact = widget.contact;
-      if (group != null) {
-        await widget.appState.sendGroupText(
-          group,
-          text,
-          replyToMessageId: reply?.id,
-          replyPreview: reply == null ? null : _messagePreview(reply),
-        );
-      } else {
-        await widget.appState.sendText(
-          contact!,
-          text,
-          replyToMessageId: reply?.id,
-          replyPreview: reply == null ? null : _messagePreview(reply),
-        );
-      }
+      await widget.appState.sendText(
+        widget.contact,
+        text,
+        replyToMessageId: reply?.id,
+        replyPreview: reply == null ? null : _messagePreview(reply),
+      );
     } catch (error) {
       _showError(error);
     } finally {
@@ -372,31 +317,18 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _dragging = false);
     _incrementPendingSends();
     try {
-      final group = widget.group;
-      final contact = widget.contact;
       final reply = _replyingTo;
       setState(() => _replyingTo = null);
       for (final file in detail.files) {
         final bytes = await file.readAsBytes();
-        if (group != null) {
-          await widget.appState.sendGroupFileBytes(
-            group,
-            fileName: file.name,
-            bytes: bytes,
-            mimeType: file.mimeType,
-            replyToMessageId: reply?.id,
-            replyPreview: reply == null ? null : _messagePreview(reply),
-          );
-        } else {
-          await widget.appState.sendFileBytes(
-            contact!,
-            fileName: file.name,
-            bytes: bytes,
-            mimeType: file.mimeType,
-            replyToMessageId: reply?.id,
-            replyPreview: reply == null ? null : _messagePreview(reply),
-          );
-        }
+        await widget.appState.sendFileBytes(
+          widget.contact,
+          fileName: file.name,
+          bytes: bytes,
+          mimeType: file.mimeType,
+          replyToMessageId: reply?.id,
+          replyPreview: reply == null ? null : _messagePreview(reply),
+        );
       }
     } catch (error) {
       _showError(error);
@@ -434,160 +366,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _highlightedMessageId = null;
       _lastMessageCount = 0;
     });
-  }
-
-  Future<void> _confirmLeaveGroup() async {
-    final group = widget.group;
-    if (group == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Wyjdz z grupy'),
-          content: const Text(
-            'Grupa zniknie z tego urzadzenia. Pozostali czlonkowie dostana informacje, ze wyszedles.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Anuluj'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Wyjdz'),
-            ),
-          ],
-        );
-      },
-    );
-    if (confirmed != true) return;
-    await widget.appState.leaveGroup(group);
-    if (mounted) Navigator.of(context).pop();
-  }
-
-  Future<void> _confirmDeleteGroupLocally() async {
-    final group = widget.group;
-    if (group == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Usun grupe lokalnie'),
-          content: const Text(
-            'To usunie grupe i jej wiadomosci tylko u Ciebie. Inni czlonkowie nie dostana powiadomienia.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Anuluj'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Usun'),
-            ),
-          ],
-        );
-      },
-    );
-    if (confirmed != true) return;
-    await widget.appState.deleteGroupLocally(group);
-    if (mounted) Navigator.of(context).pop();
-  }
-
-  Future<void> _showInviteToGroupDialog() async {
-    final group = widget.group;
-    if (group == null) return;
-
-    final selectableContacts = widget.appState.contacts
-        .where((contact) => !group.memberIds.contains(contact.userId))
-        .toList(growable: false);
-    final selected = <String>{};
-    String? error;
-
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Dodaj osoby do grupy'),
-              content: SizedBox(
-                width: 520,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (selectableContacts.isEmpty)
-                      const Text('Brak kontaktow spoza tej grupy.')
-                    else
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 320),
-                        child: ListView(
-                          shrinkWrap: true,
-                          children: [
-                            for (final contact in selectableContacts)
-                              CheckboxListTile(
-                                value: selected.contains(contact.userId),
-                                onChanged: (value) {
-                                  setDialogState(() {
-                                    if (value == true) {
-                                      selected.add(contact.userId);
-                                    } else {
-                                      selected.remove(contact.userId);
-                                    }
-                                  });
-                                },
-                                title: Text(contact.displayName),
-                                subtitle: Text(contact.userId),
-                              ),
-                          ],
-                        ),
-                      ),
-                    if (error != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        error!,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Anuluj'),
-                ),
-                FilledButton(
-                  onPressed: selectableContacts.isEmpty
-                      ? null
-                      : () async {
-                          try {
-                            await widget.appState.inviteContactsToGroup(
-                              group: group,
-                              contacts: selectableContacts
-                                  .where(
-                                    (contact) =>
-                                        selected.contains(contact.userId),
-                                  )
-                                  .toList(growable: false),
-                            );
-                            if (dialogContext.mounted) {
-                              Navigator.of(dialogContext).pop();
-                            }
-                          } catch (exception) {
-                            setDialogState(() => error = exception.toString());
-                          }
-                        },
-                  child: const Text('Zapros'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
   }
 
   void _toggleSearch() {
@@ -628,10 +406,6 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.pin => 'przypiecie',
       PlainPayloadType.receipt => 'potwierdzenie',
       PlainPayloadType.edit => message.payload.editedText?.toLowerCase() ?? '',
-      PlainPayloadType.groupInvite => 'zaproszenie do grupy',
-      PlainPayloadType.groupInviteResponse => 'odpowiedz na zaproszenie',
-      PlainPayloadType.groupText => message.payload.text?.toLowerCase() ?? '',
-      PlainPayloadType.groupLeave => 'wyjscie z grupy',
     };
     final reply = message.payload.replyPreview?.toLowerCase();
     return reply == null || reply.isEmpty ? text : '$text $reply';
@@ -698,10 +472,6 @@ class _ChatScreenState extends State<ChatScreen> {
       PlainPayloadType.pin => 'Przypieto wiadomosc',
       PlainPayloadType.receipt => 'Potwierdzenie wiadomosci',
       PlainPayloadType.edit => 'Edytowano wiadomosc',
-      PlainPayloadType.groupInvite => 'Zaproszenie do grupy',
-      PlainPayloadType.groupInviteResponse => 'Odpowiedz na zaproszenie',
-      PlainPayloadType.groupText => message.payload.text ?? '',
-      PlainPayloadType.groupLeave => 'Wyjscie z grupy',
     };
   }
 
@@ -723,26 +493,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _lastReadMarkMessageId = newestUnreadId;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final contact = widget.contact;
-      final group = widget.group;
-      if (contact != null) {
-        unawaited(widget.appState.markConversationRead(contact));
-      } else if (group != null) {
-        unawaited(widget.appState.markGroupRead(group));
-      }
+      unawaited(widget.appState.markConversationRead(widget.contact));
     });
   }
 
-  String _groupStatus(GroupConversation group) {
-    if (group.pendingInvite) return 'Zaproszenie do grupy';
-    return 'Grupa / zaakceptowalo ${group.acceptedMemberIds.length} z ${group.memberIds.length}';
-  }
-
   String? _senderNameFor(ChatMessage message) {
-    if (!_isGroup || message.direction != MessageDirection.inbound) return null;
-    final senderId = message.senderId;
-    if (senderId == null || senderId.isEmpty) return null;
-    return widget.appState.displayNameForUser(senderId);
+    return null;
   }
 
   void _highlightAndScrollToMessage(String messageId) {
@@ -795,23 +551,13 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendFile() async {
     _incrementPendingSends();
     try {
-      final group = widget.group;
-      final contact = widget.contact;
       final reply = _replyingTo;
       setState(() => _replyingTo = null);
-      if (group != null) {
-        await widget.appState.sendGroupFile(
-          group,
-          replyToMessageId: reply?.id,
-          replyPreview: reply == null ? null : _messagePreview(reply),
-        );
-      } else {
-        await widget.appState.sendFile(
-          contact!,
-          replyToMessageId: reply?.id,
-          replyPreview: reply == null ? null : _messagePreview(reply),
-        );
-      }
+      await widget.appState.sendFile(
+        widget.contact,
+        replyToMessageId: reply?.id,
+        replyPreview: reply == null ? null : _messagePreview(reply),
+      );
     } catch (error) {
       _showError(error);
     } finally {
@@ -1003,27 +749,16 @@ class _ReplySnippet extends StatelessWidget {
 class _ContactAvatar extends StatelessWidget {
   const _ContactAvatar({
     required this.contact,
-    required this.group,
     required this.radius,
     required this.online,
   });
 
-  final Contact? contact;
-  final GroupConversation? group;
+  final Contact contact;
   final double radius;
   final bool online;
 
   @override
   Widget build(BuildContext context) {
-    final group = this.group;
-    if (group != null) {
-      return CircleAvatar(
-        radius: radius,
-        child: const Icon(Icons.groups_outlined),
-      );
-    }
-
-    final contact = this.contact!;
     final bytes = _avatarBytes();
     final fallback = contact.displayName.isEmpty
         ? '?'
@@ -1058,7 +793,7 @@ class _ContactAvatar extends StatelessWidget {
   }
 
   Uint8List? _avatarBytes() {
-    final raw = contact?.avatarBytesBase64;
+    final raw = contact.avatarBytesBase64;
     if (raw == null || raw.isEmpty) return null;
     try {
       return unb64(raw);
@@ -1137,7 +872,6 @@ class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
     required this.appState,
     required this.contact,
-    required this.group,
     required this.message,
     required this.senderName,
     required this.highlighted,
@@ -1146,8 +880,7 @@ class _MessageBubble extends StatelessWidget {
   });
 
   final AppState appState;
-  final Contact? contact;
-  final GroupConversation? group;
+  final Contact contact;
   final ChatMessage message;
   final String? senderName;
   final bool highlighted;
@@ -1311,28 +1044,13 @@ class _MessageBubble extends StatelessWidget {
           await _showEditDialog(context);
           break;
         case _MessageAction.retract:
-          final group = this.group;
-          if (group != null) {
-            await appState.retractGroupMessage(group, message);
-          } else {
-            await appState.retractMessage(contact!, message);
-          }
+          await appState.retractMessage(contact, message);
           break;
         case _MessageAction.pin:
-          final group = this.group;
-          if (group != null) {
-            await appState.setGroupMessagePinned(group, message, true);
-          } else {
-            await appState.setMessagePinned(contact!, message, true);
-          }
+          await appState.setMessagePinned(contact, message, true);
           break;
         case _MessageAction.unpin:
-          final group = this.group;
-          if (group != null) {
-            await appState.setGroupMessagePinned(group, message, false);
-          } else {
-            await appState.setMessagePinned(contact!, message, false);
-          }
+          await appState.setMessagePinned(contact, message, false);
           break;
         case _MessageAction.deleteLocal:
           await appState.deleteMessageLocally(message.contactId, message.id);
@@ -1381,13 +1099,6 @@ class _MessageBubble extends StatelessWidget {
     );
     controller.dispose();
     if (edited == null) return;
-    final group = this.group;
-    if (group != null) {
-      await appState.editGroupMessage(group, message, edited);
-      return;
-    }
-    final contact = this.contact;
-    if (contact == null) return;
     await appState.editMessage(contact, message, edited);
   }
 
@@ -1424,20 +1135,11 @@ class _MessageBubble extends StatelessWidget {
       },
     );
     if (selected == null) return;
-    final group = this.group;
-    if (group != null) {
-      await appState.reactToGroupMessage(
-        group,
-        message,
-        selected.isEmpty ? null : selected,
-      );
-    } else {
-      await appState.reactToMessage(
-        contact!,
-        message,
-        selected.isEmpty ? null : selected,
-      );
-    }
+    await appState.reactToMessage(
+      contact,
+      message,
+      selected.isEmpty ? null : selected,
+    );
   }
 }
 
@@ -1611,12 +1313,6 @@ class _PayloadView extends StatelessWidget {
       PlainPayloadType.pin => const Text('Przypieto wiadomosc.'),
       PlainPayloadType.receipt => const Text('Potwierdzono wiadomosc.'),
       PlainPayloadType.edit => const Text('Edytowano wiadomosc.'),
-      PlainPayloadType.groupInvite => const Text('Zaproszenie do grupy.'),
-      PlainPayloadType.groupInviteResponse => const Text(
-          'Odpowiedz na zaproszenie do grupy.',
-        ),
-      PlainPayloadType.groupText => SelectableText(payload.text ?? ''),
-      PlainPayloadType.groupLeave => const Text('Uzytkownik wyszedl z grupy.'),
       PlainPayloadType.file => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,

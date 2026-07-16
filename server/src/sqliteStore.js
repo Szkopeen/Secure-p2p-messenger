@@ -2,10 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+function sqlStringLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
 export class SqliteStateStore {
   constructor(dataDir) {
     fs.mkdirSync(dataDir, { recursive: true });
-    this.db = new DatabaseSync(path.join(dataDir, 'secure-chat.sqlite'));
+    this.dbFile = path.resolve(dataDir, 'secure-chat.sqlite');
+    this.db = new DatabaseSync(this.dbFile);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
@@ -72,6 +77,9 @@ export class SqliteStateStore {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS messages_sender_stream
         ON messages(conversation_id, sender_user_id, sender_device_id, message_counter);
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_unique_sender_counter
+        ON messages(conversation_id, sender_user_id, sender_device_id, message_counter)
+        WHERE message_counter IS NOT NULL;
       CREATE INDEX IF NOT EXISTS messages_sender_created
         ON messages(sender_user_id, created_at);
     `);
@@ -135,17 +143,23 @@ export class SqliteStateStore {
       conversations: this.db.prepare('DELETE FROM conversations'),
       invitations: this.db.prepare('DELETE FROM invitations')
     };
-    this.userInsertStatement = this.db.prepare(`
+    this.userUpsertStatement = this.db.prepare(`
       INSERT INTO users(user_id, username, identity_public_key, updated_at, json_value)
       VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        username=excluded.username,
+        identity_public_key=excluded.identity_public_key,
+        updated_at=excluded.updated_at,
+        json_value=excluded.json_value
     `);
-    this.sessionInsertStatement = this.db.prepare(`
+    this.sessionUpsertStatement = this.db.prepare(`
       INSERT INTO sessions(session_hash, user_id, device_id, expires_at_ms, json_value)
       VALUES(?, ?, ?, ?, ?)
-    `);
-    this.conversationInsertStatement = this.db.prepare(`
-      INSERT INTO conversations(conversation_id, conversation_type, updated_at, json_value)
-      VALUES(?, ?, ?, ?)
+      ON CONFLICT(session_hash) DO UPDATE SET
+        user_id=excluded.user_id,
+        device_id=excluded.device_id,
+        expires_at_ms=excluded.expires_at_ms,
+        json_value=excluded.json_value
     `);
     this.conversationUpsertStatement = this.db.prepare(`
       INSERT INTO conversations(conversation_id, conversation_type, updated_at, json_value)
@@ -155,10 +169,20 @@ export class SqliteStateStore {
         updated_at=excluded.updated_at,
         json_value=excluded.json_value
     `);
-    this.invitationInsertStatement = this.db.prepare(`
+    this.invitationUpsertStatement = this.db.prepare(`
       INSERT INTO invitations(invite_id, token_hash, expires_at, used_at, json_value)
       VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(invite_id) DO UPDATE SET
+        token_hash=excluded.token_hash,
+        expires_at=excluded.expires_at,
+        used_at=excluded.used_at,
+        json_value=excluded.json_value
     `);
+    this.deleteSessionStatement = this.db.prepare('DELETE FROM sessions WHERE session_hash = ?');
+    this.deleteInvitationStatement = this.db.prepare('DELETE FROM invitations WHERE invite_id = ?');
+    this.invitationByTokenHashStatement = this.db.prepare(
+      'SELECT invite_id, json_value FROM invitations WHERE token_hash = ?'
+    );
   }
 
   ensureColumn(table, column, type) {
@@ -201,24 +225,14 @@ export class SqliteStateStore {
       if (!deleteStatement) throw new Error(`Nieznany typ encji: ${kind}`);
       deleteStatement.run();
       for (const [entityId, value] of Object.entries(values || {})) {
-        const json = JSON.stringify(value);
         if (kind === 'users') {
-          this.userInsertStatement.run(
-            entityId, value.username, value.identityPublicKey,
-            value.updatedAt || new Date().toISOString(), json
-          );
+          this.upsertUser(entityId, value);
         } else if (kind === 'sessions') {
-          this.sessionInsertStatement.run(
-            entityId, value.userId, value.deviceId, value.expiresAtMs, json
-          );
+          this.upsertSession(entityId, value);
         } else if (kind === 'conversations') {
-          this.conversationInsertStatement.run(
-            entityId, value.type || 'direct', value.updatedAt || new Date().toISOString(), json
-          );
+          this.upsertConversation(entityId, value);
         } else if (kind === 'invitations') {
-          this.invitationInsertStatement.run(
-            entityId, value.tokenHash, value.expiresAt, value.usedAt || null, json
-          );
+          this.upsertInvite(entityId, value);
         }
       }
     };
@@ -230,6 +244,81 @@ export class SqliteStateStore {
     try {
       replace();
       this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  upsertUser(entityId, value) {
+    this.userUpsertStatement.run(
+      entityId,
+      value.username,
+      value.identityPublicKey,
+      value.updatedAt || new Date().toISOString(),
+      JSON.stringify(value)
+    );
+  }
+
+  upsertSession(entityId, value) {
+    this.sessionUpsertStatement.run(
+      entityId,
+      value.userId,
+      value.deviceId,
+      value.expiresAtMs,
+      JSON.stringify(value)
+    );
+  }
+
+  deleteSession(entityId) {
+    this.deleteSessionStatement.run(entityId);
+  }
+
+  upsertConversation(entityId, value) {
+    this.conversationUpsertStatement.run(
+      entityId,
+      value.type || 'direct',
+      value.updatedAt || new Date().toISOString(),
+      JSON.stringify(value)
+    );
+  }
+
+  upsertInvite(entityId, value) {
+    this.invitationUpsertStatement.run(
+      entityId,
+      value.tokenHash,
+      value.expiresAt,
+      value.usedAt || null,
+      JSON.stringify(value)
+    );
+  }
+
+  deleteInvite(entityId) {
+    this.deleteInvitationStatement.run(entityId);
+  }
+
+  consumeInviteAtomically(hash, username, nowMs = Date.now()) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.invitationByTokenHashStatement.get(hash);
+      if (!row) {
+        this.db.exec('COMMIT');
+        return null;
+      }
+      const invite = JSON.parse(row.json_value);
+      const uses = Number.isInteger(invite.uses) ? invite.uses : 0;
+      const maxUses = Number.isInteger(invite.maxUses) ? invite.maxUses : 1;
+      if (Date.parse(invite.expiresAt) <= nowMs ||
+          uses >= maxUses ||
+          (invite.restrictedUsername && invite.restrictedUsername !== username)) {
+        this.db.exec('COMMIT');
+        return null;
+      }
+      invite.uses = uses + 1;
+      invite.usedAt = new Date(nowMs).toISOString();
+      this.upsertInvite(row.invite_id, invite);
+      this.db.exec('COMMIT');
+      return invite;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -259,17 +348,38 @@ export class SqliteStateStore {
     );
   }
 
-  appendMessageAndUpdateConversation(message, conversation) {
+  appendMessageAndUpdateConversation(message, conversation, streamCheck = {}) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const {
+        previousMessageHash,
+        genesisHash,
+        streamConflictMessage = 'Licznik lub previousMessageHash nie kontynuuje lancucha urzadzenia.'
+      } = streamCheck;
+      if (Number.isInteger(message.messageCounter) &&
+          message.senderUserId &&
+          message.senderDeviceId &&
+          typeof previousMessageHash === 'string') {
+        const streamHead = this.streamHead(
+          message.conversationId,
+          message.senderUserId,
+          message.senderDeviceId
+        );
+        const ok = streamHead
+          ? message.messageCounter === streamHead.message_counter + 1 &&
+            previousMessageHash === streamHead.payload_hash
+          : message.messageCounter === 1 && previousMessageHash === genesisHash;
+        if (!ok) {
+          const error = new Error(streamConflictMessage);
+          error.code = 'MESSAGE_STREAM_CONFLICT';
+          throw error;
+        }
+      }
+      message.seq = this.nextMessageSequence(message.conversationId);
       this.appendMessage(message);
-      this.conversationUpsertStatement.run(
-        conversation.conversationId,
-        conversation.type || 'direct',
-        conversation.updatedAt || new Date().toISOString(),
-        JSON.stringify(conversation)
-      );
+      this.upsertConversation(conversation.conversationId, conversation);
       this.db.exec('COMMIT');
+      return message;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
@@ -298,6 +408,21 @@ export class SqliteStateStore {
 
   dailyAccountBytes(userId, sinceIso) {
     return this.dailyAccountBytesStatement.get(userId, sinceIso).bytes;
+  }
+
+  backupTo(targetFile) {
+    const resolved = path.resolve(targetFile);
+    if (resolved === this.dbFile) {
+      throw new Error('Plik backupu nie moze byc aktywna baza SQLite.');
+    }
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+    this.db.exec(`VACUUM INTO ${sqlStringLiteral(resolved)}`);
+  }
+
+  integrityCheck() {
+    return this.db.prepare('PRAGMA integrity_check').all()
+      .map((row) => row.integrity_check);
   }
 
   streamHead(conversationId, senderUserId, senderDeviceId) {
