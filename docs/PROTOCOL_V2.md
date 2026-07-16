@@ -80,7 +80,31 @@ The login challenge signature binds `protocol`, `serverOrigin`, `userId`,
 `deviceId`, `challenge`, `issuedAtMs` and `expiresAtMs`. This prevents replay
 of a valid challenge signature across server origins or stale login attempts.
 Before authentication, WebSocket connections are bounded by global, per-IP,
-per-window and timeout limits.
+per-window and timeout limits. The same pre-auth slot is acquired before the
+HTTP upgrade, so overloaded handshakes can fail before a WebSocket object is
+created.
+
+## Key transparency
+
+The server maintains a local append-only key-transparency log for public account
+key bundles. Each entry records the account identity key, X25519 agreement key,
+signature binding, device-list hash and rotation/device epochs. Entries form a
+canonical SHA-256 hash chain:
+
+```text
+root[i] = SHA256(canonical({
+  protocol: "secure-chat/key-transparency-root/v1",
+  previousRootHash: root[i-1],
+  leafHash,
+  index
+}))
+```
+
+Clients fetch `/v2/key-transparency`, verify every returned leaf/root link and
+compare the latest statement for the contact with the directory response before
+starting a new conversation. This is a self-hosted consistency mechanism, not a
+claim of global key transparency: external witnesses, gossip and public
+inclusion/consistency proofs remain future work.
 
 Vault secrets and new account exports use Argon2id with parameters stored next
 to the ciphertext. Legacy PBKDF2 vaults/exports are read only for automatic
@@ -90,11 +114,11 @@ instance bytes and reserve minimum free disk space.
 ## Security boundary and non-goals
 
 The server sees account, membership, timing, size and IP metadata. Protocol v2
-does not provide Double Ratchet/PQXDH, post-compromise security, key
-transparency, metadata anonymity, OPAQUE or malicious-server equivocation
-resistance. Until reviewed implementations of those properties exist, the
-product remains an alpha and must not be described as suitable for high-risk
-users.
+does not provide Double Ratchet/PQXDH, post-compromise security, metadata
+anonymity, OPAQUE or malicious-server equivocation resistance beyond the local
+key-transparency hash chain. Until reviewed implementations of those properties
+exist, the product remains an alpha and must not be described as suitable for
+high-risk users.
 
 ## Capability gate
 

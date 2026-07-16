@@ -746,7 +746,86 @@ class AppState extends ChangeNotifier {
         'Podpis klucza uzytkownika ${user.displayName} jest niepoprawny. Nie rozpoczynam rozmowy.',
       );
     }
+    await _assertCloudUserKeyTransparency(user);
     await _verifiedCloudUserDeviceList(user);
+  }
+
+  String _sha256CanonicalHex(Object? value) =>
+      crypto_hash.sha256.convert(canonicalJsonBytes(value)).toString();
+
+  Future<void> _assertCloudUserKeyTransparency(CloudPublicUser user) async {
+    final client = _cloudClient;
+    final session = _cloudSession;
+    if (client == null || session == null) return;
+    final transparency = await client.keyTransparency(userId: user.userId);
+    if (requiredString(transparency, 'logId') !=
+        'secure-chat-local-key-transparency-v1') {
+      throw StateError('Nieznany log key transparency.');
+    }
+    final entriesRaw = transparency['entries'];
+    if (entriesRaw is! List || entriesRaw.isEmpty) {
+      throw StateError('Brak wpisu key transparency dla ${user.displayName}.');
+    }
+    var previousRootHash = '0'.padRight(64, '0');
+    Map<String, dynamic>? latestStatement;
+    for (final rawEntry in entriesRaw) {
+      final entry = asStringKeyMap(rawEntry, 'keyTransparencyEntry');
+      final index = requiredInt(entry, 'entryIndex');
+      final eventType = requiredString(entry, 'eventType');
+      if (requiredString(entry, 'previousRootHash') != previousRootHash) {
+        throw StateError('Log key transparency ma przerwany lancuch hashy.');
+      }
+      final statement = asStringKeyMap(entry['statement'], 'ktStatement');
+      final statementHash = _sha256CanonicalHex(statement);
+      if (requiredString(entry, 'statementHash') != statementHash) {
+        throw StateError('Wpis key transparency ma niepoprawny hash danych.');
+      }
+      final leafHash = _sha256CanonicalHex({
+        'v': 1,
+        'protocol': 'secure-chat/key-transparency-leaf/v1',
+        'logId': 'secure-chat-local-key-transparency-v1',
+        'index': index,
+        'eventType': eventType,
+        'statement': statement,
+      });
+      if (requiredString(entry, 'leafHash') != leafHash) {
+        throw StateError('Wpis key transparency ma niepoprawny hash liscia.');
+      }
+      final rootHash = _sha256CanonicalHex({
+        'v': 1,
+        'protocol': 'secure-chat/key-transparency-root/v1',
+        'logId': 'secure-chat-local-key-transparency-v1',
+        'previousRootHash': previousRootHash,
+        'leafHash': leafHash,
+        'index': index,
+      });
+      if (requiredString(entry, 'rootHash') != rootHash) {
+        throw StateError('Wpis key transparency ma niepoprawny root hash.');
+      }
+      previousRootHash = rootHash;
+      if (entry['userId'] == user.userId) latestStatement = statement;
+    }
+    if (requiredString(transparency, 'rootHash') != previousRootHash) {
+      throw StateError(
+        'Root hash key transparency nie zgadza sie z lancuchem.',
+      );
+    }
+    if (latestStatement == null) {
+      throw StateError('Log key transparency nie zawiera tego uzytkownika.');
+    }
+    final origin = _cloudSignatureOrigin(session.serverUrl);
+    if (latestStatement['userId'] != user.userId ||
+        latestStatement['username'] != user.username ||
+        latestStatement['serverOrigin'] != origin ||
+        latestStatement['identityPublicKey'] != user.identityPublicKey ||
+        latestStatement['keyAgreementPublicKey'] !=
+            user.keyAgreementPublicKey ||
+        latestStatement['keyAgreementPublicKeySignature'] !=
+            user.keyAgreementPublicKeySignature) {
+      throw StateError(
+        'Klucze ${user.displayName} nie zgadzaja sie z logiem key transparency.',
+      );
+    }
   }
 
   Future<CloudDeviceList?> _verifiedCloudUserDeviceList(

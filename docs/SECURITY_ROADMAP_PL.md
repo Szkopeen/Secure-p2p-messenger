@@ -165,23 +165,23 @@ kontrolowana migracje vaultu na osobny sekret przed dopuszczeniem uzytkownikow.
 1. Brak OPAQUE lub rownowaznego protokolu logowania bez ujawniania hasla
    aplikacyjnego serwerowi. Tego nie wolno zastapic wlasnym, nieaudytowanym
    PAKE.
-2. Pierwsze dodanie kontaktu nadal ufa tozsamosci dostarczonej przez serwer,
-   dopoki uzytkownicy nie porownaja safety number poza serwerem.
-3. Brak publicznego key transparency logu.
-4. Bez key transparency zlosliwy serwer nadal moze probowac rozdzielic rozne
-   pierwsze galezie rotacji miedzy grupy kontaktow, zanim zobacza one wspolny
-   lancuch.
+2. Key transparency istnieje jako lokalny append-only hash-chain log serwera,
+   a klient weryfikuje lancuch i ostatni statement kluczy przed rozmowa.
+   Nadal brakuje zewnetrznych witnessow, publicznego gossip/audytu i dowodow
+   spojnosc drzewa poza jedna self-hosted instancja.
+3. Pierwsze dodanie kontaktu nadal wymaga zaufania do tej instancji do czasu
+   porownania safety number albo audytu wspolnego root hasha logu poza serwerem.
 5. Prywatny klucz tozsamosci konta nadal jest eksportowalny do kazdego
    odblokowanego urzadzenia przez vault. Kompromitacja takiego urzadzenia moze
    oznaczac kompromitacje tozsamosci calego konta.
 6. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
 7. Rekey po uniewaznieniu obejmuje aktywne rozmowy 1:1; grupy sa wylaczone do
    czasu wdrozenia bezpiecznego protokolu grupowego.
-8. Brak Double Ratchet/PQXDH, czyli brak pelnego forward secrecy i
+7. Brak Double Ratchet/PQXDH, czyli brak pelnego forward secrecy i
    post-compromise security porownywalnego z Signalem.
-9. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
+8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
-10. SQLite jest odpowiedni dla malej self-hosted instancji, ale duza publiczna
+9. SQLite jest odpowiedni dla malej self-hosted instancji, ale duza publiczna
    usluga wymaga osobnego planu obciazeniowego i prawdopodobnie migracji do
    PostgreSQL albo osobnego workera storage.
 
@@ -189,9 +189,8 @@ kontrolowana migracje vaultu na osobny sekret przed dopuszczeniem uzytkownikow.
 
 1. Wdrozyc sprawdzona biblioteke OPAQUE albo inny audytowany PAKE, w ktorym
    serwer nie otrzymuje sekretu pozwalajacego odszyfrowac vault.
-2. Dodac publicznie weryfikowalny key transparency log dla publicznych
-   tozsamosci Ed25519, z klientem weryfikujacym dowody inkluzji i spojnosc
-   drzewa.
+2. Rozszerzyc lokalny key transparency log o zewnetrzne witnessy, gossip root
+   hashy i dowody inkluzji/spojnosci publikowane poza glownym serwerem.
 3. Rozszerzyc rekey po uniewaznieniu na przyszly bezpieczny protokol grupowy.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.

@@ -286,6 +286,17 @@ class CloudApiClient {
     return CloudPublicUser.fromJson(asStringKeyMap(raw['user'], 'user'));
   }
 
+  Future<Map<String, dynamic>> keyTransparency({
+    required String userId,
+    int after = 0,
+  }) async {
+    final raw = await _get('/v2/key-transparency', {
+      'userId': userId,
+      'after': after.toString(),
+    });
+    return asStringKeyMap(raw['transparency'], 'transparency');
+  }
+
   Future<List<CloudConversation>> conversations() async {
     final raw = await _get('/v2/conversations');
     final items = raw['conversations'] as List? ?? const [];

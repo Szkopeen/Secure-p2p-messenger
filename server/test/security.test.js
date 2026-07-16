@@ -102,7 +102,7 @@ function signedProtocolFixture() {
   const user = {
     userId,
     identityPublicKey: rawPublicKey(identity.publicKey),
-    keyAgreementPublicKey: 'agreement-key',
+    keyAgreementPublicKey: 'agreement-key-public',
     deviceList: {
       v: 1,
       accountId: userId,
@@ -168,7 +168,9 @@ function signedMemberKeyEnvelope({
   identity,
   conversationId = 'conversation-1',
   keyEpoch = 1,
-  recipientUserId = auth.user.userId
+  recipientUserId = auth.user.userId,
+  recipientPublicKey = auth.user.keyAgreementPublicKey,
+  legacy = false
 }) {
   const unsigned = {
     v: 1,
@@ -181,6 +183,10 @@ function signedMemberKeyEnvelope({
     recipientUserId,
     senderPublicKey: auth.user.keyAgreementPublicKey,
     senderIdentityPublicKey: auth.user.identityPublicKey,
+    ...(legacy ? {} : {
+      recipientPublicKey,
+      keyWrapAadVersion: 2
+    }),
     nonce: `nonce-${keyEpoch}`,
     ciphertext: `ciphertext-${keyEpoch}`,
     mac: `mac-${keyEpoch}`
@@ -445,6 +451,36 @@ test('ticket WebSocket jest jednorazowy, a revoke zamyka aktywny socket', () => 
   assert.equal(socket.closed, true);
 });
 
+test('key transparency zapisuje append-only lancuch zmian kluczy', async () => {
+  const { dataDir, store, user } = fixture();
+  const first = store.appendKeyTransparencyEntry(user, 'register');
+  assert.ok(first);
+  user.keyAgreementPublicKey = 'y'.repeat(32);
+  user.keyAgreementPublicKeySignature = 'z'.repeat(32);
+  user.updatedAt = new Date(Date.now() + 1000).toISOString();
+  store.persistUser(user);
+  const second = store.appendKeyTransparencyEntry(user, 'key_update');
+  assert.ok(second);
+  assert.equal(second.previousRootHash, first.rootHash);
+  assert.notEqual(second.rootHash, first.rootHash);
+
+  const session = store.createSession(user, crypto.randomUUID(), 'test');
+  const response = await httpRequest(store, 'GET', `/v2/key-transparency?userId=${user.userId}`);
+  const denied = await httpRequest(store, 'GET', `/v2/key-transparency?userId=${user.userId}`);
+  assert.equal(denied.status, 401);
+  const authenticated = await httpRequest(store, 'GET', `/v2/key-transparency?userId=${user.userId}`, {
+    token: session.token
+  });
+  assert.equal(response.status, 401);
+  assert.equal(authenticated.status, 200);
+  assert.equal(authenticated.body.transparency.entries.length, 2);
+  assert.equal(authenticated.body.transparency.entries[1].previousRootHash, first.rootHash);
+
+  const reopened = new V2Store({ dataDir });
+  const replayed = reopened.keyTransparencyForUser(user.userId);
+  assert.equal(replayed.entries.length, 2);
+});
+
 test('limiter pre-auth WebSocket blokuje nadmiar globalnie, per IP i per okno', () => {
   security.resetWsPreAuthLimits();
   const limits = {
@@ -477,6 +513,26 @@ test('limiter pre-auth WebSocket blokuje nadmiar globalnie, per IP i per okno', 
       maxPerIp: 10
     }), null);
     second.release();
+
+    security.resetWsPreAuthLimits();
+    const cappedLimits = {
+      maxGlobal: 10,
+      maxPerIp: 1,
+      maxPerWindow: 10,
+      windowMs: 60 * 1000,
+      timeoutMs: 5000,
+      maxUniqueIps: 2
+    };
+    const cappedFirst = security.acquireWsPreAuthSlot(authReq('198.51.100.1'), cappedLimits);
+    assert.ok(cappedFirst);
+    const cappedSecond = security.acquireWsPreAuthSlot(authReq('198.51.100.2'), cappedLimits);
+    assert.ok(cappedSecond);
+    assert.equal(security.acquireWsPreAuthSlot(authReq('198.51.100.3'), cappedLimits), null);
+    cappedFirst.release();
+    const cappedThird = security.acquireWsPreAuthSlot(authReq('198.51.100.3'), cappedLimits);
+    assert.ok(cappedThird);
+    cappedThird.release();
+    cappedSecond.release();
   } finally {
     security.resetWsPreAuthLimits();
   }
@@ -633,6 +689,12 @@ test('memberKeys wymagaja kluczy konta i poprawnego podpisu', () => {
     [auth.user.userId],
     auth
   ), /podpis|kluczy/);
+  const legacyEnvelope = signedMemberKeyEnvelope({ auth, identity, legacy: true });
+  assert.match(security.validateMemberKeys(
+    { [auth.user.userId]: legacyEnvelope },
+    [auth.user.userId],
+    auth
+  ), /AAD v2/);
 });
 
 test('rotacja klucza rozmowy podbija epoke i odrzuca stare wiadomosci', async () => {

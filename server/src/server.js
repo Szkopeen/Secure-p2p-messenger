@@ -11,6 +11,7 @@ import {
   handleV2Http,
   handleV2WebSocket,
   kdfMetrics,
+  securityTestInternals as security,
   storageMetrics
 } from './v2Store.js';
 import { SafeUpdateFileError, safeOpenUpdateFile } from './updateFiles.js';
@@ -184,6 +185,26 @@ const wss = new WebSocketServer({
   perMessageDeflate: false
 });
 
+function wsPreAuthLimits() {
+  return {
+    timeoutMs: config.wsPreAuthTimeoutMs,
+    maxGlobal: config.wsPreAuthMaxGlobal,
+    maxPerIp: config.wsPreAuthMaxPerIp,
+    maxPerWindow: config.wsPreAuthMaxPerWindow,
+    windowMs: config.wsPreAuthWindowMs,
+    maxUniqueIps: config.wsPreAuthMaxUniqueIps
+  };
+}
+
+function rejectUpgrade(socket, statusCode = 503, reason = 'Service Unavailable') {
+  socket.write(
+    `HTTP/1.1 ${statusCode} ${reason}\r\n` +
+    'Connection: close\r\n' +
+    'Content-Length: 0\r\n\r\n'
+  );
+  socket.destroy();
+}
+
 httpServer.on('upgrade', (request, socket, head) => {
   request.clientIp = clientIp(request);
   let url;
@@ -197,22 +218,29 @@ httpServer.on('upgrade', (request, socket, head) => {
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit('connection', ws, request);
-  });
+  const preAuthSlot = security.acquireWsPreAuthSlot(request, wsPreAuthLimits());
+  if (!preAuthSlot) {
+    rejectUpgrade(socket, 503, 'Too Many WebSocket Handshakes');
+    return;
+  }
+  request.preAuthSlot = preAuthSlot;
+  try {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } catch (error) {
+    preAuthSlot.release();
+    socket.destroy();
+    throw error;
+  }
 });
 
 wss.on('connection', (ws, request) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
   handleV2WebSocket(v2Store, ws, request, {
-    preAuth: {
-      timeoutMs: config.wsPreAuthTimeoutMs,
-      maxGlobal: config.wsPreAuthMaxGlobal,
-      maxPerIp: config.wsPreAuthMaxPerIp,
-      maxPerWindow: config.wsPreAuthMaxPerWindow,
-      windowMs: config.wsPreAuthWindowMs
-    }
+    preAuth: wsPreAuthLimits(),
+    preAuthSlot: request.preAuthSlot
   });
 });
 

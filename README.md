@@ -139,9 +139,10 @@ Wykonane elementy zabezpieczen:
 - SQLite w trybie WAL wystarcza dla malej self-hosted instancji, ale duza
   publiczna usluga wymaga osobnego planu skalowania, testow restore i
   prawdopodobnie migracji do PostgreSQL albo wydzielonego workera storage.
-- Pierwsze dodanie kontaktu nadal wymaga zaufania do danych z serwera do czasu
-  porownania safety number poza serwerem.
-- Nie ma jeszcze publicznego key transparency logu.
+- Serwer prowadzi lokalny append-only key transparency log dla publicznych
+  bundle'i kluczy, a klient weryfikuje hash-chain i zgodnosc ostatniego wpisu
+  przed rozpoczeciem rozmowy. Nie ma jeszcze zewnetrznych witnessow ani
+  publicznego ekosystemu audytu logu.
 - Nie ma jeszcze OPAQUE ani innego protokolu logowania, ktory kryptograficznie
   ukrywa haslo logowania przed aktywnie zlosliwym serwerem.
 - Nie ma jeszcze Double Ratchet ani MLS, wiec forward secrecy i
@@ -150,7 +151,7 @@ Wykonane elementy zabezpieczen:
   Kompromitacja odblokowanego urzadzenia moze wiec oznaczac kompromitacje
   tozsamosci calego konta, dopoki nie powstanie model zatwierdzania urzadzen bez
   eksportowalnego root key na kazdym urzadzeniu.
-- Brak Double Ratchet/PQXDH, key transparency oraz OPAQUE/PAKE jest blokada dla
+- Brak Double Ratchet/PQXDH oraz OPAQUE/PAKE jest blokada dla
   scenariuszy wysokiego ryzyka. Nie wolno opisywac tej wersji jako odpornej na
   zlosliwy serwer albo porownywalnej z Signalem, dopoki te protokoly nie beda
   wdrozone i audytowane.

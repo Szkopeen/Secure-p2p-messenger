@@ -44,6 +44,7 @@ export const config = Object.freeze({
   wsPreAuthMaxPerIp: readInt('WS_PREAUTH_MAX_PER_IP', 8, 1, 1000),
   wsPreAuthMaxPerWindow: readInt('WS_PREAUTH_MAX_PER_WINDOW', 30, 1, 10000),
   wsPreAuthWindowMs: readInt('WS_PREAUTH_WINDOW_MS', 10000, 1000, 60000),
+  wsPreAuthMaxUniqueIps: readInt('WS_PREAUTH_MAX_UNIQUE_IPS', 10000, 100, 1000000),
   metricsStorageCacheSeconds: readInt('METRICS_STORAGE_CACHE_SECONDS', 15, 1, 300),
   metricsAllowedIps: readList('METRICS_ALLOWED_IPS', ['127.0.0.1', '::1', '::ffff:127.0.0.1']),
   updateManifestFile: process.env.UPDATE_MANIFEST_FILE || './updates/manifest.json',

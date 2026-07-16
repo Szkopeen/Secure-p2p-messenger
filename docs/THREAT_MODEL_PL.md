@@ -95,16 +95,19 @@ scenariuszy wysokiego ryzyka.
 ## Capability gate
 
 Ta wersja nie ma capability dla zastosowan wysokiego ryzyka. W szczegolnosci
-nie ma jeszcze audytowanego Double Ratchet/PQXDH, publicznego key transparency
-ani OPAQUE/PAKE. Do czasu wdrozenia tych protokolow produkt nalezy opisywac
-jako self-hosted komunikator dla malej, zaufanej grupy, a nie jako system
-odporny na aktywnie zlosliwy serwer albo post-compromise compromise recovery.
+nie ma jeszcze audytowanego Double Ratchet/PQXDH ani OPAQUE/PAKE. Ma lokalny
+append-only key transparency log jednej instancji, ale nie ma jeszcze
+zewnetrznych witnessow ani publicznego gossip/audytu root hashy. Do czasu
+wdrozenia tych protokolow produkt nalezy opisywac jako self-hosted komunikator
+dla malej, zaufanej grupy, a nie jako system odporny na aktywnie zlosliwy serwer
+albo post-compromise compromise recovery.
 
 ## Pozostale ryzyka do zamkniecia przed wysokim ryzykiem
 
 - Audytowana biblioteka OPAQUE albo rownowazne logowanie, w ktorym serwer nie
   otrzymuje hasla aplikacyjnego.
-- Publicznie weryfikowalny key transparency dla publicznych tozsamosci Ed25519.
+- Zewnetrzne witnessy i publiczny gossip dla key transparency publicznych
+  tozsamosci Ed25519.
 - Oddzielenie root identity key od vaultu i model zatwierdzania nowych
   urzadzen bez wspoldzielenia klucza root na wszystkie urzadzenia.
 - Audytowane X3DH/PQXDH + Double Ratchet dla rozmow 1:1.

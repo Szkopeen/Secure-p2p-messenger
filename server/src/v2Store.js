@@ -29,7 +29,8 @@ const DEFAULT_WS_PREAUTH_LIMITS = Object.freeze({
   maxGlobal: 500,
   maxPerIp: 8,
   maxPerWindow: 30,
-  windowMs: 10000
+  windowMs: 10000,
+  maxUniqueIps: 10000
 });
 const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_PAIR_MAX_ATTEMPTS = 10;
@@ -53,12 +54,16 @@ const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_ACTIVE_DEVICES = 64;
 const MAX_REVOKED_DEVICES = 512;
+const KEY_TRANSPARENCY_LOG_ID = 'secure-chat-local-key-transparency-v1';
+const KEY_TRANSPARENCY_STATE_KEY = 'key-transparency-log-v1';
+const KEY_TRANSPARENCY_GENESIS_HASH = '0'.repeat(64);
 const authIpAttempts = new Map();
 const authAccountAttempts = new Map();
 const authPairAttempts = new Map();
 const wsPreAuthByIp = new Map();
 const wsPreAuthAttempts = new Map();
 let wsPreAuthGlobal = 0;
+let wsPreAuthLastPruneMs = 0;
 const GENERIC_DEVICE_NAMES = new Set([
   'Device',
   'Windows device',
@@ -132,6 +137,44 @@ function canonicalBytes(value) {
 
 function sha256Hex(value) {
   return crypto.createHash('sha256').update(canonicalBytes(value)).digest('hex');
+}
+
+function keyTransparencyStatement(user) {
+  return {
+    v: 1,
+    protocol: 'secure-chat/key-transparency-statement/v1',
+    userId: user.userId,
+    username: user.username,
+    serverOrigin: user.serverOrigin || '',
+    identityPublicKey: user.identityPublicKey,
+    keyAgreementPublicKey: user.keyAgreementPublicKey,
+    keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature,
+    identityRotationEpoch: Number.isInteger(user.identityRotationProof?.epoch)
+      ? user.identityRotationProof.epoch
+      : 0,
+    deviceListEpoch: Number.isInteger(user.deviceList?.deviceListEpoch)
+      ? user.deviceList.deviceListEpoch
+      : 0,
+    deviceListHash: typeof user.deviceListHash === 'string'
+      ? user.deviceListHash
+      : '',
+    updatedAt: user.updatedAt || ''
+  };
+}
+
+function publicKeyTransparencyEntry(entry) {
+  return {
+    v: 1,
+    logId: KEY_TRANSPARENCY_LOG_ID,
+    treeSize: entry.index,
+    entryIndex: entry.index,
+    eventType: entry.eventType,
+    previousRootHash: entry.previousRootHash,
+    statementHash: entry.statementHash || sha256Hex(entry.statement),
+    leafHash: entry.leafHash,
+    rootHash: entry.rootHash,
+    createdAt: entry.createdAt
+  };
 }
 
 function verifyEd25519(publicKey, payload, signature) {
@@ -737,7 +780,8 @@ function normalizeWsPreAuthLimits(limits = {}) {
     maxGlobal: limits.maxGlobal ?? DEFAULT_WS_PREAUTH_LIMITS.maxGlobal,
     maxPerIp: limits.maxPerIp ?? DEFAULT_WS_PREAUTH_LIMITS.maxPerIp,
     maxPerWindow: limits.maxPerWindow ?? DEFAULT_WS_PREAUTH_LIMITS.maxPerWindow,
-    windowMs: limits.windowMs ?? DEFAULT_WS_PREAUTH_LIMITS.windowMs
+    windowMs: limits.windowMs ?? DEFAULT_WS_PREAUTH_LIMITS.windowMs,
+    maxUniqueIps: limits.maxUniqueIps ?? DEFAULT_WS_PREAUTH_LIMITS.maxUniqueIps
   };
 }
 
@@ -752,16 +796,45 @@ function pruneWsPreAuthAttempts(now, limits) {
     if (fresh.length === 0) wsPreAuthAttempts.delete(ip);
     else wsPreAuthAttempts.set(ip, fresh);
   }
+  wsPreAuthLastPruneMs = now;
+}
+
+function pruneWsPreAuthAttemptsIfNeeded(now, limits) {
+  if (now - wsPreAuthLastPruneMs >= 1000) pruneWsPreAuthAttempts(now, limits);
+}
+
+function evictOldWsPreAuthIps(limits) {
+  while (wsPreAuthAttempts.size >= limits.maxUniqueIps) {
+    let oldestIp = null;
+    let oldestTime = Infinity;
+    for (const [ip, hits] of wsPreAuthAttempts.entries()) {
+      if ((wsPreAuthByIp.get(ip) || 0) > 0) continue;
+      const first = hits[0] ?? Infinity;
+      if (first < oldestTime) {
+        oldestTime = first;
+        oldestIp = ip;
+      }
+    }
+    if (!oldestIp) break;
+    wsPreAuthAttempts.delete(oldestIp);
+  }
 }
 
 function acquireWsPreAuthSlot(request, rawLimits = {}) {
   const limits = normalizeWsPreAuthLimits(rawLimits);
   const now = Date.now();
-  pruneWsPreAuthAttempts(now, limits);
+  pruneWsPreAuthAttemptsIfNeeded(now, limits);
   const ip = wsPreAuthIp(request);
-  const hits = wsPreAuthAttempts.get(ip) || [];
+  const hits = (wsPreAuthAttempts.get(ip) || [])
+    .filter((time) => time > now - limits.windowMs);
+  if (hits.length === 0) wsPreAuthAttempts.delete(ip);
+  else wsPreAuthAttempts.set(ip, hits);
+  if (!wsPreAuthAttempts.has(ip) && wsPreAuthAttempts.size >= limits.maxUniqueIps) {
+    evictOldWsPreAuthIps(limits);
+  }
   if (wsPreAuthGlobal >= limits.maxGlobal ||
       (wsPreAuthByIp.get(ip) || 0) >= limits.maxPerIp ||
+      (!wsPreAuthAttempts.has(ip) && wsPreAuthAttempts.size >= limits.maxUniqueIps) ||
       hits.length >= limits.maxPerWindow) {
     return null;
   }
@@ -787,6 +860,7 @@ function resetWsPreAuthLimits() {
   wsPreAuthByIp.clear();
   wsPreAuthAttempts.clear();
   wsPreAuthGlobal = 0;
+  wsPreAuthLastPruneMs = 0;
 }
 
 async function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url'), params = PASSWORD_SCRYPT_PARAMS) {
@@ -865,11 +939,10 @@ function validateMemberKeys(memberKeys, memberIds, auth) {
     if (envelope.algorithm !== 'X25519-HKDF-SHA256-AES-256-GCM') {
       return 'Nieobslugiwany algorytm koperty memberKeys.';
     }
-    if (envelope.keyWrapAadVersion !== undefined &&
-        (envelope.keyWrapAadVersion !== 2 ||
+    if (envelope.keyWrapAadVersion !== 2 ||
         typeof envelope.recipientPublicKey !== 'string' ||
-        envelope.recipientPublicKey.length < 16)) {
-      return 'Koperta memberKeys ma niepoprawny kontekst AAD.';
+        envelope.recipientPublicKey.length < 16) {
+      return 'Koperta memberKeys wymaga AAD v2 i klucza odbiorcy.';
     }
     if (envelope.recipientUserId !== memberId) {
       return 'Odbiorca koperty memberKeys nie zgadza sie z kluczem mapy.';
@@ -970,8 +1043,16 @@ export class V2Store {
       this.database.replaceEntities('invitations', this.invites.invites);
       this.database.writeState('normalized-state-v1', true);
     }
+    this.keyTransparency = this.database.readState(KEY_TRANSPARENCY_STATE_KEY, {
+      v: 1,
+      logId: KEY_TRANSPARENCY_LOG_ID,
+      treeSize: 0,
+      rootHash: KEY_TRANSPARENCY_GENESIS_HASH,
+      entries: []
+    });
     this.normalizePersistedSessions();
     this.anonymizeStoredDeviceNames();
+    this.ensureKeyTransparencyForExistingUsers();
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
     this.accountQueues = new Map();
@@ -1061,6 +1142,88 @@ export class V2Store {
       }
       if (changed) this.persistUser(user);
     }
+  }
+
+  persistKeyTransparency() {
+    this.database.writeState(KEY_TRANSPARENCY_STATE_KEY, this.keyTransparency);
+  }
+
+  appendKeyTransparencyEntry(user, eventType = 'key_bundle') {
+    if (!user?.userId || !this.keyTransparency) return null;
+    const statement = keyTransparencyStatement(user);
+    const statementHash = sha256Hex(statement);
+    const previousRootHash = this.keyTransparency.rootHash || KEY_TRANSPARENCY_GENESIS_HASH;
+    const index = Number(this.keyTransparency.treeSize || 0) + 1;
+    const leafHash = sha256Hex({
+      v: 1,
+      protocol: 'secure-chat/key-transparency-leaf/v1',
+      logId: KEY_TRANSPARENCY_LOG_ID,
+      index,
+      eventType,
+      statement
+    });
+    const rootHash = sha256Hex({
+      v: 1,
+      protocol: 'secure-chat/key-transparency-root/v1',
+      logId: KEY_TRANSPARENCY_LOG_ID,
+      previousRootHash,
+      leafHash,
+      index
+    });
+    const entry = {
+      v: 1,
+      logId: KEY_TRANSPARENCY_LOG_ID,
+      index,
+      eventType,
+      userId: user.userId,
+      username: user.username,
+      statement,
+      statementHash,
+      previousRootHash,
+      leafHash,
+      rootHash,
+      createdAt: nowIso()
+    };
+    this.keyTransparency.entries.push(entry);
+    this.keyTransparency.treeSize = index;
+    this.keyTransparency.rootHash = rootHash;
+    this.persistKeyTransparency();
+    return entry;
+  }
+
+  ensureKeyTransparencyForExistingUsers() {
+    const seen = new Set((this.keyTransparency.entries || []).map((entry) =>
+      `${entry.userId}:${entry.statementHash || sha256Hex(entry.statement)}`));
+    let changed = false;
+    for (const user of Object.values(this.users.users)) {
+      const statement = keyTransparencyStatement(user);
+      const statementHash = sha256Hex(statement);
+      if (!seen.has(`${user.userId}:${statementHash}`)) {
+        this.appendKeyTransparencyEntry(user, 'snapshot');
+        changed = true;
+      }
+    }
+    if (changed) this.persistKeyTransparency();
+  }
+
+  keyTransparencyForUser(userId, after = 0) {
+    const afterIndex = Number.isFinite(after) ? after : 0;
+    const entries = (this.keyTransparency.entries || [])
+      .filter((entry) => entry.index > afterIndex)
+      .map((entry) => ({
+        ...publicKeyTransparencyEntry(entry),
+        userId: entry.userId,
+        username: entry.username,
+        statement: entry.statement
+      }));
+    return {
+      v: 1,
+      logId: KEY_TRANSPARENCY_LOG_ID,
+      subjectUserId: userId,
+      treeSize: this.keyTransparency.treeSize || 0,
+      rootHash: this.keyTransparency.rootHash || KEY_TRANSPARENCY_GENESIS_HASH,
+      entries
+    };
   }
 
   persistUser(user) {
@@ -1561,6 +1724,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         console.error(JSON.stringify({ event: 'registration_session_failed', error: String(error?.stack || error) }));
         return sendJson(res, 403, { ok: false, error: 'REGISTRATION_FAILED' });
       }
+      store.appendKeyTransparencyEntry(user, 'register');
       recordAuthSuccess(req, username);
       return sendJson(res, 200, {
         ok: true,
@@ -1631,6 +1795,22 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         deviceId: completed.deviceId,
         vaultSalt: completed.user.vaultSalt,
         encryptedVault: completed.user.encryptedVault
+      });
+    }
+
+    if (method === 'GET' && url.pathname === '/v2/key-transparency') {
+      const ktAuth = store.auth(req);
+      if (!ktAuth) return sendJson(res, 401, { ok: false, error: 'Brak logowania.' });
+      const userId = String(url.searchParams.get('userId') || '');
+      if (!SAFE_ID.test(userId)) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny identyfikator uzytkownika.' });
+      }
+      const user = store.users.users[userId];
+      if (!user) return sendJson(res, 404, { ok: false, error: 'Nie ma takiego uzytkownika.' });
+      const after = Number.parseInt(url.searchParams.get('after') || '0', 10);
+      return sendJson(res, 200, {
+        ok: true,
+        transparency: store.keyTransparencyForUser(userId, Number.isFinite(after) ? after : 0)
       });
     }
 
@@ -1826,6 +2006,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       }
       auth.user.updatedAt = nowIso();
       store.persistUser(auth.user);
+      store.appendKeyTransparencyEntry(auth.user, identityChanged ? 'identity_rotation' : 'key_update');
       if (isValidDeviceList(body.deviceList)) {
         const nowRevoked = revokedDeviceIds(auth.user);
         const newlyRevoked = Array.from(nowRevoked).filter((deviceId) => !previouslyRevoked.has(deviceId));
@@ -2072,7 +2253,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
 
 export function handleV2WebSocket(store, ws, request, options = {}) {
   const limits = normalizeWsPreAuthLimits(options.preAuth || {});
-  const preAuthSlot = acquireWsPreAuthSlot(request, limits);
+  const preAuthSlot = options.preAuthSlot || acquireWsPreAuthSlot(request, limits);
   if (!preAuthSlot) {
     ws.close(1013, 'Za duzo nieuwierzytelnionych polaczen WebSocket.');
     return;
