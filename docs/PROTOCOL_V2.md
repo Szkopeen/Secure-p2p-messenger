@@ -1,135 +1,116 @@
-# Secure-p2p-messenger protocol v2
+# Protokol v2
 
-Status: public alpha specification. This document describes the protocol that
-the client and server enforce. It is not a claim of Signal/MLS equivalence.
+Ten dokument opisuje aktualny stan protokolu aplikacji. Opis jest techniczny, ale nie zawiera prywatnych danych ani realnych adresow.
 
-## Canonical encoding
+## Cel
 
-Signed and hashed structures use UTF-8 JSON. Object keys are sorted
-lexicographically at every nesting level; array order is preserved; no
-whitespace is added. Both implementations must pass
-`test-vectors/protocol-canonical-v1.json`.
+Protokol v2 sluzy do synchronizacji self-hosted komunikatora:
 
-## Account and device trust
+- kont,
+- sesji,
+- urzadzen,
+- rozmow,
+- zaszyfrowanych wiadomosci,
+- aktualizacji klienta,
+- lokalnego logu key transparency.
 
-The account owns an Ed25519 identity key and a signed X25519 agreement key.
-Each device owns a separate Ed25519 signing key. An account identity signature
-certifies the tuple `(accountId, serverOrigin, deviceId,
-deviceSigningPublicKey, deviceEpoch, createdAt)`. A signed, monotonic device
-list binds active certificate hashes and revoked device epochs to the account.
+Serwer przechowuje zaszyfrowane payloady i metadane wymagane do synchronizacji. Tresc rozmow jest szyfrowana po stronie klienta.
 
-The server and every receiving client verify the account binding, server
-origin, certificate signature, certificate age, active device-list entry and
-revocation state. Identity-key replacement requires signatures by both the old
-and new identity keys plus a monotonic rotation hash chain.
+## Transport
 
-## Conversation keys
+- HTTP API przez HTTPS.
+- WebSocket przez WSS.
+- Serwer Node.js zwykle dziala za reverse proxy.
+- WebSocket ma limit pre-auth: globalny, per IP, per okno czasowe i per liczba unikalnych IP.
 
-`memberKeys` are X25519/HKDF/AES-256-GCM envelopes signed by the sender's
-account Ed25519 key. The signed data includes the conversation, key epoch,
-sender account and device, recipient, embedded account keys and ciphertext.
-The server binds the embedded keys to the authenticated account. The client
-unwraps only with identity and agreement keys already trusted locally.
-New envelopes set `keyWrapAadVersion = 2` and bind AES-GCM AAD to the
-conversation, key epoch, sender account, sender device, recipient account,
-sender identity key, sender agreement key and recipient agreement key. Legacy
-v1 envelopes remain readable only for migration.
+## Konta i sesje
 
-Cloud group creation and sending are disabled. They remain disabled until a
-reviewed MLS deployment or an equivalent safe membership/rekey protocol is
-available.
+Logowanie uzywa challenge-response i sesji serwerowej. Serwer przechowuje material potrzebny do weryfikacji hasla, ale aktualnie nie jest to OPAQUE/PAKE.
 
-## Messages
+Sesje maja czas zycia oraz idle timeout. WebSocket wymaga krotko zyjacego biletu wydanego po uwierzytelnieniu HTTP.
 
-New messages must use `secure-p2p-cloud-message/v1` with
-`aad.protocolVersion = 2`. The authenticated data includes conversation and
-message IDs, sender account and device, key epoch, per-device counter,
-`previousMessageHash`, content type, creation time and plaintext byte count.
-New clients set `aad.messageKeyDerivation = hkdf-sha256-message-v1` and derive
-the AES-GCM key for each message with HKDF-SHA256 from the conversation key,
-key epoch, message counter, message ID and previous message hash. This reduces
-key reuse across messages, but it is not a substitute for Double Ratchet or
-post-compromise security.
+## Urzadzenia
 
-The device signs SHA-256 of canonical JSON:
+Konto ma liste urzadzen z epokami. Aktualizacja listy wymaga:
 
-```text
-{
-  "v": 1,
-  "protocol": "secure-chat/device-message/v1",
-  "envelope": <message without deviceCertificate and deviceSignature>
-}
-```
+- certyfikatu aktualnego urzadzenia,
+- oczekiwanej epoki listy,
+- oczekiwanego hasha listy,
+- braku prob uniewaznienia aktualnie uzywanego urzadzenia.
 
-The first message of each `(conversation, sender account, sender device)`
-stream uses counter 1 and the fixed genesis hash. Later messages increment the
-counter by one and reference the SHA-256 hash of the complete previous message.
-The server rejects legacy, replayed, forked, incorrectly signed and stale-epoch
-messages before persistence. It also rejects any message whose
-`aad.conversationId` does not match the conversation ID from the request body.
-Clients repeat these checks independently.
+Zmiany kluczy konta dopisuja wpis do lokalnego logu key transparency.
 
-## Authentication and storage
+## Rozmowy i klucze
 
-Password verification uses asynchronous scrypt behind a bounded queue. A full
-session is issued only after the client decrypts its vault and signs the login
-challenge. WebSocket access uses a short-lived one-use ticket. Session tokens
-and invitation tokens are stored only as hashes.
+Rozmowa ma:
 
-The login challenge signature binds `protocol`, `serverOrigin`, `userId`,
-`deviceId`, `challenge`, `issuedAtMs` and `expiresAtMs`. This prevents replay
-of a valid challenge signature across server origins or stale login attempts.
-Before authentication, WebSocket connections are bounded by global, per-IP,
-per-window and timeout limits. The same pre-auth slot is acquired before the
-HTTP upgrade, so overloaded handshakes can fail before a WebSocket object is
-created.
+- `conversationId`,
+- liste czlonkow,
+- `keyEpoch`,
+- mape `memberKeys`.
+
+Nowe i rotowane `memberKeys` musza uzywac AAD v2. Koperta jest zwiazana z:
+
+- rozmowa,
+- nadawca,
+- urzadzeniem nadawcy,
+- odbiorca,
+- publicznym kluczem odbiorcy,
+- epoka klucza.
+
+Serwer odrzuca koperty spoza rozmowy, z niepoprawnym odbiorca, bez wymaganego kontekstu albo bez poprawnego podpisu.
+
+## Wiadomosci
+
+Wiadomosc zawiera zaszyfrowany payload klienta. AAD payloadu obejmuje kontekst rozmowy, nadawcy i epoki klucza. Serwer wymusza aktualna epoke klucza oraz limity rozmiaru.
+
+Klient utrzymuje licznik i hash-chain dla wiadomosci w rozmowie. To utrudnia ciche przestawianie lub podstawianie historii bez wykrycia po stronie klienta.
 
 ## Key transparency
 
-The server maintains a local append-only key-transparency log for public account
-key bundles. Each entry records the account identity key, X25519 agreement key,
-signature binding, device-list hash and rotation/device epochs. Entries form a
-canonical SHA-256 hash chain:
+Endpoint:
 
 ```text
-root[i] = SHA256(canonical({
-  protocol: "secure-chat/key-transparency-root/v1",
-  previousRootHash: root[i-1],
-  leafHash,
-  index
-}))
+GET /v2/key-transparency?userId=<user-id>&after=<index>
 ```
 
-Clients fetch `/v2/key-transparency`, verify every returned leaf/root link and
-compare the latest statement for the contact with the directory response before
-starting a new conversation. This is a self-hosted consistency mechanism, not a
-claim of global key transparency: external witnesses, gossip and public
-inclusion/consistency proofs remain future work.
+Zwraca lokalny append-only log zmian kluczy uzytkownika:
 
-Vault secrets and new account exports use Argon2id with parameters stored next
-to the ciphertext. Legacy PBKDF2 vaults/exports are read only for automatic
-migration. Server-side quotas limit message, conversation, account, daily and
-instance bytes and reserve minimum free disk space.
+- indeks wpisu,
+- typ zdarzenia,
+- statement kluczy,
+- hash statementu,
+- poprzedni root,
+- nowy root.
 
-## Security boundary and non-goals
+To jest lokalna przejrzystosc kluczy na self-hosted serwerze. Nie zapewnia niezaleznego, publicznego audytu bez zewnetrznych swiadkow.
 
-The server sees account, membership, timing, size and IP metadata. Protocol v2
-does not provide Double Ratchet/PQXDH, post-compromise security, metadata
-anonymity, OPAQUE or malicious-server equivocation resistance beyond the local
-key-transparency hash chain. Until reviewed implementations of those properties
-exist, the product remains an alpha and must not be described as suitable for
-high-risk users.
+## Aktualizacje
 
-## Capability gate
+Manifest aktualizacji ma wersje v2 i jest podpisany Ed25519. Klient sprawdza:
 
-The current protocol version deliberately has no high-risk capability bit. A
-release may only claim Double Ratchet/PQXDH, post-compromise security, key
-transparency or OPAQUE/PAKE after the repository contains:
+- `keyId`,
+- podpis,
+- hash artefaktu,
+- numer builda.
 
-1. a reviewed protocol document for the feature,
-2. an implementation based on an audited library or independently reviewed
-   construction,
-3. client and server tests for downgrade, rollback and equivocation cases,
-4. migration tests for existing conversations and accounts.
+Serwer serwuje manifest i pliki aktualizacji bez podazania za symlinkami.
 
-Until then, those properties are release blockers rather than marketing claims.
+## Metryki
+
+`/metrics` jest przeznaczone do administracyjnego monitoringu. Dostep zalezy od:
+
+- `TRUSTED_PROXIES`,
+- `METRICS_ALLOWED_IPS`,
+- rzeczywistego adresu klienta po uwzglednieniu zaufanego proxy.
+
+Nie nalezy wystawiac metryk publicznie.
+
+## Poza zakresem obecnej wersji
+
+- pelny Double Ratchet,
+- post-compromise security na poziomie Signal,
+- OPAQUE/PAKE,
+- zewnetrznie swiadkowane key transparency,
+- MLS dla duzych grup,
+- anonimowosc metadanych wobec operatora serwera.

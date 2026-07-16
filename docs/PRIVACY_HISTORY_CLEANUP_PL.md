@@ -1,30 +1,62 @@
-# Czyszczenie prywatnych danych z historii Gita
+# Czyszczenie historii po wycieku danych
 
-Ten playbook dotyczy sytuacji, w ktorej prywatne dane byly kiedys zapisane w
-repozytorium. Samo poprawienie README albo usuniecie pliku w najnowszym commicie
-nie usuwa danych z historii.
+Ten dokument opisuje, co zrobic, jezeli do repozytorium trafily prywatne dane, sekrety, lokalne sciezki, adresy serwera albo klucze.
 
-## Kiedy wykonac
+## Najpierw obroc sekrety
 
-- Przed upublicznieniem repozytorium.
-- Po przypadkowym commicie tokenow, adresow prywatnych, nazw hostow, sekretow
-  release albo danych osobowych.
-- Po audycie, ktory wykazal prywatne dane w historii.
+Usuniecie sekretu z pliku nie wystarcza. Jezeli sekret byl w commicie, traktuj go jako ujawniony.
 
-## Procedura
+Obroc:
 
-1. Zrob pelny backup repozytorium poza katalogiem roboczym.
-2. Spisz wszystkie sekrety, ktore mogly byc w historii.
-3. Zrotuj te sekrety przed publikacja: tokeny admina, klucze release, hasla,
-   invite tokeny, webhooki i dane reverse proxy.
-4. Uruchom `git filter-repo` albo BFG Repo-Cleaner na lokalnej kopii.
-5. Sprawdz wynik przez `git grep`, `git log -S` i reczny przeglad README/docs.
-6. Wypchnij przepisana historie przez `git push --force-with-lease`.
-7. Popros GitHuba o purge cache, jezeli dane byly publicznie dostepne.
-8. Poinformuj osoby z clone/fork, ze musza pobrac repo od nowa.
+- `ADMIN_TOKEN`,
+- hasla kont testowych,
+- prywatny klucz podpisu aktualizacji,
+- tokeny CI,
+- klucze SSH albo deploy keys,
+- prywatne adresy, jezeli nie powinny byc publiczne.
 
-## Uwagi
+## Potem wyczysc repozytorium
 
-Nie wykonuj tej procedury automatycznie w zwyklym commicie naprawczym. To
-przepisuje publiczna historie i moze zepsuc forki, pull requesty oraz lokalne
-kopie innych osob.
+1. Usun dane z aktualnych plikow.
+2. Przepisz dokumentacje na placeholdery.
+3. Sprawdz caly projekt wyszukiwaniem po znanych fragmentach sekretow.
+4. Jezeli sekret jest w historii publicznego repo, wykonaj czyszczenie historii narzedziem do rewrite historii Git.
+5. Wypchnij poprawiona historie tylko wtedy, gdy rozumiesz skutki dla innych klonow.
+
+## Co wyszukiwac
+
+Szukaj:
+
+- lokalnych sciezek systemowych,
+- nazw kont uzytkownika,
+- prawdziwych domen,
+- publicznych i prywatnych adresow IP,
+- tokenow,
+- maili,
+- kluczy PEM,
+- plikow `.env`,
+- nazw prywatnej infrastruktury.
+
+## Po czyszczeniu
+
+Wykonaj ponowny audyt:
+
+```bash
+rg -n "PRIVATE KEY|ADMIN_TOKEN|C:\\\\Users|<stary-fragment-sekretu>"
+```
+
+Dostosuj wzorce do konkretnego incydentu. Nie zapisuj prawdziwego sekretu w dokumentacji ani w publicznym issue.
+
+## Zasada na przyszlosc
+
+Dokumentacja powinna uzywac placeholderow:
+
+```text
+<domain>
+<server-ip>
+<admin-token>
+<repo-dir>
+<public-key-base64url>
+```
+
+Pliki `.env`, klucze podpisu, backupy i lokalne konfiguracje powinny byc ignorowane przez Git.

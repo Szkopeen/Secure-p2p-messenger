@@ -1,352 +1,124 @@
-# Secure Chat
+# Secure P2P Messenger
 
-Self-hosted komunikator z szyfrowaniem po stronie klienta, zaszyfrowana
-historia na serwerze i klientami dla Windows, Android oraz Linux.
+Secure P2P Messenger to self-hosted komunikator z klientem Flutter i serwerem API v2. Aktualna wersja dziala w trybie cloud relay: serwer przechowuje konta, sesje i zaszyfrowana historie, a tresc rozmow pozostaje szyfrowana po stronie klienta.
 
-Projekt zaczynal jako prywatny komunikator P2P z relayem, ale aktualny kierunek
-to prostsza i stabilniejsza wersja cloud-only: serwer przechowuje konta,
-zaszyfrowane wiadomosci, pliki i vault, a aplikacja dba o szyfrowanie,
-weryfikacje tozsamosci oraz synchronizacje wielu urzadzen.
+Repozytorium nie powinno zawierac prywatnych danych, prawdziwych domen, adresow IP, tokenow, kluczy ani lokalnych sciezek. Wszystkie przyklady ponizej uzywaja placeholderow.
 
-Najuczciwszy opis obecnej wersji:
+## Aktualny stan
 
-> Self-hosted komunikator chmurowy z szyfrowaniem tresci po stronie klienta,
-> zaszyfrowana historia na serwerze i synchronizacja wielu urzadzen,
-> przeznaczony dla malej, zaufanej grupy.
+- Klient: Flutter dla Windows, Androida i Linuxa.
+- Serwer: Node.js 24+ uruchamiany na serwerze Ubuntu.
+- Dane serwera: lokalny katalog `V2_DATA_DIR`, pliki stanu aplikacji i katalog aktualizacji.
+- Transport: HTTPS i WSS za reverse proxy.
+- Rejestracja: `disabled`, `invite` albo `open`.
+- Aktualizacje klienta: podpisany manifest Ed25519 i artefakty dla Windows, Linuxa oraz Androida.
+- Web build nie jest wspierany.
 
-To nie jest jeszcze odpowiednik Signala ani system dla scenariuszy wysokiego
-ryzyka. Szczegoly sa w [docs/SECURITY_ROADMAP_PL.md](docs/SECURITY_ROADMAP_PL.md)
-i [docs/THREAT_MODEL_PL.md](docs/THREAT_MODEL_PL.md).
+## Bezpieczenstwo w tej wersji
 
-## Status projektu
+Zaimplementowane mechanizmy:
 
-- Tryb aktywnego P2P/WebRTC zostal usuniety z klienta.
-- Web build nie jest juz zakresem projektu.
-- Obslugiwane platformy klienta: Windows, Android, Linux.
-- Backend jest lekki, oparty o Node.js i SQLite w trybie WAL.
-- Techniczna nazwa paczki Flutter nadal brzmi `secure_p2p_messenger`.
+- szyfrowanie tresci rozmow po stronie klienta,
+- koperty `memberKeys` z AAD v2 przypisanym do rozmowy, odbiorcy, epoki klucza i urzadzenia,
+- podpisy urzadzen oraz kontrola epok listy urzadzen,
+- liczniki i hash-chain dla wiadomosci w rozmowie,
+- lokalny log key transparency dostepny przez `/v2/key-transparency`,
+- oddzielne limity logowania, WebSocket pre-auth, kont, rozmow i przestrzeni dyskowej,
+- ochrona `/metrics` oparta o jawnie zaufane proxy i allowliste IP,
+- bezpieczniejsze serwowanie manifestu i plikow aktualizacji bez podazania za symlinkami,
+- lokalna blokada aplikacji PIN z utrwalaniem stanu blokady.
+
+Wazne ograniczenia:
+
+- to nie jest implementacja protokolu Signal,
+- pelny Double Ratchet i post-compromise security nie sa jeszcze zakonczone,
+- OPAQUE/PAKE nie jest jeszcze uzywany do logowania,
+- key transparency jest lokalnym logiem na self-hosted serwerze, bez zewnetrznych swiadkow,
+- PIN chroni interfejs aplikacji, a nie zastapi silnego hasla i bezpiecznego magazynu kluczy systemu.
 
 ## Struktura repozytorium
 
-- `client/` - aplikacja Flutter dla Windows, Android i Linux.
-- `server/` - serwer Node.js: konta, WebSocket, zaszyfrowana historia,
-  aktualizacje, wyszukiwanie po dokladnym loginie i API administracyjne.
-- `docs/OD_ZERA_DO_DZIALANIA_PL.md` - instalacja serwera od zera na Ubuntu/RPi.
-- `docs/DEPLOYMENT_PL.md` - wdrozenie i usluga systemd.
-- `docs/AKTUALIZACJE_PL.md` - publikowanie aktualizacji aplikacji.
-- `docs/FINALNE_BUILDY_PL.md` - komendy do tworzenia buildow.
-- `docs/RELEASE_PROCESS_PL.md` - powtarzalny, podpisany proces wydawniczy.
-- `docs/SECURITY_ROADMAP_PL.md` - aktualny model zaufania i roadmapa security.
-- `docs/THREAT_MODEL_PL.md` - pelny model zagrozen aktualnej wersji.
-- `docs/ZDALNY_DOSTEP_PI_PL.md` - zdalny dostep do Raspberry Pi poza domem.
-
-## Aktualna architektura
-
 ```text
-Klient Windows / Android / Linux
-        |
-        | HTTPS/WSS
-        v
-Caddy TLS reverse proxy
-        |
-        | localhost:8443
-        v
-Node.js Secure Chat server
-        |
-        v
-SQLite WAL w V2_DATA_DIR: konta, sesje, vaulty, rozmowy, zaproszenia,
-wiadomosci, kolejki i metadane aktualizacji
+client/   Aplikacja Flutter.
+server/   Serwer API v2, WebSocket, aktualizacje i testy bezpieczenstwa.
+docs/     Instrukcje wdrozenia, protokolu, aktualizacji i modelu zagrozen.
 ```
 
-Serwer dostarcza synchronizacje i przechowywanie, ale tresc wiadomosci oraz
-plikow jest szyfrowana po stronie klienta. Serwer widzi jednak metadane
-techniczne: konta, relacje, rozmiary pakietow, czas komunikacji i adresy IP.
-Projekt nie zapewnia anonimowosci.
-
-## Funkcje aplikacji
-
-- Rejestracja i logowanie kont.
-- Osobny sekret vaultu, oddzielony od hasla logowania.
-- Synchronizacja wielu urzadzen jednego konta.
-- Wyszukiwanie kontaktu po dokladnym loginie, bez globalnej listy kont.
-- Rozmowy 1:1; grupy sa wylaczone do czasu wdrozenia bezpiecznego protokolu
-  grupowego.
-- Wiadomosci tekstowe, wieloliniowe, odpowiedzi, edycja, reakcje i usuwanie.
-- Pliki, obrazy, audio i wideo.
-- Profilowe uzytkownika z limitem rozmiaru.
-- Lokalne powiadomienia systemowe, ograniczane gdy aplikacja jest aktywna.
-- Lokalna zaszyfrowana historia.
-- Offline delivery przez serwer.
-- Wyszukiwanie, przypiete wiadomosci i autoscroll do najnowszych wiadomosci.
-- Sprawdzanie i pobieranie aktualizacji z poziomu aplikacji.
-
-## Security progress
-
-Wykonane elementy zabezpieczen:
-
-- Tresc rozmow i plikow szyfrowana po stronie klienta.
-- Haslo konta i sekret vaultu sa rozdzielone.
-- Klient odrzuca identyczne haslo konta i sekret vaultu po podstawowej
-  normalizacji wejscia.
-- Haslo konta jest wysylane do serwera jako haslo logowania, ale tylko przez
-  HTTPS poza localhostem. Nie jest uzywane jako sekret vaultu.
-- Sekret vaultu nie jest wysylany do API.
-- Klient nie wysyla lokalnego hostname jako nazwy urzadzenia. Serwer akceptuje
-  tylko neutralne nazwy typu `Windows device`, `Linux device`, `Android device`
-  albo `Device` i anonimizuje starsze wpisy przy starcie.
-- Klient wymaga HTTPS/WSS poza localhostem.
-- WebSocket cloud uzywa krotko zyjacego, jednorazowego ticketu z `/v2/ws-ticket`.
-- Dlugotrwaly token sesji nie trafia do URL WebSocket ani do naglowkow handshake.
-- Nieuwierzytelnione polaczenia WebSocket maja twardy limit globalny, per IP,
-  limit nowych prob w oknie czasowym i krotki timeout pre-auth.
-- Kazde konto ma trwala tozsamosc Ed25519.
-- Klucz X25519 do opakowywania kluczy rozmow jest podpisany tozsamoscia
-  Ed25519.
-- Podpis bundle kluczy obejmuje UUID konta i kanoniczny origin serwera.
-- Origin serwera jest normalizowany, m.in. bez sciezki, query, fragmentu i
-  domyslnego portu.
-- Kontakty maja lokalny TOFU/pinning tozsamosci.
-- Safety number bazuje na UUID kont i kluczach Ed25519 obu stron.
-- Rotacja Ed25519 jest podpisana starym i nowym kluczem, zawiera epoch oraz hash
-  poprzedniego dowodu.
-- Nowe wiadomosci maja anty-replay: licznik, hash poprzedniej wiadomosci,
-  genesis hash i kanoniczny hash calej koperty.
-- Serwer wymaga, zeby `conversationId` w AAD wiadomosci zgadzal sie z rozmowa
-  z zadania, zanim zapisze wiadomosc.
-- Nowe wiadomosci wyprowadzaja osobny klucz AEAD przez HKDF-SHA256 z klucza
-  rozmowy, epoki, licznika, ID wiadomosci i poprzedniego hasha. To ogranicza
-  reuse klucza wiadomosci, ale nie jest pelnym Double Ratchet.
-- Wiadomosci poza kolejnoscia sa buforowane jako luka zamiast od razu blokowac
-  rozmowe.
-- Kazde urzadzenie ma lokalny klucz podpisujacy Ed25519.
-- Certyfikat urzadzenia jest podpisany tozsamoscia konta.
-- Koperty wiadomosci sa podpisywane kluczem urzadzenia.
-- Podpis urzadzenia wchodzi do hash-chain anty-replay.
-- Podpisana lista urzadzen zawiera epoch, previous hash, aktywne urzadzenia i
-  uniewaznienia.
-- Backend zapisuje liste urzadzen przez compare-and-swap na epoch/hash.
-- Uniewaznione urzadzenie traci sesje, polaczenia WebSocket i mozliwosc
-  wysylania nowych podpisanych wiadomosci.
-- Manifest aktualizacji aplikacji jest podpisywany Ed25519 i weryfikowany
-  kluczem publicznym oraz `keyId` wbudowanymi w klienta.
-- Manifest i artefakty aktualizacji sa podawane bez podazania za symlinkami i
-  po sprawdzeniu, ze finalna sciezka zostaje w katalogu aktualizacji.
-- Klient sprawdza podpisany rozmiar artefaktu, `Content-Length`, liczbe
-  odebranych bajtow i SHA-256, zapisujac najpierw do losowego pliku `.part`.
-
-## Znane ograniczenia
-
-- SQLite w trybie WAL wystarcza dla malej self-hosted instancji, ale duza
-  publiczna usluga wymaga osobnego planu skalowania, testow restore i
-  prawdopodobnie migracji do PostgreSQL albo wydzielonego workera storage.
-- Serwer prowadzi lokalny append-only key transparency log dla publicznych
-  bundle'i kluczy, a klient weryfikuje hash-chain i zgodnosc ostatniego wpisu
-  przed rozpoczeciem rozmowy. Nie ma jeszcze zewnetrznych witnessow ani
-  publicznego ekosystemu audytu logu.
-- Nie ma jeszcze OPAQUE ani innego protokolu logowania, ktory kryptograficznie
-  ukrywa haslo logowania przed aktywnie zlosliwym serwerem.
-- Nie ma jeszcze Double Ratchet ani MLS, wiec forward secrecy i
-  post-compromise security sa ograniczone.
-- Prywatny klucz tozsamosci konta nadal znajduje sie w zaszyfrowanym vaulcie.
-  Kompromitacja odblokowanego urzadzenia moze wiec oznaczac kompromitacje
-  tozsamosci calego konta, dopoki nie powstanie model zatwierdzania urzadzen bez
-  eksportowalnego root key na kazdym urzadzeniu.
-- Brak Double Ratchet/PQXDH oraz OPAQUE/PAKE jest blokada dla
-  scenariuszy wysokiego ryzyka. Nie wolno opisywac tej wersji jako odpornej na
-  zlosliwy serwer albo porownywalnej z Signalem, dopoki te protokoly nie beda
-  wdrozone i audytowane.
-- Blokada PIN chroni interfejs po powrocie do aplikacji. Nie opakowuje jeszcze
-  lokalnych kluczy dodatkowa warstwa kryptograficzna; integracja z Android
-  Keystore, biometria, DPAPI i Secret Service/KWallet pozostaje roadmapa.
-- Uniewaznienie urzadzenia blokuje nowe wiadomosci i sesje oraz rotuje klucze
-  rozmow 1:1. Grupy pozostaja wylaczone do czasu wdrozenia bezpiecznego MLS
-  albo audytowanego protokolu sender-key.
-- Kopie danych serwera zawieraja zaszyfrowane, ale wrazliwe dane uzytkownikow.
-- Projekt wymaga dalszych testow integracyjnych, migracji i audytu przed uzyciem
-  w sytuacjach wysokiego ryzyka.
-
-## Uruchomienie serwera
-
-Minimalnie:
+## Szybki start: serwer
 
 ```bash
-cd /srv/secure-chat/server
+cd server
 npm install
 cp .env.example .env
-nano .env
+npm test
 npm start
 ```
 
-Najwazniejsze zmienne:
+Minimalne ustawienia produkcyjne w `.env`:
 
-```bash
+```env
 HOST=127.0.0.1
 PORT=8443
-REGISTRATION_MODE=disabled
-ADMIN_TOKEN=losowy-token-admin-minimum-32-znaki
-SESSION_TTL_HOURS=72
-SESSION_IDLE_TTL_HOURS=24
+REGISTRATION_MODE=invite
+ADMIN_TOKEN=<losowy-sekret-minimum-32-znaki>
+TRUSTED_PROXIES=127.0.0.1,::1,::ffff:127.0.0.1
 METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
-METRICS_STORAGE_CACHE_SECONDS=15
-MAX_CONNECTIONS_PER_USER=12
-V2_DATA_DIR=/srv/secure-chat/server/data-v2
-UPDATE_MANIFEST_FILE=/srv/secure-chat/server/updates/manifest.json
-UPDATE_FILES_DIR=/srv/secure-chat/server/updates/files
+V2_DATA_DIR=/var/lib/secure-chat/data-v2
+UPDATE_MANIFEST_FILE=/var/lib/secure-chat/updates/manifest.json
+UPDATE_FILES_DIR=/var/lib/secure-chat/updates/files
 ```
 
-W normalnym wdrozeniu Node.js slucha lokalnie na `127.0.0.1:8443`, a publiczny
-TLS robi Caddy:
+Na produkcji wystaw serwer przez HTTPS/WSS z reverse proxy na serwerze Ubuntu. Szczegoly sa w [docs/DEPLOYMENT_PL.md](docs/DEPLOYMENT_PL.md).
 
-```text
-https://chat.example.com -> Caddy -> 127.0.0.1:8443
-```
-
-Diagnostyka na serwerze:
+## Szybki start: klient
 
 ```bash
-sudo systemctl status secure-p2p --no-pager
-sudo journalctl -u secure-p2p -n 100 --no-pager
-sudo systemctl status caddy --no-pager
-curl https://chat.example.com/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
-```
-
-`/healthz` jest publicznym, prostym liveness checkiem i zwraca tylko status
-OK. Szczegolowe metryki KDF i storage sa pod `/metrics`, wymagaja
-`x-admin-token`, adresu z `METRICS_ALLOWED_IPS` i cache'uja kosztowne dane
-storage.
-
-## Backup i restore SQLite
-
-Aktywne dane cloud sa w `V2_DATA_DIR`, domyslnie:
-
-```text
-/srv/secure-chat/server/data-v2/secure-chat.sqlite
-/srv/secure-chat/server/data-v2/secure-chat.sqlite-wal
-/srv/secure-chat/server/data-v2/secure-chat.sqlite-shm
-```
-
-Do kopii online uzyj skryptu serwera:
-
-```bash
-cd /srv/secure-chat/server
-npm run backup-sqlite -- --out /backup/secure-chat.sqlite
-```
-
-Do kopii offline zatrzymaj usluge, skopiuj plik `.sqlite` razem z `.sqlite-wal`
-i `.sqlite-shm`, a potem uruchom usluge ponownie. Restore wykonuj na komplecie
-plikow z tej samej chwili albo z pliku utworzonego przez `.backup`.
-
-## Build klienta
-
-Przygotowanie:
-
-```powershell
 cd client
 flutter pub get
 dart analyze
+flutter test
+flutter run -d windows
 ```
 
-Windows:
+Build z weryfikacja podpisanych aktualizacji:
 
-```powershell
-flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
+```bash
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
 ```
 
-Android:
+## Testy i formatowanie
 
-```powershell
-flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
+```bash
+cd server
+npm run check
+npm test
 ```
-
-Linux x64:
 
 ```bash
 cd client
-flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
+dart format --output=none --set-exit-if-changed lib test
+dart analyze
+flutter test
 ```
 
-W projekcie nie budujemy juz wersji webowej.
+## Dokumentacja
 
-## Test smoke przed wyslaniem testerom
+- [docs/OD_ZERA_DO_DZIALANIA_PL.md](docs/OD_ZERA_DO_DZIALANIA_PL.md) - uruchomienie od zera.
+- [docs/DEPLOYMENT_PL.md](docs/DEPLOYMENT_PL.md) - wdrozenie na serwerze Ubuntu.
+- [docs/ZDALNY_DOSTEP_UBUNTU_PL.md](docs/ZDALNY_DOSTEP_UBUNTU_PL.md) - zdalny dostep administracyjny do serwera Ubuntu.
+- [docs/PROTOCOL_V2.md](docs/PROTOCOL_V2.md) - aktualny opis protokolu v2.
+- [docs/THREAT_MODEL_PL.md](docs/THREAT_MODEL_PL.md) - model zagrozen.
+- [docs/SECURITY_ROADMAP_PL.md](docs/SECURITY_ROADMAP_PL.md) - mapa dalszych prac bezpieczenstwa.
+- [docs/AKTUALIZACJE_PL.md](docs/AKTUALIZACJE_PL.md) - podpisane aktualizacje.
+- [docs/RELEASE_PROCESS_PL.md](docs/RELEASE_PROCESS_PL.md) - proces wydania.
+- [docs/FINALNE_BUILDY_PL.md](docs/FINALNE_BUILDY_PL.md) - finalne buildy.
+- [docs/PRIVACY_HISTORY_CLEANUP_PL.md](docs/PRIVACY_HISTORY_CLEANUP_PL.md) - czyszczenie historii repo po przypadkowym wycieku danych.
 
-1. Uruchom serwer i sprawdz `/healthz`.
-2. Uruchom dwie aplikacje na dwoch kontach.
-3. Wyszukaj drugi login dokladnie i dodaj go do kontaktow.
-4. Porownaj safety number poza aplikacja.
-5. Wyslij tekst, odpowiedz, edycje, reakcje i plik.
-6. Zamknij aplikacje i sprawdz, czy historia zostala lokalnie.
-7. Zaloguj to samo konto na drugim urzadzeniu.
-8. Sprawdz, czy wiadomosci dochodza na oba urzadzenia.
-9. Wejdz w ustawienia i sprawdz liste urzadzen.
-10. Uniewaznij stare urzadzenie testowe i upewnij sie, ze nie moze wysylac
-    nowych wiadomosci.
-11. Sprawdz aktualizacje z poziomu aplikacji.
+## Zasady prywatnosci repozytorium
 
-## Aktualizacje aplikacji
-
-Serwer wystawia:
-
-```text
-/updates/manifest.json
-/updates/files/
-```
-
-Manifest musi byc podpisany Ed25519. Prywatny klucz release trzymaj poza repo i
-poza serwerem produkcyjnym. Publiczny klucz jest wbudowywany w klienta przez:
-
-```text
---dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=... --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
-```
-
-Szczegoly sa w [docs/AKTUALIZACJE_PL.md](docs/AKTUALIZACJE_PL.md) i
-[docs/RELEASE_PROCESS_PL.md](docs/RELEASE_PROCESS_PL.md).
-
-## Zdalny dostep do Raspberry Pi
-
-Najprostsza opcja na wyjazd to Tailscale: Pi i laptop lacza sie do prywatnej
-sieci WireGuard, bez wystawiania SSH na publiczny internet i bez dodatkowego
-przekierowania portow na routerze.
-
-Skrot:
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname secure-chat-server
-tailscale ip -4
-```
-
-Potem na laptopie z Tailscale:
-
-```powershell
-ssh user@TAILSCALE_IP
-```
-
-Pelna instrukcja jest w [docs/ZDALNY_DOSTEP_PI_PL.md](docs/ZDALNY_DOSTEP_PI_PL.md).
-
-## Administracja zaproszeniami
-
-Przy `REGISTRATION_MODE=invite` jednorazowe zaproszenia tworzy endpoint
-`POST /v2/admin/invites` chroniony osobnym `ADMIN_TOKEN`. Serwer zapisuje tylko
-hash tokenu, ograniczenie uzyc, termin waznosci i opcjonalny dokladny login.
-
-## Co mowic testerom
-
-Egzekwowany format podpisow, certyfikatow, licznikow i kopert kluczy opisuje
-[docs/PROTOCOL_V2.md](docs/PROTOCOL_V2.md).
-
-Mozna mowic:
-
-- To self-hosted szyfrowany komunikator dla malej grupy.
-- Wiadomosci i pliki sa szyfrowane przed wyslaniem na serwer.
-- Historia jest zaszyfrowana na serwerze i synchronizowana miedzy urzadzeniami.
-- Projekt ma juz podpisane tozsamosci, safety number, podpisy urzadzen,
-  anty-replay i podpisane aktualizacje.
-
-Nie mowic jeszcze:
-
-- Ze to odpowiednik Signal/WhatsApp pod wzgledem bezpieczenstwa.
-- Ze jest odporny na aktywnie zlosliwy lub przejety serwer.
-- Ze jest anonimowy.
-- Ze nadaje sie dla sygnalistow, prawnikow, lekarzy, finansow lub danych
-  regulowanych
+- Nie commituj `.env`, prywatnych kluczy, tokenow, prawdziwych domen ani adresow IP.
+- Nie commituj lokalnych sciezek, nazw kont systemowych ani danych autora.
+- W dokumentacji uzywaj placeholderow: `<domain>`, `<server-ip>`, `<admin-token>`, `<repo-dir>`.
+- Jezeli sekret trafil do historii Git, uznaj go za spalony i natychmiast go obroc.

@@ -1,99 +1,106 @@
-# Od zera do dzialania Secure Chat
+# Od zera do dzialania
 
-Aktualna wersja projektu dziala w trybie cloud-only. Stary tryb P2P/relay ze wspolnym sekretem zostal usuniety z aktywnej sciezki, bo pozwalal posiadaczowi wspolnego sekretu deklarowac cudza tozsamosc.
+Ten przewodnik prowadzi od pustego serwera Ubuntu do dzialajacego self-hosted komunikatora.
 
-## 1. Serwer
+## 1. Przygotuj serwer Ubuntu
 
-Na maszynie docelowej zainstaluj Node.js 20+, skopiuj katalog projektu i przejdz do serwera:
+Potrzebujesz:
 
-```bash
-cd /opt/secure-p2p/app/server
-npm install
-cp .env.example .env
-nano .env
+- dostepu SSH,
+- domeny albo prywatnego adresu dostepnego dla klientow,
+- Node.js 24+,
+- reverse proxy z TLS,
+- konta systemowego dla uslugi.
+
+Nie wpisuj prawdziwych sekretow do repozytorium. Trzymaj je w pliku env poza katalogiem projektu.
+
+## 2. Skopiuj kod
+
+Przykladowy katalog:
+
+```text
+/opt/secure-chat/app
 ```
 
-Minimalne zmienne:
+W katalogu `server` zainstaluj zaleznosci:
 
 ```bash
+npm install --omit=dev
+```
+
+Dla pierwszych testow developerskich mozna uzyc pelnego `npm install`.
+
+## 3. Utworz katalogi danych
+
+```text
+/var/lib/secure-chat/data-v2
+/var/lib/secure-chat/updates/files
+```
+
+Konto uslugi musi miec prawo zapisu do tych katalogow.
+
+## 4. Skonfiguruj serwer
+
+Utworz plik poza repozytorium, np.:
+
+```text
+/etc/secure-chat/server.env
+```
+
+Minimalna tresc:
+
+```env
 HOST=127.0.0.1
 PORT=8443
-REGISTRATION_MODE=disabled
-ADMIN_TOKEN=TU_WKLEJ_LOSOWY_SEKRET_ADMIN_MINIMUM_32_ZNAKI
+REGISTRATION_MODE=invite
+ADMIN_TOKEN=<losowy-sekret-minimum-32-znaki>
+TRUSTED_PROXIES=127.0.0.1,::1,::ffff:127.0.0.1
 METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
-SESSION_TTL_HOURS=72
-SESSION_IDLE_TTL_HOURS=24
-V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
+V2_DATA_DIR=/var/lib/secure-chat/data-v2
+UPDATE_MANIFEST_FILE=/var/lib/secure-chat/updates/manifest.json
+UPDATE_FILES_DIR=/var/lib/secure-chat/updates/files
 ```
 
-Losowy sekret administratora wygenerujesz lokalnie:
+## 5. Uruchom kontrole
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-```
-
-## 2. TLS i publiczny adres
-
-Wystaw serwer przez Caddy albo nginx. Node.js powinien zostac za reverse proxy i sluchac tylko na localhost.
-
-```text
-Klient HTTPS/WSS -> Caddy/nginx -> 127.0.0.1:8443
-```
-
-W aplikacji wpisuj adres HTTPS, np. `https://chat.twojadomena.pl`.
-
-## 3. Pierwsze konta
-
-1. Na krotki czas ustaw `REGISTRATION_MODE=open`.
-2. Uruchom serwer.
-3. Utworz pierwsze konta w aplikacji.
-4. Ustaw `REGISTRATION_MODE=disabled`.
-5. Zrestartuj usluge.
-
-Docelowo uzywaj `REGISTRATION_MODE=invite` i tworz jednorazowe zaproszenia
-przez endpoint administracyjny. `open` wlaczaj tylko na krotkie testy.
-
-## 4. Sprawdzenie
-
-```bash
-curl https://chat.twojadomena.pl/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
+cd /opt/secure-chat/app/server
 npm run check
+npm test
 ```
 
-Po stronie klienta:
+## 6. Uruchom usluge
 
-```powershell
-flutter test
-```
+Skonfiguruj systemd zgodnie z [DEPLOYMENT_PL.md](DEPLOYMENT_PL.md), a potem wystaw reverse proxy z HTTPS/WSS.
 
-Nastepnie uruchom dwa klienty, zaloguj dwa konta, wyszukaj kontakt po
-dokladnym loginie, porownaj safety number i wyslij wiadomosc testowa.
+## 7. Przygotuj klienta
 
-## 5. Backup SQLite
-
-Aktywne dane cloud sa w `V2_DATA_DIR`, zwykle:
-
-```text
-/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite
-/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite-wal
-/opt/secure-p2p/app/server/data-v2/secure-chat.sqlite-shm
-```
-
-Kopia online:
+W katalogu `client`:
 
 ```bash
-cd /opt/secure-p2p/app/server
-npm run backup-sqlite -- --out /backup/secure-chat.sqlite
+flutter pub get
+dart analyze
+flutter test
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
 ```
 
-Kopia offline: zatrzymaj usluge, skopiuj komplet `.sqlite`, `.sqlite-wal` i
-`.sqlite-shm`, a po restore przywroc komplet z tej samej chwili.
+Analogicznie zbuduj APK albo Linux release, jezeli potrzebujesz tych platform.
 
-## 6. Uwagi bezpieczenstwa
+## 8. Utworz pierwsze konto
 
-- WebSocket uzywa jednorazowego ticketu z `/v2/ws-ticket`, a nie tokenu w URL.
-- Sekret vaultu nie jest wysylany do serwera.
-- Backend uzywa SQLite WAL i per-record zapisow encji. To nadal mala
-  self-hosted instancja, nie masowa publiczna usluga.
-- Projekt nie jest odpowiednikiem Signala i nie jest przeznaczony dla scenariuszy wysokiego ryzyka.
+Najbezpieczniej ustaw `REGISTRATION_MODE=invite` i tworz konta przez zaproszenia administracyjne. `ADMIN_TOKEN` przechowuj jak sekret produkcyjny.
+
+Po utworzeniu konta:
+
+- zaloguj klienta,
+- sprawdz utworzenie rozmowy,
+- wyslij wiadomosc testowa,
+- sprawdz synchronizacje po restarcie klienta.
+
+## 9. Wlacz backup
+
+Backup musi obejmowac katalog danych, katalog aktualizacji, plik env i prywatny klucz podpisu aktualizacji. Backup powinien byc szyfrowany.
+
+## 10. Publikuj aktualizacje
+
+Korzystaj z [AKTUALIZACJE_PL.md](AKTUALIZACJE_PL.md). Nie publikuj niepodpisanych manifestow.

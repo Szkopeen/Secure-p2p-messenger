@@ -1,144 +1,79 @@
-# Secure Chat Server
+# Serwer API v2
 
-Lekki serwer Node.js dla aktualnej wersji cloud-only komunikatora Secure Chat.
+Ten katalog zawiera serwer Node.js dla Secure P2P Messenger. Serwer obsluguje konta, sesje, rozmowy, WebSocket, podpisane aktualizacje, limity bezpieczenstwa i lokalny log key transparency.
 
-- obsluguje konta i sesje,
-- przechowuje zaszyfrowane vaulty,
-- przechowuje zaszyfrowana historie rozmow i plikow,
-- udostepnia profile tylko uczestnikom wspolnych rozmow lub po dokladnym loginie,
-- przechowuje podpisane bundle kluczy, certyfikaty i listy urzadzen,
-- udostepnia podpisane aktualizacje aplikacji,
-- wystawia API administracyjne.
+## Wymagania
 
-Serwer nie powinien znac tresci rozmow, plikow ani prywatnych kluczy
-uzytkownikow. Nadal widzi jednak metadane techniczne: konta, relacje, czas,
-rozmiary pakietow i adresy IP.
-
-Dane cloud sa przechowywane w SQLite w `V2_DATA_DIR`. Baza pracuje w trybie
-WAL, wiec przy backupie offline kopiuj plik `.sqlite` razem z `.sqlite-wal` i
-`.sqlite-shm`.
+- Node.js 24 lub nowszy.
+- npm.
+- Serwer Ubuntu dla wdrozenia produkcyjnego.
+- Reverse proxy z HTTPS/WSS.
 
 ## Start lokalny
 
 ```bash
-cp .env.example .env
 npm install
+cp .env.example .env
+npm test
 npm start
 ```
 
-Wygenerowanie losowego sekretu administratora:
+Domyslnie serwer nasluchuje na `127.0.0.1:8443`. W produkcji nie wystawiaj go bezposrednio do internetu; uzyj reverse proxy.
 
-```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-```
+## Najwazniejsze zmienne
 
-Ustaw co najmniej:
-
-```bash
-REGISTRATION_MODE=disabled
-ADMIN_TOKEN=drugi-losowy-ciag-minimum-32-znaki
-SESSION_TTL_HOURS=72
-SESSION_IDLE_TTL_HOURS=24
+```env
+HOST=127.0.0.1
+PORT=8443
+REGISTRATION_MODE=invite
+ADMIN_TOKEN=<losowy-sekret-minimum-32-znaki>
+TRUSTED_PROXIES=127.0.0.1,::1,::ffff:127.0.0.1
 METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
-METRICS_STORAGE_CACHE_SECONDS=15
+V2_DATA_DIR=/var/lib/secure-chat/data-v2
+UPDATE_MANIFEST_FILE=/var/lib/secure-chat/updates/manifest.json
+UPDATE_FILES_DIR=/var/lib/secure-chat/updates/files
 ```
 
-WebSocket `/v2/ws` nie przyjmuje dlugotrwalego tokenu w URL ani w naglowku.
-Klient najpierw pobiera krotko zyjacy, jednorazowy ticket przez `/v2/ws-ticket`,
-a potem wysyla go jako pierwsza ramke WebSocket.
+`ADMIN_TOKEN` sluzy tylko do operacji administracyjnych, np. tworzenia zaproszen. Nie commituj go i nie uzywaj jako hasla konta.
 
-## Wdrozenie
+## Rejestracja
 
-W typowym wdrozeniu usluga systemd uruchamia:
+`REGISTRATION_MODE` moze miec wartosci:
+
+- `disabled` - rejestracja wylaczona,
+- `invite` - konto mozna utworzyc tylko z zaproszeniem,
+- `open` - rejestracja otwarta, przydatna tylko w testach.
+
+## Aktualizacje
+
+Serwer publikuje:
+
+- `GET /updates/manifest.json`,
+- `GET /updates/files/<plik>`.
+
+Manifest musi byc podpisany kluczem Ed25519. Prywatny klucz podpisu trzymaj poza repozytorium.
 
 ```bash
-npm start
+npm run generate-update-key -- --out ./secrets/update-signing-key.pem
+npm run publish-update -- --version 1.0.1 --build 2 --windows ./build.zip --notes "Opis zmian" --signing-key ./secrets/update-signing-key.pem --key-id <key-id>
 ```
 
-w katalogu:
-
-```text
-/srv/secure-chat/server
-```
-
-Serwer powinien sluchac lokalnie na `127.0.0.1:8443`, a publiczny ruch HTTPS/WSS
-powinien przechodzic przez Caddy.
-
-Diagnostyka:
+## Kontrole
 
 ```bash
-sudo systemctl status secure-p2p --no-pager
-sudo journalctl -u secure-p2p -n 100 --no-pager
-curl https://chat.example.com/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
+npm run check
+npm test
 ```
 
-`/healthz` zwraca tylko prosty status liveness. Szczegolowe metryki KDF i
-storage sa dostepne przez `/metrics` z naglowkiem `x-admin-token` i adresem z
-`METRICS_ALLOWED_IPS`.
+Testy obejmuja m.in. limity, walidacje kopert kluczy, WebSocket pre-auth, aktualizacje, metryki i wybrane scenariusze regresji bezpieczenstwa.
 
-## Najwazniejsze katalogi danych
+## Backup
 
-Domyslnie z `.env.example`:
+Dane produkcyjne znajduja sie w `V2_DATA_DIR` i katalogu aktualizacji. Backup powinien obejmowac:
 
-```text
-./data
-./data-v2
-./updates
-```
+- katalog danych v2,
+- katalog `updates`,
+- prywatny klucz podpisu aktualizacji,
+- konfiguracje `.env` przechowywana poza repozytorium.
 
-Na produkcyjnym serwerze zwykle:
-
-```text
-/srv/secure-chat/server/data
-/srv/secure-chat/server/data-v2
-/srv/secure-chat/server/updates
-```
-
-Aktywna baza cloud zwykle lezy tutaj:
-
-```text
-/srv/secure-chat/server/data-v2/secure-chat.sqlite
-/srv/secure-chat/server/data-v2/secure-chat.sqlite-wal
-/srv/secure-chat/server/data-v2/secure-chat.sqlite-shm
-```
-
-Te katalogi zawieraja zaszyfrowane, ale wrazliwe dane. Do kopii online uzyj:
-
-```bash
-cd /srv/secure-chat/server
-npm run backup-sqlite -- --out /backup/secure-chat.sqlite
-```
-
-Do kopii offline zatrzymaj usluge, skopiuj komplet plikow `.sqlite`,
-`.sqlite-wal` i `.sqlite-shm`, a po restore przywroc komplet z tej samej chwili.
-
-## Zaproszenia
-
-Przy `REGISTRATION_MODE=invite` administrator tworzy krotko zyjace zaproszenie
-przez uwierzytelniony endpoint. Token jest zwracany tylko raz, a w SQLite
-przechowywany jest wylacznie jego hash:
-
-```bash
-curl -X POST https://chat.example.com/v2/admin/invites \
-  -H "x-admin-token: $ADMIN_TOKEN" \
-  -H "content-type: application/json" \
-  -d '{"maxUses":1,"expiresInSeconds":86400,"restrictedUsername":"example-user"}'
-```
-
-## Aktualizacje aplikacji
-
-Manifest:
-
-```text
-/updates/manifest.json
-```
-
-Pliki:
-
-```text
-/updates/files/
-```
-
-Manifest release musi byc podpisany kluczem Ed25519. Prywatny klucz release nie
-powinien lezec w repo ani na serwerze produkcyjnym.
+Backup musi byc szyfrowany i testowany przez probne odtworzenie.

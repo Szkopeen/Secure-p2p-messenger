@@ -1,74 +1,73 @@
-# Finalne buildy aplikacji
+# Finalne buildy klienta
 
-Pelna checklista release, testy, zapis wersji narzedzi, hashe artefaktow i
-podpis manifestu sa w [RELEASE_PROCESS_PL.md](RELEASE_PROCESS_PL.md). Ten plik
-zostaje szybka sciaga komend builda.
+Ten dokument opisuje przygotowanie finalnych paczek klienta dla Windows, Androida i Linuxa.
 
-Flutter nie cross-kompiluje desktopowego Linuxa z Windowsa. Windows buduj na Windowsie, Linux na Linuxie, Android na komputerze z Android SDK.
+## Przed buildem
 
-## Windows ZIP
+1. Uruchom testy serwera.
+2. Uruchom testy klienta.
+3. Sprawdz formatowanie.
+4. Upewnij sie, ze masz publiczny klucz aktualizacji i `keyId`.
+5. Nie trzymaj prywatnego klucza podpisu w katalogu klienta.
 
-```powershell
+## Kontrole
+
+```bash
+cd server
+npm run check
+npm test
+```
+
+```bash
 cd client
-flutter clean
-flutter pub get
-flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
-Compress-Archive -Path ".\build\windows\x64\runner\Release\*" -DestinationPath "$env:USERPROFILE\Desktop\secure-p2p-windows.zip" -Force
+dart format --output=none --set-exit-if-changed lib test
+dart analyze
+flutter test
 ```
 
-## Android APK
+## Windows
 
-```powershell
+```bash
 cd client
-flutter clean
-flutter pub get
-flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
-Copy-Item ".\build\app\outputs\flutter-apk\app-release.apk" "$env:USERPROFILE\Desktop\secure-p2p-android.apk" -Force
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
 ```
 
-## Linux ZIP
+Spakuj katalog release do ZIP i nazwij plik wersja oraz platforma, np. `secure-chat-windows-1.0.1.zip`.
 
-Na Linuxie zainstaluj narzedzia:
+## Android
 
 ```bash
-sudo apt update
-sudo apt install -y \
-  clang \
-  cmake \
-  ninja-build \
-  pkg-config \
-  libgtk-3-dev \
-  libsecret-1-dev \
-  libjsoncpp-dev \
-  libsqlite3-dev \
-  libgstreamer1.0-dev \
-  libgstreamer-plugins-base1.0-dev \
-  libmpv-dev \
-  libepoxy-dev \
-  libnotify-dev \
-  zip
+cd client
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
 ```
 
-Zbuduj paczke:
+APK podpisuj zgodnie z konfiguracja lokalnego keystore. Keystore nie moze byc w repozytorium.
+
+## Linux
 
 ```bash
-cd ~/secure-p2p/client
-flutter clean
-flutter pub get
-flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
-cd build/linux/x64/release
-zip -r ~/secure-p2p-linux.zip bundle
+cd client
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=<public-key-base64url> --dart-define=SECURE_CHAT_UPDATE_KEY_ID=<key-id>
 ```
 
-## Publikacja aktualizacji na serwer
+Srodowisko budujace Linuxa musi miec zaleznosci natywne wymagane przez Fluttera i biblioteki audio/wideo, w tym GStreamer.
 
-Najpierw zwieksz `version:` w `client/pubspec.yaml`, np. `1.0.1+2`. Liczba po `+` musi rosnac.
+## Publikacja
 
-Wgraj paczki na Raspberry Pi i uruchom:
+Po zbudowaniu artefaktow opublikuj manifest:
 
 ```bash
-cd /opt/secure-p2p/app/server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --key-id primary-ed25519-v1 --notes "Nowa wersja aplikacji"
+cd server
+npm run publish-update -- --version <version> --build <build-number> --windows <windows-zip> --linux <linux-zip> --android <android-apk> --notes "Opis zmian" --signing-key <private-key-pem> --key-id <key-id>
 ```
 
-Aplikacja sprawdzi podpisany manifest, `keyId`, rozmiar i SHA-256 artefaktu przy starcie. Po pobraniu aktualizacji Windows i Linux sprobuja otworzyc pobrany plik; Android zapisze APK i system poprosi o zgode na instalacje spoza sklepu.
+Na serwerze Ubuntu manifest i pliki musza trafic do katalogow ustawionych w `UPDATE_MANIFEST_FILE` i `UPDATE_FILES_DIR`.
+
+## Lista kontrolna
+
+- Build number jest wiekszy niz w poprzednim wydaniu.
+- Manifest jest podpisany.
+- `keyId` zgadza sie z buildem klienta.
+- SHA-256 artefaktow w manifeście odpowiada plikom.
+- Klient widzi aktualizacje z testowego konta.
+- Prywatne klucze i lokalne sciezki nie trafily do commita.
