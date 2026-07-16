@@ -104,11 +104,15 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Sesje bearer maja konfigurowalny TTL i idle timeout, domyslnie 72h/24h, a
   endpoint `/v2/sessions` pozwala zobaczyc aktywne sesje.
 - Publiczny `/healthz` jest prostym liveness checkiem. Szczegoly KDF i storage
-  sa przeniesione do `/metrics`, chronione `x-admin-token` i cache'owane dla
-  kosztownych metryk storage.
+  sa przeniesione do `/metrics`, chronione `x-admin-token`, allowlista adresow
+  IP i cache'owane dla kosztownych metryk storage.
 - Katalog uzytkownikow nie zwraca juz globalnej listy. Wyszukiwanie wymaga
   dokladnego loginu, jest rate-limitowane i nie ujawnia listy urzadzen osobom
   spoza wspolnej rozmowy albo wlasnego konta.
+- Logowanie i rejestracja maja limity per IP, per konto oraz per para IP+konto
+  z krotka blokada narastajaca.
+- Klient ma prywatny ekran, natywny `FLAG_SECURE` na Androidzie i opcjonalna
+  blokade PIN po powrocie z tla.
 - Dodano skrypt `npm run backup-sqlite -- --out ...`, ktory wykonuje backup
   online przez SQLite `VACUUM INTO` i sprawdza integralnosc zrodlowej bazy oraz
   utworzonej kopii.

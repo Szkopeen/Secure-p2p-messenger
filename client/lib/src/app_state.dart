@@ -20,6 +20,7 @@ import 'models/message.dart';
 import 'models/update_info.dart';
 import 'models/user_profile.dart';
 import 'platform/media_cache.dart';
+import 'platform/screen_security.dart';
 import 'security/update_signature_verifier.dart';
 import 'services/cloud_api_client.dart';
 import 'services/desktop_notifier.dart';
@@ -27,6 +28,13 @@ import 'storage/message_archive.dart';
 import 'storage/secure_store.dart';
 
 enum _CloudReplayDecision { accept, buffer }
+
+class _AppLockConfig {
+  const _AppLockConfig({required this.salt, required this.hash});
+
+  final String salt;
+  final String hash;
+}
 
 class AppState extends ChangeNotifier {
   AppState({SecureStore? store}) : _store = store ?? SecureStore() {
@@ -58,8 +66,9 @@ class AppState extends ChangeNotifier {
   IdentityKeyMaterial? _identity;
   CloudSession? _cloudSession;
   CloudVault? _cloudVault;
-  Map<String, dynamic> _cloudVaultKdf =
-      Map<String, dynamic>.of(CloudCrypto.defaultVaultKdf);
+  Map<String, dynamic> _cloudVaultKdf = Map<String, dynamic>.of(
+    CloudCrypto.defaultVaultKdf,
+  );
   CloudDeviceKeyMaterial? _cloudDeviceKey;
   CloudDeviceList? _ownCloudDeviceList;
   CloudApiClient? _cloudClient;
@@ -77,6 +86,11 @@ class AppState extends ChangeNotifier {
   double? _updateDownloadProgress;
   String? _updateStatus;
   String? _downloadedUpdatePath;
+  bool _privacyScreenEnabled = true;
+  bool _privacyLocked = false;
+  _AppLockConfig? _appLock;
+  int _appLockFailures = 0;
+  DateTime? _appLockBlockedUntil;
 
   bool get initializing => _initializing;
   bool get hasIdentity => _identity != null;
@@ -104,6 +118,9 @@ class AppState extends ChangeNotifier {
   double? get updateDownloadProgress => _updateDownloadProgress;
   String? get updateStatus => _updateStatus;
   String? get downloadedUpdatePath => _downloadedUpdatePath;
+  bool get privacyScreenEnabled => _privacyScreenEnabled;
+  bool get privacyLocked => _privacyLocked;
+  bool get appLockEnabled => _appLock != null;
 
   List<ChatMessage> messagesFor(String contactId) {
     final items = _messages[contactId] ?? const <ChatMessage>[];
@@ -120,6 +137,79 @@ class AppState extends ChangeNotifier {
         .expand((messages) => messages)
         .where(_isUnreadIncomingMessage)
         .length;
+  }
+
+  void handleLifecycleActive(bool active) {
+    if (!active) {
+      _lockPrivacy();
+    }
+  }
+
+  Future<void> setPrivacyScreenEnabled(bool enabled) async {
+    _privacyScreenEnabled = enabled;
+    await _store.savePrivacyScreenEnabled(enabled);
+    if (!enabled && !appLockEnabled) {
+      _privacyLocked = false;
+    }
+    await _refreshScreenSecurity();
+    notifyListeners();
+  }
+
+  Future<void> enableAppLockPin(String pin, String confirmation) async {
+    final normalizedPin = _normalizePin(pin);
+    if (normalizedPin != _normalizePin(confirmation)) {
+      throw ArgumentError('PIN i powtorzenie PIN-u musza byc takie same.');
+    }
+    _validatePinFormat(normalizedPin);
+    final salt = b64(secureRandomBytes(16));
+    final hash = _hashAppLockPin(normalizedPin, salt);
+    await _store.saveAppLockPin(salt: salt, hash: hash);
+    _appLock = _AppLockConfig(salt: salt, hash: hash);
+    _appLockFailures = 0;
+    _appLockBlockedUntil = null;
+    await _refreshScreenSecurity();
+    notifyListeners();
+  }
+
+  Future<void> disableAppLockPin(String pin) async {
+    final config = _appLock;
+    if (config == null) return;
+    if (!_verifyAppLockPin(pin, config)) {
+      throw ArgumentError('Niepoprawny PIN.');
+    }
+    await _store.clearAppLockPin();
+    _appLock = null;
+    _privacyLocked = false;
+    _appLockFailures = 0;
+    _appLockBlockedUntil = null;
+    await _refreshScreenSecurity();
+    notifyListeners();
+  }
+
+  Future<void> unlockPrivacy(String pin) async {
+    final config = _appLock;
+    if (config == null) {
+      _privacyLocked = false;
+      notifyListeners();
+      return;
+    }
+    final blockedUntil = _appLockBlockedUntil;
+    final now = DateTime.now();
+    if (blockedUntil != null && now.isBefore(blockedUntil)) {
+      throw StateError('Za duzo prob. Sprobuj ponownie za chwile.');
+    }
+    if (_verifyAppLockPin(pin, config)) {
+      _privacyLocked = false;
+      _appLockFailures = 0;
+      _appLockBlockedUntil = null;
+      notifyListeners();
+      return;
+    }
+    _appLockFailures += 1;
+    if (_appLockFailures >= 5) {
+      _appLockBlockedUntil = now.add(const Duration(seconds: 30));
+    }
+    throw ArgumentError('Niepoprawny PIN.');
   }
 
   bool isContactOnline(String contactId) {
@@ -153,6 +243,9 @@ class AppState extends ChangeNotifier {
   Future<void> initialize() async {
     try {
       await _loadPackageInfo();
+      _privacyScreenEnabled = await _store.loadPrivacyScreenEnabled();
+      _appLock = _appLockFromStore(await _store.loadAppLockPin());
+      await _refreshScreenSecurity();
       await cleanupTempMediaFiles(maxAge: Duration.zero);
       _cloudSession = await _store.loadCloudSession();
       _identity = null;
@@ -1907,10 +2000,7 @@ class AppState extends ChangeNotifier {
     }
     await _sendCloudControlPayload(
       contact,
-      PlainPayload.edit(
-        targetMessageId: message.id,
-        editedText: trimmed,
-      ),
+      PlainPayload.edit(targetMessageId: message.id, editedText: trimmed),
     );
     _applyEdit(
       contact.userId,
@@ -2000,12 +2090,7 @@ class AppState extends ChangeNotifier {
             : normalizedEmoji,
       ),
     );
-    _applyReaction(
-      contact.userId,
-      message.id,
-      senderId,
-      normalizedEmoji,
-    );
+    _applyReaction(contact.userId, message.id, senderId, normalizedEmoji);
   }
 
   Future<void> setMessagePinned(
@@ -2112,6 +2197,12 @@ class AppState extends ChangeNotifier {
     _cloudUsers.clear();
     _presenceTimer?.cancel();
     _cloudConnected = false;
+    _privacyScreenEnabled = true;
+    _privacyLocked = false;
+    _appLock = null;
+    _appLockFailures = 0;
+    _appLockBlockedUntil = null;
+    await _refreshScreenSecurity();
     await _messageArchive.delete();
     _setStatus('Wyczyszczono lokalne dane.');
   }
@@ -2122,7 +2213,8 @@ class AppState extends ChangeNotifier {
       return;
     }
     throw StateError(
-        'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.');
+      'Stary transport relay zostal usuniety. Zaloguj sie do konta cloud.',
+    );
   }
 
   Future<void> _sendReceipt(
@@ -2872,6 +2964,57 @@ class AppState extends ChangeNotifier {
     final identity = _identity;
     if (identity == null) throw StateError('Brak lokalnej tozsamosci.');
     return identity;
+  }
+
+  _AppLockConfig? _appLockFromStore(Map<String, String>? raw) {
+    if (raw == null) return null;
+    final salt = raw['salt'] ?? '';
+    final hash = raw['hash'] ?? '';
+    if (salt.isEmpty || hash.isEmpty) return null;
+    return _AppLockConfig(salt: salt, hash: hash);
+  }
+
+  void _lockPrivacy() {
+    if (!_privacyScreenEnabled && !appLockEnabled) return;
+    if (_privacyLocked) return;
+    _privacyLocked = true;
+    notifyListeners();
+  }
+
+  Future<void> _refreshScreenSecurity() {
+    return ScreenSecurity.setSecureScreen(
+      _privacyScreenEnabled || appLockEnabled,
+    );
+  }
+
+  String _normalizePin(String pin) {
+    return pin.replaceAll(RegExp(r'\s+'), '');
+  }
+
+  void _validatePinFormat(String pin) {
+    if (!RegExp(r'^\d{6,12}$').hasMatch(pin)) {
+      throw ArgumentError('PIN musi miec od 6 do 12 cyfr.');
+    }
+  }
+
+  String _hashAppLockPin(String pin, String salt) {
+    return crypto_hash.sha256.convert(utf8Bytes('$salt:$pin')).toString();
+  }
+
+  bool _verifyAppLockPin(String pin, _AppLockConfig config) {
+    final normalizedPin = _normalizePin(pin);
+    final actual = _hashAppLockPin(normalizedPin, config.salt);
+    final expected = config.hash;
+    return _constantTimeEquals(actual, expected);
+  }
+
+  bool _constantTimeEquals(String left, String right) {
+    if (left.length != right.length) return false;
+    var diff = 0;
+    for (var index = 0; index < left.length; index += 1) {
+      diff |= left.codeUnitAt(index) ^ right.codeUnitAt(index);
+    }
+    return diff == 0;
   }
 
   void _setStatus(String message) {

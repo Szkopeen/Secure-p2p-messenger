@@ -9,6 +9,7 @@ HOST=127.0.0.1
 PORT=8443
 REGISTRATION_MODE=disabled
 ADMIN_TOKEN=TU_WKLEJ_LOSOWY_SEKRET_ADMIN_MINIMUM_32_ZNAKI
+METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
 SESSION_TTL_HOURS=72
 SESSION_IDLE_TTL_HOURS=24
 METRICS_STORAGE_CACHE_SECONDS=15
@@ -20,6 +21,13 @@ UPDATE_FILES_DIR=/opt/secure-p2p/app/server/updates/files
 ```
 
 `REGISTRATION_MODE=open` wlaczaj tylko na czas kontrolowanego tworzenia kont. Po utworzeniu kont testowych lub produkcyjnych wroc do `disabled`.
+`MAX_PAYLOAD_BYTES` ogranicza pojedyncza ramke WebSocket. Serwer akceptuje
+wartosci do 16 MiB dla zgodnosci z istniejacymi wdrozeniami, ale nowe
+instancje moga zostawic bezpieczniejsze domyslne `65536`.
+`/metrics` wymaga jednoczesnie `x-admin-token` oraz adresu z
+`METRICS_ALLOWED_IPS`. Dla publicznego reverse proxy trzymaj metryki na
+localhost, Tailscale albo innej sieci administracyjnej; nie wystawiaj ich jako
+zwyklego publicznego endpointu.
 
 ## Reverse proxy
 
@@ -63,11 +71,11 @@ sudo systemctl status secure-p2p --no-pager
 sudo journalctl -u secure-p2p -n 100 --no-pager
 sudo systemctl status caddy --no-pager
 curl https://chat.twojadomena.pl/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.twojadomena.pl/metrics
+curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
 ```
 
 `/healthz` jest publiczne i zwraca tylko prosty status OK. Szczegoly KDF i
-storage sa pod `/metrics`, chronione `x-admin-token`.
+storage sa pod `/metrics`, chronione `x-admin-token` i allowlista adresow IP.
 
 ## Backup SQLite
 

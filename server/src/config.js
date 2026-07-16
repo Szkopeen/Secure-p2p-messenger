@@ -22,11 +22,13 @@ function readList(name, fallback = []) {
   return raw.split(',').map((value) => value.trim()).filter(Boolean);
 }
 
+const MAX_WEBSOCKET_PAYLOAD_BYTES = 16 * 1024 * 1024;
+
 export const config = Object.freeze({
   host: process.env.HOST || '127.0.0.1',
   port: readInt('PORT', 8443, 1, 65535),
   adminToken: process.env.ADMIN_TOKEN || '',
-  maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', 64 * 1024, 1024, 1024 * 1024),
+  maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', 64 * 1024, 1024, MAX_WEBSOCKET_PAYLOAD_BYTES),
   v2DataDir: process.env.V2_DATA_DIR || './data-v2',
   messageMaxBytes: readInt('MESSAGE_MAX_BYTES', 128 * 1024, 16 * 1024, 1024 * 1024),
   messagesPerConversation: readInt('MESSAGES_PER_CONVERSATION', 50_000, 100, 1_000_000),
@@ -38,6 +40,7 @@ export const config = Object.freeze({
   sessionTtlHours: readInt('SESSION_TTL_HOURS', 72, 1, 24 * 30),
   sessionIdleTtlHours: readInt('SESSION_IDLE_TTL_HOURS', 24, 1, 24 * 30),
   metricsStorageCacheSeconds: readInt('METRICS_STORAGE_CACHE_SECONDS', 15, 1, 300),
+  metricsAllowedIps: readList('METRICS_ALLOWED_IPS', ['127.0.0.1', '::1', '::ffff:127.0.0.1']),
   updateManifestFile: process.env.UPDATE_MANIFEST_FILE || './updates/manifest.json',
   updateFilesDir: process.env.UPDATE_FILES_DIR || './updates/files',
   trustedProxies: readList('TRUSTED_PROXIES', ['127.0.0.1', '::1', '::ffff:127.0.0.1']),

@@ -158,6 +158,7 @@ REGISTRATION_MODE=disabled
 ADMIN_TOKEN=losowy-token-admin-minimum-32-znaki
 SESSION_TTL_HOURS=72
 SESSION_IDLE_TTL_HOURS=24
+METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
 METRICS_STORAGE_CACHE_SECONDS=15
 MAX_CONNECTIONS_PER_USER=12
 V2_DATA_DIR=/srv/secure-chat/server/data-v2
@@ -179,12 +180,13 @@ sudo systemctl status secure-p2p --no-pager
 sudo journalctl -u secure-p2p -n 100 --no-pager
 sudo systemctl status caddy --no-pager
 curl https://chat.example.com/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.example.com/metrics
+curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
 ```
 
 `/healthz` jest publicznym, prostym liveness checkiem i zwraca tylko status
 OK. Szczegolowe metryki KDF i storage sa pod `/metrics`, wymagaja
-`x-admin-token` i cache'uja kosztowne dane storage.
+`x-admin-token`, adresu z `METRICS_ALLOWED_IPS` i cache'uja kosztowne dane
+storage.
 
 ## Backup i restore SQLite
 

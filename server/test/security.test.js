@@ -45,6 +45,19 @@ function sha256Canonical(value) {
     .digest('hex');
 }
 
+function authReq(ip) {
+  return {
+    clientIp: ip,
+    socket: { remoteAddress: ip }
+  };
+}
+
+async function importFreshConfig() {
+  const url = new URL('../src/config.js', import.meta.url);
+  url.search = crypto.randomUUID();
+  return import(url.href);
+}
+
 function signedProtocolFixture() {
   const identity = crypto.generateKeyPairSync('ed25519');
   const device = crypto.generateKeyPairSync('ed25519');
@@ -204,6 +217,75 @@ test('wektor klient-serwer ma identyczny canonical JSON i SHA-256', () => {
   ));
   assert.equal(security.canonicalJson(vector.value), vector.canonical);
   assert.equal(sha256Canonical(vector.value), vector.sha256);
+});
+
+test('konfiguracja akceptuje produkcyjny limit WebSocket 16 MiB', async () => {
+  const previousPayload = process.env.MAX_PAYLOAD_BYTES;
+  const previousAdmin = process.env.ADMIN_TOKEN;
+  try {
+    process.env.MAX_PAYLOAD_BYTES = String(16 * 1024 * 1024);
+    process.env.ADMIN_TOKEN = '';
+    const { config } = await importFreshConfig();
+    assert.equal(config.maxPayloadBytes, 16 * 1024 * 1024);
+  } finally {
+    if (previousPayload === undefined) delete process.env.MAX_PAYLOAD_BYTES;
+    else process.env.MAX_PAYLOAD_BYTES = previousPayload;
+    if (previousAdmin === undefined) delete process.env.ADMIN_TOKEN;
+    else process.env.ADMIN_TOKEN = previousAdmin;
+  }
+});
+
+test('limiter autoryzacji blokuje konto niezaleznie od adresu IP', () => {
+  security.resetAuthRateLimits();
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      assert.equal(security.allowAuthAttempt(authReq(`10.0.0.${index + 1}`), 'alice'), true);
+    }
+    assert.equal(security.allowAuthAttempt(authReq('10.0.1.1'), 'alice'), false);
+    assert.equal(security.allowAuthAttempt(authReq('10.0.1.1'), 'bob'), true);
+    security.recordAuthSuccess(authReq('10.0.0.1'), 'alice');
+    assert.equal(security.allowAuthAttempt(authReq('10.0.0.1'), 'alice'), true);
+  } finally {
+    security.resetAuthRateLimits();
+  }
+});
+
+test('limiter autoryzacji blokuje powtarzane proby z tej samej pary IP i konta', () => {
+  security.resetAuthRateLimits();
+  try {
+    const req = authReq('192.0.2.10');
+    for (let index = 0; index < 10; index += 1) {
+      assert.equal(security.allowAuthAttempt(req, 'alice'), true);
+    }
+    assert.equal(security.allowAuthAttempt(req, 'alice'), false);
+    assert.equal(security.allowAuthAttempt(req, 'bob'), true);
+  } finally {
+    security.resetAuthRateLimits();
+  }
+});
+
+test('weryfikacja hasla respektuje zapisane parametry scrypt i oznacza upgrade', async () => {
+  const legacy = await security.hashPassword('correct horse', 'fixed-salt', { N: 16384, r: 8, p: 1 });
+  const legacyResult = await security.verifyPasswordDetailed('correct horse', legacy);
+  assert.equal(legacyResult.ok, true);
+  assert.equal(legacyResult.needsUpgrade, true);
+
+  const upgraded = await security.hashPassword('correct horse', 'fixed-salt');
+  const upgradedResult = await security.verifyPasswordDetailed('correct horse', upgraded);
+  assert.equal(upgradedResult.ok, true);
+  assert.equal(upgradedResult.needsUpgrade, false);
+
+  const tamperedParams = { ...legacy, params: { N: 32768, r: 8, p: 1 } };
+  const tamperedResult = await security.verifyPasswordDetailed('correct horse', tamperedParams);
+  assert.equal(tamperedResult.ok, false);
+});
+
+test('jednorazowa normalizacja stanu nie czyta ponownie legacy messages.json', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-normalized-'));
+  const firstStore = new V2Store({ dataDir });
+  assert.equal(firstStore.database.readState('normalized-state-v1', false), true);
+  fs.writeFileSync(path.join(dataDir, 'messages.json'), 'to nie jest json', 'utf8');
+  assert.doesNotThrow(() => new V2Store({ dataDir }));
 });
 
 test('pelna sesja powstaje dopiero po podpisaniu challenge kluczem z vaultu', () => {

@@ -20,6 +20,7 @@ HOST=127.0.0.1
 PORT=8443
 REGISTRATION_MODE=disabled
 ADMIN_TOKEN=TU_WKLEJ_LOSOWY_SEKRET_ADMIN_MINIMUM_32_ZNAKI
+METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
 SESSION_TTL_HOURS=72
 SESSION_IDLE_TTL_HOURS=24
 V2_DATA_DIR=/opt/secure-p2p/app/server/data-v2
@@ -56,7 +57,7 @@ przez endpoint administracyjny. `open` wlaczaj tylko na krotkie testy.
 
 ```bash
 curl https://chat.twojadomena.pl/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.twojadomena.pl/metrics
+curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
 npm run check
 ```
 

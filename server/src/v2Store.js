@@ -24,13 +24,20 @@ const WS_TICKET_MAX_PER_SESSION = 4;
 const WS_TICKET_WINDOW_MS = 60 * 1000;
 const WS_TICKET_MAX_PER_WINDOW = 30;
 const AUTH_WINDOW_MS = 60 * 1000;
-const AUTH_MAX_ATTEMPTS = 10;
+const AUTH_PAIR_MAX_ATTEMPTS = 10;
+const AUTH_ACCOUNT_MAX_ATTEMPTS = 20;
+const AUTH_IP_MAX_ATTEMPTS = 80;
 const AUTH_MAX_KEYS = 5000;
+const AUTH_LOCK_BASE_MS = 30 * 1000;
+const AUTH_LOCK_MAX_MS = 15 * 60 * 1000;
 const PENDING_LOGIN_TTL_MS = 2 * 60 * 1000;
 const PENDING_LOGIN_MAX_GLOBAL = 5000;
 const MAX_CONCURRENT_KDF = 4;
 const MAX_KDF_QUEUE = 32;
 const KDF_QUEUE_TIMEOUT_MS = 5_000;
+const PASSWORD_KEY_BYTES = 64;
+const PASSWORD_SCRYPT_PARAMS = Object.freeze({ N: 32768, r: 8, p: 1 });
+const PASSWORD_SCRYPT_LEGACY_PARAMS = Object.freeze({ N: 16384, r: 8, p: 1 });
 const DEVICE_CERTIFICATE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
@@ -521,11 +528,43 @@ export function storageMetrics(store) {
   };
 }
 
-async function scryptAsync(password, salt) {
+function normalizeScryptParams(params) {
+  const candidate = params && typeof params === 'object' ? params : PASSWORD_SCRYPT_LEGACY_PARAMS;
+  const normalized = {
+    N: Number(candidate.N),
+    r: Number(candidate.r),
+    p: Number(candidate.p)
+  };
+
+  if (
+    !Number.isInteger(normalized.N) ||
+    !Number.isInteger(normalized.r) ||
+    !Number.isInteger(normalized.p) ||
+    normalized.N < PASSWORD_SCRYPT_LEGACY_PARAMS.N ||
+    normalized.N > 262144 ||
+    (normalized.N & (normalized.N - 1)) !== 0 ||
+    normalized.r < 8 ||
+    normalized.r > 16 ||
+    normalized.p < 1 ||
+    normalized.p > 4
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function scryptParamsEqual(left, right) {
+  return left.N === right.N && left.r === right.r && left.p === right.p;
+}
+
+async function scryptAsync(password, salt, params = PASSWORD_SCRYPT_PARAMS) {
+  const normalizedParams = normalizeScryptParams(params);
+  if (!normalizedParams) throw new Error('invalid_scrypt_params');
   await acquireKdfSlot();
   try {
-    return await new Promise((resolve, reject) => crypto.scrypt(String(password), salt, 64, {
-      N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024
+    return await new Promise((resolve, reject) => crypto.scrypt(String(password), salt, PASSWORD_KEY_BYTES, {
+      ...normalizedParams, maxmem: 256 * 1024 * 1024
     }, (error, key) => error ? reject(error) : resolve(key)));
   } finally {
     releaseKdfSlot();
@@ -549,44 +588,110 @@ function loginChallengePayload(pending) {
   }), 'utf8');
 }
 
-function allowAuthAttempt(req, username) {
-  const now = Date.now();
-  const ip = req.clientIp || req.socket?.remoteAddress || 'unknown';
-  const key = `${ip}:${normalizeUsername(username)}`;
-  const live = (authAttempts.get(key) || []).filter((time) => time > now - AUTH_WINDOW_MS);
-  if (live.length >= AUTH_MAX_ATTEMPTS) return false;
-  live.push(now);
-  authAttempts.set(key, live);
-  if (authAttempts.size > AUTH_MAX_KEYS) {
-    for (const [attemptKey, attempts] of authAttempts.entries()) {
-      const stillLive = attempts.filter((time) => time > now - AUTH_WINDOW_MS);
-      if (stillLive.length === 0) authAttempts.delete(attemptKey);
-      else authAttempts.set(attemptKey, stillLive);
-    }
-    while (authAttempts.size > AUTH_MAX_KEYS) {
-      const oldestKey = authAttempts.keys().next().value;
-      authAttempts.delete(oldestKey);
+function authAttemptEntry(key) {
+  const existing = authAttempts.get(key);
+  if (existing && typeof existing === 'object' && Array.isArray(existing.hits)) {
+    return existing;
+  }
+  const entry = { hits: [], lockUntilMs: 0, failures: 0 };
+  authAttempts.set(key, entry);
+  return entry;
+}
+
+function pruneAuthAttempts(now = Date.now()) {
+  for (const [key, entry] of authAttempts.entries()) {
+    entry.hits = entry.hits.filter((time) => time > now - AUTH_WINDOW_MS);
+    if (entry.hits.length === 0 && entry.lockUntilMs <= now) {
+      authAttempts.delete(key);
     }
   }
+  while (authAttempts.size > AUTH_MAX_KEYS) {
+    const oldestKey = authAttempts.keys().next().value;
+    authAttempts.delete(oldestKey);
+  }
+}
+
+function checkAuthScope(key, maxAttempts, now) {
+  const entry = authAttemptEntry(key);
+  entry.hits = entry.hits.filter((time) => time > now - AUTH_WINDOW_MS);
+  if (entry.lockUntilMs > now) return false;
+  if (entry.hits.length >= maxAttempts) {
+    entry.failures += 1;
+    const backoffMs = Math.min(AUTH_LOCK_MAX_MS, AUTH_LOCK_BASE_MS * 2 ** Math.min(entry.failures - 1, 5));
+    entry.lockUntilMs = now + backoffMs;
+    return false;
+  }
+  entry.hits.push(now);
   return true;
 }
 
-async function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url')) {
-  const hash = await scryptAsync(password, salt);
+function authScopeKeys(req, username) {
+  const ip = req.clientIp || req.socket?.remoteAddress || 'unknown';
+  const account = normalizeUsername(username) || 'unknown';
+  return {
+    ip: `ip:${ip}`,
+    account: `account:${account}`,
+    pair: `pair:${ip}:${account}`
+  };
+}
+
+function allowAuthAttempt(req, username) {
+  const now = Date.now();
+  pruneAuthAttempts(now);
+  const keys = authScopeKeys(req, username);
+  const checks = [
+    [keys.ip, AUTH_IP_MAX_ATTEMPTS],
+    [keys.account, AUTH_ACCOUNT_MAX_ATTEMPTS],
+    [keys.pair, AUTH_PAIR_MAX_ATTEMPTS]
+  ];
+  let allowed = true;
+  for (const [key, maxAttempts] of checks) {
+    if (!checkAuthScope(key, maxAttempts, now)) allowed = false;
+  }
+  pruneAuthAttempts(now);
+  return allowed;
+}
+
+function recordAuthSuccess(req, username) {
+  const keys = authScopeKeys(req, username);
+  authAttempts.delete(keys.account);
+  authAttempts.delete(keys.pair);
+}
+
+function resetAuthRateLimits() {
+  authAttempts.clear();
+}
+
+async function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url'), params = PASSWORD_SCRYPT_PARAMS) {
+  const normalizedParams = normalizeScryptParams(params);
+  if (!normalizedParams) throw new Error('invalid_scrypt_params');
+  const hash = await scryptAsync(password, salt, normalizedParams);
   return {
     algorithm: 'scrypt',
     salt,
     hash: hash.toString('base64url'),
-    params: { N: 16384, r: 8, p: 1 }
+    params: normalizedParams
+  };
+}
+
+async function verifyPasswordDetailed(password, stored) {
+  if (!stored || stored.algorithm !== 'scrypt' || !stored.salt || !stored.hash) {
+    return { ok: false, needsUpgrade: false };
+  }
+  const storedParams = normalizeScryptParams(stored.params);
+  if (!storedParams) return { ok: false, needsUpgrade: false };
+  const hash = await scryptAsync(password, stored.salt, storedParams);
+  const expected = Buffer.from(stored.hash, 'base64url');
+  const actual = Buffer.from(hash.toString('base64url'), 'base64url');
+  const ok = expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  return {
+    ok,
+    needsUpgrade: ok && !scryptParamsEqual(storedParams, PASSWORD_SCRYPT_PARAMS)
   };
 }
 
 async function verifyPassword(password, stored) {
-  if (!stored || stored.algorithm !== 'scrypt') return false;
-  const candidate = await hashPassword(password, stored.salt);
-  const expected = Buffer.from(stored.hash, 'base64url');
-  const actual = Buffer.from(candidate.hash, 'base64url');
-  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  return (await verifyPasswordDetailed(password, stored)).ok;
 }
 
 async function readBody(req, maxBytes = DEFAULT_MAX_BODY_BYTES) {
@@ -713,15 +818,17 @@ export class V2Store {
     this.invites = normalizedState
       ? this.database.readEntities('invitations', 'invites')
       : this.database.readState('invites', { v: 1, invites: {} });
-    this.messages = fs.existsSync(this.messagesFile)
+    this.messages = !normalizedState && fs.existsSync(this.messagesFile)
       ? readJson(this.messagesFile, { v: 1, messages: {} })
       : { v: 1, messages: {} };
-    this.database.importLegacyMessages(this.messages.messages);
-    this.database.replaceEntities('users', this.users.users);
-    this.database.replaceEntities('sessions', this.sessions.sessions);
-    this.database.replaceEntities('conversations', this.conversations.conversations);
-    this.database.replaceEntities('invitations', this.invites.invites);
-    this.database.writeState('normalized-state-v1', true);
+    if (!normalizedState) {
+      this.database.importLegacyMessages(this.messages.messages);
+      this.database.replaceEntities('users', this.users.users);
+      this.database.replaceEntities('sessions', this.sessions.sessions);
+      this.database.replaceEntities('conversations', this.conversations.conversations);
+      this.database.replaceEntities('invitations', this.invites.invites);
+      this.database.writeState('normalized-state-v1', true);
+    }
     this.normalizePersistedSessions();
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
@@ -1293,6 +1400,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         console.error(JSON.stringify({ event: 'registration_session_failed', error: String(error?.stack || error) }));
         return sendJson(res, 403, { ok: false, error: 'REGISTRATION_FAILED' });
       }
+      recordAuthSuccess(req, username);
       return sendJson(res, 200, {
         ok: true,
         token: session.token,
@@ -1309,8 +1417,17 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       const body = await readBody(req, AUTH_MAX_BODY_BYTES);
       if (!allowAuthAttempt(req, body.username)) return sendJson(res, 429, { ok: false, error: 'Sprobuj ponownie pozniej.' });
       const user = store.userByName(body.username);
-      if (!user || !await verifyPassword(String(body.password || ''), user.password)) {
+      const passwordResult = user
+        ? await verifyPasswordDetailed(String(body.password || ''), user.password)
+        : { ok: false, needsUpgrade: false };
+      if (!user || !passwordResult.ok) {
         return sendJson(res, 401, { ok: false, error: 'Niepoprawny login albo haslo.' });
+      }
+      recordAuthSuccess(req, body.username);
+      if (passwordResult.needsUpgrade) {
+        user.password = await hashPassword(String(body.password || ''));
+        user.updatedAt = nowIso();
+        store.persistUser(user);
       }
       const deviceId = String(body.deviceId || randomId());
       if (isDeviceRevoked(user, deviceId)) {
@@ -1795,14 +1912,20 @@ export function handleV2WebSocket(store, ws, request) {
 }
 
 export const securityTestInternals = Object.freeze({
+  allowAuthAttempt,
   canonicalJson,
   cloudMessageHash,
   genesisHash: CLOUD_MESSAGE_GENESIS_HASH,
+  hashPassword,
   messageStreamError,
+  recordAuthSuccess,
+  resetAuthRateLimits,
   scryptAsync,
   storageQuotaError,
   validateCloudMessagePayload,
   validateMemberKeys,
+  verifyPassword,
+  verifyPasswordDetailed,
   verifyDeviceCertificate,
   verifyMemberKeyEnvelope
 });

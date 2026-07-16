@@ -7,7 +7,65 @@ on:
 permissions:
   contents: read
 
+env:
+  SECURE_CHAT_TEST_UPDATE_PUBLIC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
 jobs:
+  unicode-controls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reject hidden Unicode controls
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+
+          controls = set(range(0x202A, 0x202F)) | set(range(0x2066, 0x2070)) | {
+              0x200B,
+              0x200C,
+              0x200D,
+              0xFEFF,
+          }
+          result = subprocess.run(
+              ["git", "ls-files", "-z"],
+              check=True,
+              stdout=subprocess.PIPE,
+          )
+          bad = []
+          for raw_path in result.stdout.split(b"\0"):
+              if not raw_path:
+                  continue
+              path = pathlib.Path(raw_path.decode("utf-8", "surrogateescape"))
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              for line_number, line in enumerate(text.splitlines(), start=1):
+                  for char in line:
+                      codepoint = ord(char)
+                      if codepoint in controls:
+                          bad.append(f"{path}:{line_number}: U+{codepoint:04X}")
+          if bad:
+              print("Hidden Unicode control characters found:")
+              print("\n".join(bad))
+              sys.exit(1)
+          PY
+
+  conflict-markers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reject unresolved merge conflicts
+        shell: bash
+        run: |
+          if git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- .; then
+            echo 'Unresolved merge conflict markers found.' >&2
+            exit 1
+          fi
+
   server:
     runs-on: ubuntu-latest
     defaults:
@@ -42,14 +100,69 @@ jobs:
       - run: flutter test
       - run: flutter build apk --debug
 
-  conflict-markers:
+  android-release:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
     steps:
       - uses: actions/checkout@v6
-      - name: Reject unresolved merge conflicts
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Generate CI Android signing key
         shell: bash
         run: |
-          if git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- .; then
-            echo 'Unresolved merge conflict markers found.' >&2
-            exit 1
-          fi
+          keytool -genkeypair \
+            -v \
+            -keystore android/app/ci-release.jks \
+            -storepass android \
+            -keypass android \
+            -alias ci \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=CI,O=Secure Chat,C=PL"
+          cat > android/key.properties <<'EOF'
+          storePassword=android
+          keyPassword=android
+          keyAlias=ci
+          storeFile=ci-release.jks
+          EOF
+      - run: flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=${{ env.SECURE_CHAT_TEST_UPDATE_PUBLIC_KEY }}
+
+  windows-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=${{ env.SECURE_CHAT_TEST_UPDATE_PUBLIC_KEY }}
+
+  linux-release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libsqlite3-dev
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+      - run: flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=${{ env.SECURE_CHAT_TEST_UPDATE_PUBLIC_KEY }}

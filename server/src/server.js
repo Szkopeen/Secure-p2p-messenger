@@ -58,6 +58,12 @@ function clientIp(req) {
   return /^[0-9a-fA-F:.]+$/.test(first) ? first : remote;
 }
 
+function metricsIpAllowed(req) {
+  if (config.metricsAllowedIps.includes('*')) return true;
+  const remote = req.socket.remoteAddress || '';
+  return config.metricsAllowedIps.includes(req.clientIp) || config.metricsAllowedIps.includes(remote);
+}
+
 function sendJson(res, status, payload) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -129,6 +135,10 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === '/metrics') {
+    if (!metricsIpAllowed(req)) {
+      sendJson(res, 403, { ok: false, error: 'Endpoint metryk jest dostepny tylko z dozwolonych adresow.' });
+      return;
+    }
     if (!config.adminToken || !timingSafeTextEqual(req.headers['x-admin-token'], config.adminToken)) {
       sendJson(res, 401, { ok: false, error: 'Brak autoryzacji administratora.' });
       return;

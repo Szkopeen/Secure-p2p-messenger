@@ -19,9 +19,9 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
   @override
   void initState() {
     super.initState();
+    appState = AppState();
     WidgetsBinding.instance.addObserver(this);
     DesktopNotifier.instance.setAppActive(true);
-    appState = AppState();
     appState.initialize();
   }
 
@@ -36,6 +36,7 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final active = state == AppLifecycleState.resumed;
     DesktopNotifier.instance.setAppActive(active);
+    appState.handleLifecycleActive(active);
   }
 
   @override
@@ -91,16 +92,125 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
       home: AnimatedBuilder(
         animation: appState,
         builder: (context, _) {
+          late final Widget screen;
           if (appState.initializing) {
-            return const Scaffold(
+            screen = const Scaffold(
               body: Center(child: CircularProgressIndicator()),
             );
+          } else if (!appState.hasAccount) {
+            screen = SetupScreen(appState: appState);
+          } else {
+            screen = HomeScreen(appState: appState);
           }
-          if (!appState.hasAccount) {
-            return SetupScreen(appState: appState);
-          }
-          return HomeScreen(appState: appState);
+          return Stack(
+            children: [
+              screen,
+              if (appState.privacyLocked)
+                _PrivacyLockScreen(appState: appState),
+            ],
+          );
         },
+      ),
+    );
+  }
+}
+
+class _PrivacyLockScreen extends StatefulWidget {
+  const _PrivacyLockScreen({required this.appState});
+
+  final AppState appState;
+
+  @override
+  State<_PrivacyLockScreen> createState() => _PrivacyLockScreenState();
+}
+
+class _PrivacyLockScreenState extends State<_PrivacyLockScreen> {
+  final TextEditingController _pinController = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _pinController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _unlock() async {
+    try {
+      await widget.appState.unlockPrivacy(_pinController.text);
+      if (!mounted) return;
+      _pinController.clear();
+      setState(() => _error = null);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = error.toString());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final requiresPin = widget.appState.appLockEnabled;
+    return Positioned.fill(
+      child: ColoredBox(
+        color: colorScheme.surface,
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.lock_outline,
+                      size: 48,
+                      color: colorScheme.primary,
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      'Aplikacja zablokowana',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 20),
+                    if (requiresPin) ...[
+                      TextField(
+                        controller: _pinController,
+                        autofocus: true,
+                        obscureText: true,
+                        keyboardType: TextInputType.number,
+                        maxLength: 12,
+                        decoration: InputDecoration(
+                          labelText: 'PIN',
+                          errorText: _error,
+                          counterText: '',
+                        ),
+                        onSubmitted: (_) => _unlock(),
+                      ),
+                      const SizedBox(height: 12),
+                    ] else if (_error != null) ...[
+                      Text(
+                        _error!,
+                        style: TextStyle(color: colorScheme.error),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: _unlock,
+                        icon: const Icon(Icons.lock_open_outlined),
+                        label: const Text('Odblokuj'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

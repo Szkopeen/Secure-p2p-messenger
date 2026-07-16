@@ -58,6 +58,28 @@ class SettingsScreen extends StatelessWidget {
                         ? () => _confirmIdentityRotation(context)
                         : null,
                   ),
+                  SwitchListTile(
+                    secondary: const Icon(Icons.visibility_off_outlined),
+                    title: const Text('Prywatny ekran'),
+                    subtitle: const Text(
+                      'Blokuje zrzuty ekranu i podglad aplikacji.',
+                    ),
+                    value: appState.privacyScreenEnabled,
+                    onChanged: (value) async {
+                      await appState.setPrivacyScreenEnabled(value);
+                    },
+                  ),
+                  SwitchListTile(
+                    secondary: const Icon(Icons.pin_outlined),
+                    title: const Text('Blokada PIN'),
+                    subtitle: const Text(
+                      'Wymaga PIN-u po powrocie do aplikacji.',
+                    ),
+                    value: appState.appLockEnabled,
+                    onChanged: (value) => value
+                        ? _enableAppLock(context)
+                        : _disableAppLock(context),
+                  ),
                   if (appState.cloudMode) ...[
                     ListTile(
                       leading: const Icon(Icons.devices_other_outlined),
@@ -264,6 +286,116 @@ class SettingsScreen extends StatelessWidget {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  Future<void> _enableAppLock(BuildContext context) async {
+    final pinController = TextEditingController();
+    final confirmController = TextEditingController();
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Ustaw PIN'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: pinController,
+                  autofocus: true,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 12,
+                  decoration: const InputDecoration(
+                    labelText: 'PIN',
+                    counterText: '',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: confirmController,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 12,
+                  decoration: const InputDecoration(
+                    labelText: 'Powtorz PIN',
+                    counterText: '',
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Anuluj'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Wlacz'),
+              ),
+            ],
+          );
+        },
+      );
+      if (confirmed != true) return;
+      await appState.enableAppLockPin(
+        pinController.text,
+        confirmController.text,
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    } finally {
+      pinController.dispose();
+      confirmController.dispose();
+    }
+  }
+
+  Future<void> _disableAppLock(BuildContext context) async {
+    final pinController = TextEditingController();
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Wylacz blokade PIN'),
+            content: TextField(
+              controller: pinController,
+              autofocus: true,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              maxLength: 12,
+              decoration: const InputDecoration(
+                labelText: 'PIN',
+                counterText: '',
+              ),
+              onSubmitted: (_) => Navigator.of(context).pop(true),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Anuluj'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Wylacz'),
+              ),
+            ],
+          );
+        },
+      );
+      if (confirmed != true) return;
+      await appState.disableAppLockPin(pinController.text);
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    } finally {
+      pinController.dispose();
     }
   }
 

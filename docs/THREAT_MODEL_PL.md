@@ -78,7 +78,7 @@ scenariuszy wysokiego ryzyka.
 - Sesje maja konfigurowalny TTL i idle timeout, a WebSocket uzywa
   jednorazowego ticketu.
 - Publiczny `/healthz` nie ujawnia metryk. Szczegoly sa w `/metrics`,
-  chronione tokenem administratora.
+  chronione tokenem administratora i allowlista adresow IP.
 - Katalog nie zwraca globalnej listy uzytkownikow; wyszukiwanie wymaga
   dokladnego loginu.
 - Legacy relay i stare aktywne grupy sa usuniete z klienta.
@@ -108,3 +108,6 @@ scenariuszy wysokiego ryzyka.
   `docs/RELEASE_PROCESS_PL.md`.
 - Testerom opisuj produkt zgodnie z ograniczeniami z
   `docs/SECURITY_ROADMAP_PL.md`.
+- Jezeli w historii Gita byly prywatne dane, wykonaj procedury z
+  `docs/PRIVACY_HISTORY_CLEANUP_PL.md`, zrotuj sekrety i dopiero potem
+  zapraszaj nowych testerow.

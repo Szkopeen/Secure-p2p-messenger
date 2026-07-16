@@ -39,6 +39,7 @@ REGISTRATION_MODE=disabled
 ADMIN_TOKEN=drugi-losowy-ciag-minimum-32-znaki
 SESSION_TTL_HOURS=72
 SESSION_IDLE_TTL_HOURS=24
+METRICS_ALLOWED_IPS=127.0.0.1,::1,::ffff:127.0.0.1
 METRICS_STORAGE_CACHE_SECONDS=15
 ```
 
@@ -69,11 +70,12 @@ Diagnostyka:
 sudo systemctl status secure-p2p --no-pager
 sudo journalctl -u secure-p2p -n 100 --no-pager
 curl https://chat.example.com/healthz
-curl -H "x-admin-token: $ADMIN_TOKEN" https://chat.example.com/metrics
+curl -H "x-admin-token: $ADMIN_TOKEN" http://127.0.0.1:8443/metrics
 ```
 
 `/healthz` zwraca tylko prosty status liveness. Szczegolowe metryki KDF i
-storage sa dostepne przez `/metrics` z naglowkiem `x-admin-token`.
+storage sa dostepne przez `/metrics` z naglowkiem `x-admin-token` i adresem z
+`METRICS_ALLOWED_IPS`.
 
 ## Najwazniejsze katalogi danych
 

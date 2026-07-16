@@ -26,6 +26,8 @@ class SecureStore {
   static const _cloudDeviceKey = 'cloud.deviceKey.v1';
   static const _cloudReplayStates = 'cloud.messageReplay.v1';
   static const _cloudVaultPins = 'cloud.vaultPins.v1';
+  static const _privacyScreenEnabled = 'privacy.screen.enabled.v1';
+  static const _appLockPin = 'privacy.appLock.pin.v1';
 
   final FlutterSecureStorage _storage;
 
@@ -79,6 +81,37 @@ class SecureStore {
     final raw = await _storage.read(key: _adminSettings);
     if (raw == null || raw.isEmpty) return null;
     return AdminSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+  }
+
+  Future<bool> loadPrivacyScreenEnabled() async {
+    final raw = await _storage.read(key: _privacyScreenEnabled);
+    return raw == null || raw != 'false';
+  }
+
+  Future<void> savePrivacyScreenEnabled(bool enabled) {
+    return _storage.write(
+      key: _privacyScreenEnabled,
+      value: enabled ? 'true' : 'false',
+    );
+  }
+
+  Future<Map<String, String>?> loadAppLockPin() async {
+    final raw = await _storage.read(key: _appLockPin);
+    if (raw == null || raw.isEmpty) return null;
+    return (jsonDecode(raw) as Map).map(
+      (key, value) => MapEntry(key.toString(), value.toString()),
+    );
+  }
+
+  Future<void> saveAppLockPin({required String salt, required String hash}) {
+    return _storage.write(
+      key: _appLockPin,
+      value: jsonEncode({'salt': salt, 'hash': hash}),
+    );
+  }
+
+  Future<void> clearAppLockPin() {
+    return _storage.delete(key: _appLockPin);
   }
 
   Future<void> saveContacts(List<Contact> contacts) async {
