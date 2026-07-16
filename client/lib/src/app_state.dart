@@ -58,6 +58,8 @@ class AppState extends ChangeNotifier {
   static const maxPlainFileBytes = 8 * 1024 * 1024;
   static const maxCloudPlainFileBytes = 48 * 1024;
   static const maxProfileImageBytes = 1024 * 1024;
+  static const _maxUpdateArtifactBytes = 512 * 1024 * 1024;
+  static const _maxUpdateManifestBytes = 1024 * 1024;
   static const _appLockPinAlgorithm = 'pbkdf2-hmac-sha256';
   static const _legacyAppLockPinAlgorithm = 'legacy-sha256';
   static const _appLockPinIterations = 310000;
@@ -352,6 +354,7 @@ class AppState extends ChangeNotifier {
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
       identityPublicKey: vault.identityPublicKey,
       keyAgreementPublicKeySignature: vault.keyAgreementPublicKeySignature,
+      serverOrigin: serverOrigin,
       vaultSalt: vaultSalt,
       encryptedVault: encryptedVault,
       inviteToken: inviteToken.trim(),
@@ -375,6 +378,7 @@ class AppState extends ChangeNotifier {
     required String vaultSecret,
   }) async {
     final normalizedServer = _normalizeCloudServerUrl(serverUrl);
+    final serverOrigin = _cloudSignatureOrigin(normalizedServer);
     if (vaultSecret.length < 16) {
       throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
     }
@@ -386,6 +390,7 @@ class AppState extends ChangeNotifier {
       password: password,
       deviceId: deviceId,
       deviceName: _genericDeviceName(),
+      serverOrigin: serverOrigin,
     );
     final vaultKey = await _cloudCrypto.deriveVaultKey(
       vaultSecret: vaultSecret,
@@ -420,6 +425,8 @@ class AppState extends ChangeNotifier {
       challenge: loginProbe.challenge,
       userId: loginProbe.userId,
       deviceId: loginProbe.deviceId,
+      serverOrigin: serverOrigin,
+      issuedAtMs: loginProbe.challengeIssuedAtMs,
       expiresAtMs: loginProbe.challengeExpiresAtMs,
     );
     final completed = await probe.completeLogin(
@@ -526,9 +533,19 @@ class AppState extends ChangeNotifier {
 
       final artifact = artifactRaw.cast<String, dynamic>();
       final fileName = artifact['file']?.toString() ?? '';
-      if (fileName.isEmpty) {
+      if (fileName.isEmpty ||
+          !RegExp(r'^[a-zA-Z0-9._-]+$').hasMatch(fileName)) {
         _availableUpdate = null;
         _updateStatus = 'Manifest aktualizacji nie zawiera nazwy pliku.';
+        return;
+      }
+      final artifactSize = _asNullableInt(artifact['size']);
+      if (artifactSize == null ||
+          artifactSize <= 0 ||
+          artifactSize > _maxUpdateArtifactBytes) {
+        _availableUpdate = null;
+        _updateStatus =
+            'Manifest aktualizacji zawiera niepoprawny rozmiar paczki.';
         return;
       }
 
@@ -546,7 +563,7 @@ class AppState extends ChangeNotifier {
           fileName: fileName,
           url: _artifactUri(updateServerUrl, artifact, fileName),
           sha256: artifact['sha256']?.toString(),
-          size: _asNullableInt(artifact['size']),
+          size: artifactSize,
         ),
       );
       _updateStatus = 'Dostepna aktualizacja: ${_availableUpdate!.label}.';
@@ -579,31 +596,64 @@ class AppState extends ChangeNotifier {
       final file = File(
         '${directory.path}${Platform.pathSeparator}${selectedUpdate.artifact.fileName}',
       );
+      final partFile = File('${file.path}.${_uuid.v4()}.part');
       final client = HttpClient();
+      var completed = false;
       try {
         final request = await client.getUrl(selectedUpdate.artifact.url);
         final response = await request.close();
         if (response.statusCode != 200) {
           throw StateError('Serwer zwrocil HTTP ${response.statusCode}.');
         }
+        final expectedSize = selectedUpdate.artifact.size;
+        if (expectedSize == null ||
+            expectedSize <= 0 ||
+            expectedSize > _maxUpdateArtifactBytes) {
+          throw StateError(
+            'Manifest aktualizacji ma niepoprawny rozmiar paczki.',
+          );
+        }
+        if (response.contentLength != expectedSize) {
+          throw StateError(
+            'Rozmiar Content-Length nie zgadza sie z podpisanym manifestem.',
+          );
+        }
 
-        final sink = file.openWrite();
+        final sink = partFile.openWrite();
         var received = 0;
-        final total = response.contentLength;
-        await for (final chunk in response) {
-          received += chunk.length;
-          sink.add(chunk);
-          if (total > 0) {
-            _updateDownloadProgress = received / total;
+        try {
+          await for (final chunk in response) {
+            received += chunk.length;
+            if (received > expectedSize) {
+              throw StateError(
+                'Pobrany strumien przekroczyl rozmiar z manifestu.',
+              );
+            }
+            sink.add(chunk);
+            _updateDownloadProgress = received / expectedSize;
             notifyListeners();
           }
+        } finally {
+          await sink.close();
         }
-        await sink.close();
+        if (received != expectedSize) {
+          throw StateError('Pobrany plik ma niepelny rozmiar.');
+        }
+        await _verifyDownloadedUpdate(partFile, selectedUpdate.artifact.sha256);
+        if (await file.exists()) {
+          await file.delete();
+        }
+        await partFile.rename(file.path);
+        completed = true;
       } finally {
         client.close(force: true);
+        if (!completed && await partFile.exists()) {
+          try {
+            await partFile.delete();
+          } catch (_) {}
+        }
       }
 
-      await _verifyDownloadedUpdate(file, selectedUpdate.artifact.sha256);
       _downloadedUpdatePath = file.path;
       _updateDownloadProgress = 1;
       _updateStatus = 'Pobrano aktualizacje: ${file.path}';
@@ -2608,11 +2658,25 @@ class AppState extends ChangeNotifier {
       if (response.statusCode != 200) {
         throw StateError('HTTP ${response.statusCode}');
       }
-      final raw = await utf8.decodeStream(response);
+      final raw = await _readLimitedUtf8(response, _maxUpdateManifestBytes);
       return (jsonDecode(raw) as Map).cast<String, dynamic>();
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<String> _readLimitedUtf8(
+    Stream<List<int>> stream,
+    int maxBytes,
+  ) async {
+    final chunks = <int>[];
+    await for (final chunk in stream) {
+      chunks.addAll(chunk);
+      if (chunks.length > maxBytes) {
+        throw StateError('Odpowiedz serwera jest za duza.');
+      }
+    }
+    return utf8.decode(chunks);
   }
 
   int _asInt(Object? value) {
@@ -3102,10 +3166,7 @@ class AppState extends ChangeNotifier {
       macAlgorithm: Hmac.sha256(),
       iterations: iterations,
       bits: _appLockPinBits,
-    ).deriveKey(
-      secretKey: SecretKey(utf8Bytes(pin)),
-      nonce: unb64(salt),
-    );
+    ).deriveKey(secretKey: SecretKey(utf8Bytes(pin)), nonce: unb64(salt));
     return b64(await key.extractBytes());
   }
 

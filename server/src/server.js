@@ -185,6 +185,7 @@ const wss = new WebSocketServer({
 });
 
 httpServer.on('upgrade', (request, socket, head) => {
+  request.clientIp = clientIp(request);
   let url;
   try {
     url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -204,7 +205,15 @@ httpServer.on('upgrade', (request, socket, head) => {
 wss.on('connection', (ws, request) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
-  handleV2WebSocket(v2Store, ws, request);
+  handleV2WebSocket(v2Store, ws, request, {
+    preAuth: {
+      timeoutMs: config.wsPreAuthTimeoutMs,
+      maxGlobal: config.wsPreAuthMaxGlobal,
+      maxPerIp: config.wsPreAuthMaxPerIp,
+      maxPerWindow: config.wsPreAuthMaxPerWindow,
+      windowMs: config.wsPreAuthWindowMs
+    }
+  });
 });
 
 const heartbeat = setInterval(() => {

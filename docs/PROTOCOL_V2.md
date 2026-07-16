@@ -30,6 +30,10 @@ account Ed25519 key. The signed data includes the conversation, key epoch,
 sender account and device, recipient, embedded account keys and ciphertext.
 The server binds the embedded keys to the authenticated account. The client
 unwraps only with identity and agreement keys already trusted locally.
+New envelopes set `keyWrapAadVersion = 2` and bind AES-GCM AAD to the
+conversation, key epoch, sender account, sender device, recipient account,
+sender identity key, sender agreement key and recipient agreement key. Legacy
+v1 envelopes remain readable only for migration.
 
 Cloud group creation and sending are disabled. They remain disabled until a
 reviewed MLS deployment or an equivalent safe membership/rekey protocol is
@@ -61,7 +65,9 @@ The first message of each `(conversation, sender account, sender device)`
 stream uses counter 1 and the fixed genesis hash. Later messages increment the
 counter by one and reference the SHA-256 hash of the complete previous message.
 The server rejects legacy, replayed, forked, incorrectly signed and stale-epoch
-messages before persistence. Clients repeat these checks independently.
+messages before persistence. It also rejects any message whose
+`aad.conversationId` does not match the conversation ID from the request body.
+Clients repeat these checks independently.
 
 ## Authentication and storage
 
@@ -69,6 +75,12 @@ Password verification uses asynchronous scrypt behind a bounded queue. A full
 session is issued only after the client decrypts its vault and signs the login
 challenge. WebSocket access uses a short-lived one-use ticket. Session tokens
 and invitation tokens are stored only as hashes.
+
+The login challenge signature binds `protocol`, `serverOrigin`, `userId`,
+`deviceId`, `challenge`, `issuedAtMs` and `expiresAtMs`. This prevents replay
+of a valid challenge signature across server origins or stale login attempts.
+Before authentication, WebSocket connections are bounded by global, per-IP,
+per-window and timeout limits.
 
 Vault secrets and new account exports use Argon2id with parameters stored next
 to the ciphertext. Legacy PBKDF2 vaults/exports are read only for automatic

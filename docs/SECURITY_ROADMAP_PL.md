@@ -56,7 +56,8 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   rotacji oraz podpis nowym kluczem, ktory potwierdza posiadanie nowego klucza
   prywatnego w chwili rotacji.
 - Dodano podpisane aktualizacje: manifest release jest podpisywany Ed25519, a
-  klient weryfikuje podpis kluczem publicznym wbudowanym przy buildzie.
+  klient weryfikuje podpis kluczem publicznym i `keyId` wbudowanymi przy
+  buildzie.
 - Dodano anty-replay nowych wiadomosci cloud: kazda nowa wiadomosc zawiera w
   AAD `senderDeviceId`, monotoniczny `messageCounter` oraz
   `previousMessageHash`, a klient trwale zapisuje ostatni zaakceptowany licznik
@@ -84,6 +85,8 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Token sesji cloud WebSocket nie jest juz wysylany ani w query stringu URL,
   ani w naglowku handshake. Klient pobiera krotko zyjacy, jednorazowy ticket
   przez HTTPS i zuzywa go jako pierwsza ramke WebSocket.
+- Nieuwierzytelnione WebSockety maja limit globalny, per IP, limit nowych prob
+  w oknie czasowym i krotki timeout pre-auth, zanim zostanie zuzyty ticket.
 - Legacy relay ze wspolnym sekretem, stary handshake, stare eksporty konta i
   stary klient relay zostaly usuniete z aktywnej sciezki klienta i serwera.
 - Grupy sa wylaczone do czasu wdrozenia bezpiecznej rotacji kluczy/MLS; klient
@@ -96,6 +99,8 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
 - Backend zapisuje liste urzadzen z mechanizmem compare-and-swap na
   `expectedDeviceListEpoch` i `expectedDeviceListHash`, zeby dwie rownolegle
   aktualizacje nie nadpisywaly sie po cichu.
+- Backend odrzuca duplikaty `deviceId` w aktywnych i uniewaznionych
+  urzadzeniach oraz listy urzadzen przekraczajace maksymalne rozmiary.
 - Dodano uniewaznianie urzadzen: klient tworzy kolejny podpisany epoch listy,
   przenosi urzadzenie do `revokedDevices`, a backend usuwa jego aktywne sesje i
   zamyka polaczenia WebSocket.
@@ -127,6 +132,15 @@ rozmiary pakietow i fakt komunikacji. Nie jest to system anonimowy.
   nie mogl zablokowac ofiary. Limiter uzywa oddzielnych map, nie usuwa
   aktywnych blokad przy wypelnieniu mapy i ma testy zalewu ponad 5000
   unikalnych loginow.
+- Challenge logowania obejmuje `serverOrigin`, `issuedAtMs`, `expiresAtMs`,
+  konto, urzadzenie i losowy challenge, zeby podpis nie byl przenoszalny miedzy
+  instancjami.
+- Klient aktualizacji wymaga podpisanego `size`, sprawdza `Content-Length`,
+  liczbe odebranych bajtow, SHA-256 i zapisuje najpierw do losowego pliku
+  `.part`, usuwanego przy bledzie.
+- Odszyfrowane podglady multimediow trafiaja do app-private cache i sa
+  zapisywane przez plik `.part`; aplikacja czysci ten katalog przy starcie i po
+  krotkim TTL.
 - Klient ma prywatny ekran, natywny `FLAG_SECURE` na Androidzie i opcjonalna
   blokade PIN po powrocie z tla. PIN jest hashowany przez PBKDF2-HMAC-SHA256 z
   losowa sola, a licznik bledow i czas blokady sa trzymane w secure storage z
@@ -157,14 +171,17 @@ kontrolowana migracje vaultu na osobny sekret przed dopuszczeniem uzytkownikow.
 4. Bez key transparency zlosliwy serwer nadal moze probowac rozdzielic rozne
    pierwsze galezie rotacji miedzy grupy kontaktow, zanim zobacza one wspolny
    lancuch.
-5. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
-6. Rekey po uniewaznieniu obejmuje aktywne rozmowy 1:1; grupy sa wylaczone do
+5. Prywatny klucz tozsamosci konta nadal jest eksportowalny do kazdego
+   odblokowanego urzadzenia przez vault. Kompromitacja takiego urzadzenia moze
+   oznaczac kompromitacje tozsamosci calego konta.
+6. Rotacja X25519 nadal nie rewrapuje automatycznie istniejacych kluczy rozmow.
+7. Rekey po uniewaznieniu obejmuje aktywne rozmowy 1:1; grupy sa wylaczone do
    czasu wdrozenia bezpiecznego protokolu grupowego.
-7. Brak Double Ratchet/PQXDH, czyli brak pelnego forward secrecy i
+8. Brak Double Ratchet/PQXDH, czyli brak pelnego forward secrecy i
    post-compromise security porownywalnego z Signalem.
-8. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
+9. Prywatny klucz podpisywania release musi byc operacyjnie chroniony poza
    serwerem produkcyjnym.
-9. SQLite jest odpowiedni dla malej self-hosted instancji, ale duza publiczna
+10. SQLite jest odpowiedni dla malej self-hosted instancji, ale duza publiczna
    usluga wymaga osobnego planu obciazeniowego i prawdopodobnie migracji do
    PostgreSQL albo osobnego workera storage.
 
@@ -178,6 +195,9 @@ kontrolowana migracje vaultu na osobny sekret przed dopuszczeniem uzytkownikow.
 3. Rozszerzyc rekey po uniewaznieniu na przyszly bezpieczny protokol grupowy.
 4. Wprowadzic zatwierdzanie nowych urzadzen przez istniejace urzadzenie albo
    recovery key.
+5. Przeniesc root identity do modelu, w ktorym nie jest eksportowana na kazde
+   urzadzenie; kompromitacja jednego urzadzenia musi wymuszac rotacje
+   tozsamosci i rewrap kluczy.
 
 ## Priorytet 2: forward secrecy
 

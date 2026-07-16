@@ -59,6 +59,9 @@ scenariuszy wysokiego ryzyka.
 - Aktywnie zlosliwy serwer, ktory przy pierwszym kontakcie podstawia rozne
   tozsamosci roznym uzytkownikom.
 - Kompromitacja urzadzenia z odczytem kluczy rozmow.
+- Kompromitacja root identity key konta. Vault zawiera klucz tozsamosci konta,
+  wiec kompromitacja vaultu lub urzadzenia z tym kluczem pozwala zatwierdzac
+  urzadzenia i rotacje do czasu recznego odzyskania konta.
 - Pelna forward secrecy i post-compromise security.
 - Anonimowosc komunikacji i ukrywanie grafu kontaktow.
 - Ochrona przed zlosliwym systemem operacyjnym klienta.
@@ -85,6 +88,8 @@ scenariuszy wysokiego ryzyka.
   dokladnego loginu.
 - Legacy relay i stare aktywne grupy sa usuniete z klienta.
 - Manifest aktualizacji jest podpisywany Ed25519, a artefakty maja SHA-256.
+- Klient sprawdza `keyId`, podpis manifestu, deklarowany rozmiar, limit
+  pobierania i SHA-256 artefaktu aktualizacji.
 - SQLite pracuje w WAL i ma testowany backup online oraz restore kopii.
 
 ## Capability gate
@@ -100,6 +105,8 @@ odporny na aktywnie zlosliwy serwer albo post-compromise compromise recovery.
 - Audytowana biblioteka OPAQUE albo rownowazne logowanie, w ktorym serwer nie
   otrzymuje hasla aplikacyjnego.
 - Publicznie weryfikowalny key transparency dla publicznych tozsamosci Ed25519.
+- Oddzielenie root identity key od vaultu i model zatwierdzania nowych
+  urzadzen bez wspoldzielenia klucza root na wszystkie urzadzenia.
 - Audytowane X3DH/PQXDH + Double Ratchet dla rozmow 1:1.
 - MLS albo audytowany sender-key protocol dla grup.
 - Rekey dla przyszlych grup przez MLS albo audytowany protokol sender-key.
@@ -112,6 +119,8 @@ odporny na aktywnie zlosliwy serwer albo post-compromise compromise recovery.
 - Wymuszaj HTTPS/WSS poza localhostem.
 - `ADMIN_TOKEN`, klucz release i backupy trzymaj poza repozytorium.
 - Klucz podpisywania release trzymaj poza serwerem produkcyjnym.
+- `SECURE_CHAT_UPDATE_KEY_ID` musi odpowiadac `keyId` w podpisanym
+  manife?cie; rotacje kluczy release dokumentuj razem z wydaniem.
 - Nie uzywaj hasla konta jako sekretu vaultu. Klient to blokuje, poniewaz
   haslo konta jest przekazywane serwerowi podczas logowania.
 - Nazwy urzadzen traktuj jako metadane. Klient wysyla tylko neutralna nazwe

@@ -19,6 +19,7 @@ class CloudPendingLogin {
   const CloudPendingLogin({
     required this.pendingToken,
     required this.challenge,
+    required this.challengeIssuedAtMs,
     required this.challengeExpiresAtMs,
     required this.userId,
     required this.deviceId,
@@ -31,6 +32,7 @@ class CloudPendingLogin {
 
   final String pendingToken;
   final String challenge;
+  final int challengeIssuedAtMs;
   final int challengeExpiresAtMs;
   final String userId;
   final String deviceId;
@@ -82,6 +84,10 @@ class MessagePage {
 
 class CloudApiClient {
   CloudApiClient({required this.serverUrl, this.token});
+
+  static const _requestTimeout = Duration(seconds: 30);
+  static const _connectTimeout = Duration(seconds: 10);
+  static const _maxJsonResponseBytes = 2 * 1024 * 1024;
 
   final String serverUrl;
   final String? token;
@@ -142,6 +148,7 @@ class CloudApiClient {
     required String keyAgreementPublicKey,
     required String identityPublicKey,
     required String keyAgreementPublicKeySignature,
+    required String serverOrigin,
     required String vaultSalt,
     required Map<String, dynamic> encryptedVault,
     String inviteToken = '',
@@ -155,6 +162,7 @@ class CloudApiClient {
       'keyAgreementPublicKey': keyAgreementPublicKey,
       'identityPublicKey': identityPublicKey,
       'keyAgreementPublicKeySignature': keyAgreementPublicKeySignature,
+      'serverOrigin': serverOrigin,
       'vaultSalt': vaultSalt,
       'encryptedVault': encryptedVault,
       'vaultKdf': vaultKdf,
@@ -168,18 +176,21 @@ class CloudApiClient {
     required String password,
     required String deviceId,
     required String deviceName,
+    required String serverOrigin,
   }) async {
     final raw = await _post('/v2/login', {
       'username': username,
       'password': password,
       'deviceId': deviceId,
       'deviceName': deviceName,
+      'serverOrigin': serverOrigin,
     });
     final user = asStringKeyMap(raw['user'], 'user');
     final vault = raw['encryptedVault'];
     return CloudPendingLogin(
       pendingToken: requiredString(raw, 'pendingToken'),
       challenge: requiredString(raw, 'challenge'),
+      challengeIssuedAtMs: requiredInt(raw, 'challengeIssuedAtMs'),
       challengeExpiresAtMs: requiredInt(raw, 'challengeExpiresAtMs'),
       userId: requiredString(user, 'userId'),
       deviceId: requiredString(raw, 'deviceId'),
@@ -492,15 +503,18 @@ class CloudApiClient {
     Map<String, String>? query,
   ]) async {
     final client = HttpClient();
+    client.connectionTimeout = _connectTimeout;
     try {
-      final request = await client.openUrl(method, _httpUri(path, query));
+      final request = await client
+          .openUrl(method, _httpUri(path, query))
+          .timeout(_connectTimeout);
       request.headers.contentType = ContentType.json;
       if (token != null && token!.isNotEmpty) {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       }
       if (body != null) request.add(utf8.encode(jsonEncode(body)));
-      final response = await request.close();
-      final text = await utf8.decodeStream(response);
+      final response = await request.close().timeout(_requestTimeout);
+      final text = await _readLimitedUtf8(response).timeout(_requestTimeout);
       final decoded = text.isEmpty ? <String, dynamic>{} : jsonDecode(text);
       final json = (decoded as Map).cast<String, dynamic>();
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -515,6 +529,21 @@ class CloudApiClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  Future<String> _readLimitedUtf8(HttpClientResponse response) async {
+    final contentLength = response.contentLength;
+    if (contentLength > _maxJsonResponseBytes) {
+      throw StateError('Odpowiedz serwera jest za duza.');
+    }
+    final chunks = <int>[];
+    await for (final chunk in response) {
+      chunks.addAll(chunk);
+      if (chunks.length > _maxJsonResponseBytes) {
+        throw StateError('Odpowiedz serwera jest za duza.');
+      }
+    }
+    return utf8.decode(chunks);
   }
 
   CloudAuthResult _authResult(Map<String, dynamic> raw, String serverUrl) {

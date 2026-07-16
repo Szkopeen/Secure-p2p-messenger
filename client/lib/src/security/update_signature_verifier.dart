@@ -8,6 +8,10 @@ class UpdateSignatureVerifier {
   static const publicKeyBase64 = String.fromEnvironment(
     'SECURE_CHAT_UPDATE_PUBLIC_KEY',
   );
+  static const publicKeyId = String.fromEnvironment(
+    'SECURE_CHAT_UPDATE_KEY_ID',
+    defaultValue: 'primary-ed25519-v1',
+  );
   static const protocol = 'secure-chat-update-manifest/v1';
 
   Future<void> verifyManifest(Map<String, dynamic> manifest) async {
@@ -27,6 +31,11 @@ class UpdateSignatureVerifier {
     }
 
     final payload = asStringKeyMap(manifest['latest'], 'latest');
+    if (payload['keyId'] != publicKeyId || signature['keyId'] != publicKeyId) {
+      throw StateError(
+        'Manifest aktualizacji jest podpisany nieznanym kluczem.',
+      );
+    }
     final signatureBytes = unb64(requiredString(signature, 'signature'));
     final valid = await Ed25519().verify(
       canonicalJsonBytes({'protocol': protocol, 'latest': payload}),

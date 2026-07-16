@@ -23,7 +23,7 @@ npm run generate-update-key -- --out .\secrets\update-signing-key.pem
 Polecenie wypisze publiczny klucz do builda klienta:
 
 ```text
---dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=...
+--dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=... --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 ```
 
 Prywatny klucz:
@@ -50,7 +50,7 @@ Windows:
 cd client
 flutter clean
 flutter pub get
-flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 Compress-Archive -Path ".\build\windows\x64\runner\Release\*" -DestinationPath "$env:USERPROFILE\Desktop\secure-p2p-windows.zip" -Force
 ```
 
@@ -58,7 +58,7 @@ Android:
 
 ```powershell
 cd client
-flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 Copy-Item ".\build\app\outputs\flutter-apk\app-release.apk" "$env:USERPROFILE\Desktop\secure-p2p-android.apk" -Force
 ```
 
@@ -67,7 +67,7 @@ Linux buduje sie na Linuxie:
 ```bash
 cd ~/secure-p2p/client
 flutter pub get
-flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 cd build/linux/x64/release
 zip -r ~/secure-p2p-linux.zip bundle
 ```
@@ -90,14 +90,14 @@ release wygeneruj manifest i katalog plikow:
 
 ```bash
 cd server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Aktualizacja komunikatora"
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --key-id primary-ed25519-v1 --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Aktualizacja komunikatora"
 ```
 
 Jesli masz tez paczke Linux:
 
 ```bash
 cd server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Aktualizacja komunikatora"
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --key-id primary-ed25519-v1 --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Aktualizacja komunikatora"
 ```
 
 `--build` musi byc wiekszy niz numer builda w aplikacji. Jesli aplikacja ma `version: 1.0.0+1`, kolejna publikacja powinna miec np. `--version 1.0.1 --build 2`.
@@ -119,9 +119,11 @@ W aplikacji wejdz w `Ustawienia -> Aktualizacje` i kliknij odswiezanie.
 
 ## 5. Co robi przycisk w aplikacji
 
-Przycisk najpierw sprawdza podpis manifestu Ed25519. Jesli podpis jest
-niepoprawny albo go brakuje, aplikacja blokuje aktualizacje. Dopiero potem
-pobiera paczke z serwera i sprawdza jej SHA-256 z manifestu. Windows i Linux
-probuja od razu otworzyc folder z pobranym plikiem. Android pobiera APK do
-katalogu aplikacji; system moze poprosic o zgode na instalowanie aplikacji
-spoza sklepu.
+Przycisk najpierw sprawdza podpis manifestu Ed25519 oraz `keyId`. Jesli podpis
+jest niepoprawny, ma nieznany `keyId` albo go brakuje, aplikacja blokuje
+aktualizacje. Dopiero potem pobiera paczke z serwera, porownuje
+`Content-Length` z podpisanym `size`, przerywa strumien po przekroczeniu
+rozmiaru, zapisuje do losowego pliku `.part` i sprawdza SHA-256 z manifestu.
+Windows i Linux probuja od razu otworzyc folder z pobranym plikiem. Android
+pobiera APK do katalogu aplikacji; system moze poprosic o zgode na instalowanie
+aplikacji spoza sklepu.

@@ -97,6 +97,8 @@ Wykonane elementy zabezpieczen:
 - Klient wymaga HTTPS/WSS poza localhostem.
 - WebSocket cloud uzywa krotko zyjacego, jednorazowego ticketu z `/v2/ws-ticket`.
 - Dlugotrwaly token sesji nie trafia do URL WebSocket ani do naglowkow handshake.
+- Nieuwierzytelnione polaczenia WebSocket maja twardy limit globalny, per IP,
+  limit nowych prob w oknie czasowym i krotki timeout pre-auth.
 - Kazde konto ma trwala tozsamosc Ed25519.
 - Klucz X25519 do opakowywania kluczy rozmow jest podpisany tozsamoscia
   Ed25519.
@@ -109,6 +111,8 @@ Wykonane elementy zabezpieczen:
   poprzedniego dowodu.
 - Nowe wiadomosci maja anty-replay: licznik, hash poprzedniej wiadomosci,
   genesis hash i kanoniczny hash calej koperty.
+- Serwer wymaga, zeby `conversationId` w AAD wiadomosci zgadzal sie z rozmowa
+  z zadania, zanim zapisze wiadomosc.
 - Nowe wiadomosci wyprowadzaja osobny klucz AEAD przez HKDF-SHA256 z klucza
   rozmowy, epoki, licznika, ID wiadomosci i poprzedniego hasha. To ogranicza
   reuse klucza wiadomosci, ale nie jest pelnym Double Ratchet.
@@ -124,9 +128,11 @@ Wykonane elementy zabezpieczen:
 - Uniewaznione urzadzenie traci sesje, polaczenia WebSocket i mozliwosc
   wysylania nowych podpisanych wiadomosci.
 - Manifest aktualizacji aplikacji jest podpisywany Ed25519 i weryfikowany
-  kluczem publicznym wbudowanym w klienta.
+  kluczem publicznym oraz `keyId` wbudowanymi w klienta.
 - Manifest i artefakty aktualizacji sa podawane bez podazania za symlinkami i
   po sprawdzeniu, ze finalna sciezka zostaje w katalogu aktualizacji.
+- Klient sprawdza podpisany rozmiar artefaktu, `Content-Length`, liczbe
+  odebranych bajtow i SHA-256, zapisujac najpierw do losowego pliku `.part`.
 
 ## Znane ograniczenia
 
@@ -140,6 +146,10 @@ Wykonane elementy zabezpieczen:
   ukrywa haslo logowania przed aktywnie zlosliwym serwerem.
 - Nie ma jeszcze Double Ratchet ani MLS, wiec forward secrecy i
   post-compromise security sa ograniczone.
+- Prywatny klucz tozsamosci konta nadal znajduje sie w zaszyfrowanym vaulcie.
+  Kompromitacja odblokowanego urzadzenia moze wiec oznaczac kompromitacje
+  tozsamosci calego konta, dopoki nie powstanie model zatwierdzania urzadzen bez
+  eksportowalnego root key na kazdym urzadzeniu.
 - Brak Double Ratchet/PQXDH, key transparency oraz OPAQUE/PAKE jest blokada dla
   scenariuszy wysokiego ryzyka. Nie wolno opisywac tej wersji jako odpornej na
   zlosliwy serwer albo porownywalnej z Signalem, dopoki te protokoly nie beda
@@ -239,20 +249,20 @@ dart analyze
 Windows:
 
 ```powershell
-flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 ```
 
 Android:
 
 ```powershell
-flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 ```
 
 Linux x64:
 
 ```bash
 cd client
-flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 ```
 
 W projekcie nie budujemy juz wersji webowej.
@@ -285,7 +295,7 @@ Manifest musi byc podpisany Ed25519. Prywatny klucz release trzymaj poza repo i
 poza serwerem produkcyjnym. Publiczny klucz jest wbudowywany w klienta przez:
 
 ```text
---dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=...
+--dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=... --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 ```
 
 Szczegoly sa w [docs/AKTUALIZACJE_PL.md](docs/AKTUALIZACJE_PL.md) i

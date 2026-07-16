@@ -69,7 +69,7 @@ npm run generate-update-key -- --out ./secrets/update-signing-key.pem
 Publiczny klucz z wyniku komendy wbuduj w klienta przez:
 
 ```text
---dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=...
+--dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=... --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 ```
 
 ## 6. Build artefaktow
@@ -82,7 +82,7 @@ Windows:
 cd client
 flutter clean
 flutter pub get
-flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build windows --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 Compress-Archive -Path ".\build\windows\x64\runner\Release\*" -DestinationPath "$env:USERPROFILE\Desktop\secure-p2p-windows.zip" -Force
 ```
 
@@ -92,7 +92,7 @@ Android:
 cd client
 flutter clean
 flutter pub get
-flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build apk --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 Copy-Item ".\build\app\outputs\flutter-apk\app-release.apk" "$env:USERPROFILE\Desktop\secure-p2p-android.apk" -Force
 ```
 
@@ -102,7 +102,7 @@ Linux buduj na Linuxie:
 cd client
 flutter clean
 flutter pub get
-flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ
+flutter build linux --release --dart-define=SECURE_CHAT_UPDATE_PUBLIC_KEY=TU_WKLEJ_PUBLICZNY_KLUCZ --dart-define=SECURE_CHAT_UPDATE_KEY_ID=primary-ed25519-v1
 cd build/linux/x64/release
 zip -r ~/secure-p2p-linux.zip bundle
 ```
@@ -131,10 +131,11 @@ Na zaufanej maszynie release:
 
 ```bash
 cd server
-npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Nowa wersja aplikacji"
+npm run publish-update -- --version 1.0.1 --build 2 --windows ~/secure-p2p-windows.zip --linux ~/secure-p2p-linux.zip --android ~/secure-p2p-android.apk --signing-key ./secrets/update-signing-key.pem --key-id primary-ed25519-v1 --manifest ./updates/manifest.json --files-dir ./updates/files --notes "Nowa wersja aplikacji"
 ```
 
-`publish-update` kopiuje artefakty, liczy SHA-256 i podpisuje manifest Ed25519.
+`publish-update` kopiuje artefakty, liczy SHA-256, zapisuje `size` i `keyId`,
+a potem podpisuje manifest Ed25519.
 Na serwer produkcyjny wyslij tylko `updates/manifest.json` oraz
 `updates/files/`. Prywatnego klucza release nie kopiuj na produkcje.
 
@@ -147,9 +148,9 @@ curl https://chat.example.com/updates/manifest.json
 
 Nastepnie uruchom klienta z poprzedniej wersji i sprawdz, czy:
 
-- manifest ma poprawny podpis,
+- manifest ma poprawny podpis i oczekiwany `keyId`,
 - aplikacja widzi nowszy `buildNumber`,
-- pobrany artefakt ma zgodny SHA-256,
+- pobrany artefakt ma zgodny rozmiar i SHA-256,
 - instalacja nie wymaga omijania ostrzezenia o blednym podpisie manifestu.
 
 ## 10. Notatka release
@@ -159,7 +160,7 @@ Dla kazdego wydania zapisz:
 - commit `git rev-parse HEAD`,
 - wersje Node, npm, Dart i Flutter,
 - numer `version` i `build`,
-- publiczny klucz aktualizacji,
+- publiczny klucz aktualizacji i `keyId`,
 - SHA-256 artefaktow,
 - wynik testow,
 - informacje, czy release byl z clean tree,

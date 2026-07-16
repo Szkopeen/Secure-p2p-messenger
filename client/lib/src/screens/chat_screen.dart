@@ -16,11 +16,7 @@ import '../platform/file_exporter.dart';
 import '../platform/media_cache.dart';
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({
-    required this.appState,
-    required this.contact,
-    super.key,
-  });
+  const ChatScreen({required this.appState, required this.contact, super.key});
 
   final AppState appState;
   final Contact contact;
@@ -79,11 +75,7 @@ class _ChatScreenState extends State<ChatScreen> {
           appBar: AppBar(
             title: Row(
               children: [
-                _ContactAvatar(
-                  contact: contact,
-                  radius: 18,
-                  online: online,
-                ),
+                _ContactAvatar(contact: contact, radius: 18, online: online),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(

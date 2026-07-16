@@ -18,7 +18,9 @@ void main() {
 
   test('wektor klient-serwer ma identyczny canonical JSON i SHA-256', () {
     final vector = jsonDecode(
-      File('../test-vectors/protocol-canonical-v1.json').readAsStringSync(),
+      File(
+        '../test-vectors/protocol-canonical-v1.json',
+      ).readAsStringSync(),
     ) as Map<String, dynamic>;
     final canonical = canonicalJson(vector['value']);
     expect(canonical, vector['canonical']);
@@ -56,14 +58,18 @@ void main() {
         serverOrigin,
       );
       expect(
-          canonicalCloudOrigin('wss://chat.example.com/v2/ws'), serverOrigin);
+        canonicalCloudOrigin('wss://chat.example.com/v2/ws'),
+        serverOrigin,
+      );
       expect(
         canonicalCloudOrigin('https://chat.example.com:8443/api'),
         'https://chat.example.com:8443',
       );
       expect(canonicalCloudOrigin('https://chat.example.com.'), serverOrigin);
       expect(
-          canonicalCloudOrigin('https://chat.example.com:443'), serverOrigin);
+        canonicalCloudOrigin('https://chat.example.com:443'),
+        serverOrigin,
+      );
       expect(
         canonicalCloudOrigin('https://chat.example.com:444'),
         'https://chat.example.com:444',
@@ -121,37 +127,39 @@ void main() {
       );
     });
 
-    test('Argon2id jest domyslny, deterministyczny i rozny od legacy PBKDF2',
-        () async {
-      final crypto = CloudCrypto();
-      final salt = b64(List<int>.generate(16, (index) => index + 1));
-      const testParameters = {
-        'algorithm': 'argon2id',
-        'version': 19,
-        'memoryKiB': 8192,
-        'iterations': 2,
-        'lanes': 1,
-        'keyBytes': 32,
-      };
-      final first = await crypto.deriveVaultKey(
-        vaultSecret: 'bardzo-dlugi-sekret-testowy',
-        salt: salt,
-        parameters: testParameters,
-      );
-      final second = await crypto.deriveVaultKey(
-        vaultSecret: 'bardzo-dlugi-sekret-testowy',
-        salt: salt,
-        parameters: testParameters,
-      );
-      final legacy = await crypto.deriveVaultKey(
-        vaultSecret: 'bardzo-dlugi-sekret-testowy',
-        salt: salt,
-        parameters: null,
-      );
+    test(
+      'Argon2id jest domyslny, deterministyczny i rozny od legacy PBKDF2',
+      () async {
+        final crypto = CloudCrypto();
+        final salt = b64(List<int>.generate(16, (index) => index + 1));
+        const testParameters = {
+          'algorithm': 'argon2id',
+          'version': 19,
+          'memoryKiB': 8192,
+          'iterations': 2,
+          'lanes': 1,
+          'keyBytes': 32,
+        };
+        final first = await crypto.deriveVaultKey(
+          vaultSecret: 'bardzo-dlugi-sekret-testowy',
+          salt: salt,
+          parameters: testParameters,
+        );
+        final second = await crypto.deriveVaultKey(
+          vaultSecret: 'bardzo-dlugi-sekret-testowy',
+          salt: salt,
+          parameters: testParameters,
+        );
+        final legacy = await crypto.deriveVaultKey(
+          vaultSecret: 'bardzo-dlugi-sekret-testowy',
+          salt: salt,
+          parameters: null,
+        );
 
-      expect(first, second);
-      expect(first, isNot(legacy));
-    });
+        expect(first, second);
+        expect(first, isNot(legacy));
+      },
+    );
   });
 
   group('Safety number', () {
@@ -218,6 +226,8 @@ void main() {
 
       expect(envelope['conversationId'], 'conversation-1');
       expect(envelope['keyEpoch'], 2);
+      expect(envelope['keyWrapAadVersion'], 2);
+      expect(envelope['recipientPublicKey'], bob.keyAgreementPublicKey);
       expect(
         await crypto.unwrapConversationKey(
           vault: bob,
@@ -238,6 +248,19 @@ void main() {
           expectedSenderIdentityPublicKey: alice.identityPublicKey,
           expectedSenderKeyAgreementPublicKey: alice.keyAgreementPublicKey,
           envelope: tampered,
+        ),
+        throwsStateError,
+      );
+
+      final wrongRecipient = Map<String, dynamic>.of(envelope)
+        ..['recipientPublicKey'] = alice.keyAgreementPublicKey;
+      expect(
+        () => crypto.unwrapConversationKey(
+          vault: bob,
+          localUserId: 'uuid-bob',
+          expectedSenderIdentityPublicKey: alice.identityPublicKey,
+          expectedSenderKeyAgreementPublicKey: alice.keyAgreementPublicKey,
+          envelope: wrongRecipient,
         ),
         throwsStateError,
       );

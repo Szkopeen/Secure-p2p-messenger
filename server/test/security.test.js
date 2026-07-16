@@ -13,10 +13,16 @@ import {
 } from '../src/v2Store.js';
 import { safeOpenUpdateFile } from '../src/updateFiles.js';
 
-async function httpRequest(store, method, pathname, { body, token } = {}) {
-  const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+async function httpRequest(store, method, pathname, { body, rawBody, token, headers = {} } = {}) {
+  const chunks = rawBody !== undefined
+    ? [Buffer.from(rawBody)]
+    : body === undefined
+      ? []
+      : [Buffer.from(JSON.stringify(body))];
+  const req = Readable.from(chunks);
   req.method = method;
-  req.headers = token ? { authorization: `Bearer ${token}` } : {};
+  req.headers = { ...headers };
+  if (token) req.headers.authorization = `Bearer ${token}`;
   req.clientIp = '127.0.0.1';
   let status = 0;
   let responseBody = '';
@@ -206,6 +212,14 @@ function resignMessage(payload, privateKey) {
   };
 }
 
+function messageRequestBody(payload, overrides = {}) {
+  return {
+    messageId: payload.messageId,
+    conversationId: payload.aad?.conversationId,
+    ...overrides
+  };
+}
+
 function fixture() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-test-'));
   const store = new V2Store({ dataDir });
@@ -244,6 +258,30 @@ test('konfiguracja akceptuje produkcyjny limit WebSocket 16 MiB', async () => {
     if (previousAdmin === undefined) delete process.env.ADMIN_TOKEN;
     else process.env.ADMIN_TOKEN = previousAdmin;
   }
+});
+
+test('body HTTP zwraca precyzyjne statusy dla media type, rozmiaru i JSON', async () => {
+  const store = new V2Store({ dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-body-')) });
+  const unsupported = await httpRequest(store, 'POST', '/v2/login', {
+    rawBody: '{}',
+    headers: { 'content-type': 'text/plain' }
+  });
+  assert.equal(unsupported.status, 415);
+  assert.equal(unsupported.body.error, 'UNSUPPORTED_MEDIA_TYPE');
+
+  const tooLarge = await httpRequest(store, 'POST', '/v2/login', {
+    rawBody: '"'.padEnd(33 * 1024, 'x'),
+    headers: { 'content-type': 'application/json' }
+  });
+  assert.equal(tooLarge.status, 413);
+  assert.equal(tooLarge.body.error, 'PAYLOAD_TOO_LARGE');
+
+  const invalid = await httpRequest(store, 'POST', '/v2/login', {
+    rawBody: '{"username":',
+    headers: { 'content-type': 'application/json' }
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.error, 'INVALID_JSON');
 });
 
 test('pliki aktualizacji odrzucaja symlink manifestu i artefaktu', (t) => {
@@ -370,11 +408,16 @@ test('jednorazowa normalizacja stanu nie czyta ponownie legacy messages.json', (
 
 test('pelna sesja powstaje dopiero po podpisaniu challenge kluczem z vaultu', () => {
   const { store, user, privateKey } = fixture();
-  const pending = store.createPendingLogin(user, crypto.randomUUID(), 'test');
+  const pending = store.createPendingLogin(user, crypto.randomUUID(), 'test', 'https://chat.example');
   assert.equal(Object.keys(store.sessions.sessions).length, 0);
   const payload = Buffer.from(JSON.stringify({
-    protocol: 'secure-chat/login-challenge/v1', challenge: pending.challenge,
-    userId: pending.userId, deviceId: pending.deviceId, expiresAtMs: pending.expiresAtMs
+    protocol: 'secure-chat/login-challenge/v1',
+    serverOrigin: pending.serverOrigin,
+    challenge: pending.challenge,
+    userId: pending.userId,
+    deviceId: pending.deviceId,
+    issuedAtMs: pending.issuedAtMs,
+    expiresAtMs: pending.expiresAtMs
   }));
   const signature = crypto.sign(null, payload, privateKey).toString('base64');
   assert.ok(store.completePendingLogin(pending.token, signature));
@@ -402,6 +445,43 @@ test('ticket WebSocket jest jednorazowy, a revoke zamyka aktywny socket', () => 
   assert.equal(socket.closed, true);
 });
 
+test('limiter pre-auth WebSocket blokuje nadmiar globalnie, per IP i per okno', () => {
+  security.resetWsPreAuthLimits();
+  const limits = {
+    maxGlobal: 2,
+    maxPerIp: 1,
+    maxPerWindow: 2,
+    windowMs: 60 * 1000,
+    timeoutMs: 5000
+  };
+  try {
+    const first = security.acquireWsPreAuthSlot(authReq('203.0.113.10'), limits);
+    assert.ok(first);
+    assert.equal(security.acquireWsPreAuthSlot(authReq('203.0.113.10'), limits), null);
+    const second = security.acquireWsPreAuthSlot(authReq('203.0.113.11'), limits);
+    assert.ok(second);
+    assert.equal(security.acquireWsPreAuthSlot(authReq('203.0.113.12'), limits), null);
+
+    first.release();
+    const third = security.acquireWsPreAuthSlot(authReq('203.0.113.12'), limits);
+    assert.ok(third);
+    third.release();
+    const rateLimitedAgain = security.acquireWsPreAuthSlot(authReq('203.0.113.10'), {
+      ...limits,
+      maxPerIp: 10
+    });
+    assert.ok(rateLimitedAgain);
+    rateLimitedAgain.release();
+    assert.equal(security.acquireWsPreAuthSlot(authReq('203.0.113.10'), {
+      ...limits,
+      maxPerIp: 10
+    }), null);
+    second.release();
+  } finally {
+    security.resetWsPreAuthLimits();
+  }
+});
+
 test('wiadomosci sa trwale, indeksowane i stronicowane w SQLite', () => {
   const { dataDir, store } = fixture();
   for (let seq = 1; seq <= 3; seq += 1) {
@@ -423,7 +503,7 @@ test('wiadomosci sa trwale, indeksowane i stronicowane w SQLite', () => {
 test('serwer odrzuca downgrade legacy i losowy podpis wiadomosci', () => {
   const { auth, payload } = signedProtocolFixture();
   assert.equal(
-    security.validateCloudMessagePayload(payload, { messageId: payload.messageId }, auth),
+    security.validateCloudMessagePayload(payload, messageRequestBody(payload), auth),
     null
   );
   const legacy = structuredClone(payload);
@@ -432,13 +512,25 @@ test('serwer odrzuca downgrade legacy i losowy podpis wiadomosci', () => {
   delete legacy.aad.messageCounter;
   delete legacy.aad.previousMessageHash;
   assert.match(
-    security.validateCloudMessagePayload(legacy, { messageId: legacy.messageId }, auth),
+    security.validateCloudMessagePayload(legacy, messageRequestBody(legacy), auth),
     /licznik|wymaga/
   );
   const forged = { ...payload, deviceSignature: crypto.randomBytes(64).toString('base64url') };
   assert.match(
-    security.validateCloudMessagePayload(forged, { messageId: forged.messageId }, auth),
+    security.validateCloudMessagePayload(forged, messageRequestBody(forged), auth),
     /podpis/
+  );
+});
+
+test('serwer odrzuca wiadomosc z conversationId AAD innej rozmowy', () => {
+  const { auth, payload } = signedProtocolFixture();
+  assert.match(
+    security.validateCloudMessagePayload(
+      payload,
+      messageRequestBody(payload, { conversationId: 'conversation-other' }),
+      auth
+    ),
+    /conversationId/
   );
 });
 
@@ -464,7 +556,7 @@ test('serwer odrzuca certyfikat obcego lub uniewaznionego urzadzenia', () => {
   };
   assert.match(security.validateCloudMessagePayload(
     { ...payload, deviceCertificate: foreignCertificate },
-    { messageId: payload.messageId },
+    messageRequestBody(payload),
     auth
   ), /certyfikat|podpis/);
   auth.user.deviceList.revokedDevices.push({
@@ -476,7 +568,7 @@ test('serwer odrzuca certyfikat obcego lub uniewaznionego urzadzenia', () => {
   auth.user.deviceList.devices = [];
   assert.match(security.validateCloudMessagePayload(
     payload,
-    { messageId: payload.messageId },
+    messageRequestBody(payload),
     auth
   ), /certyfikat|podpis/);
 });
@@ -504,7 +596,7 @@ test('serwer odrzuca wygasly certyfikat i podpis innego urzadzenia', () => {
   }, device.privateKey);
   assert.match(security.validateCloudMessagePayload(
     expiredPayload,
-    { messageId: expiredPayload.messageId },
+    messageRequestBody(expiredPayload),
     auth
   ), /certyfikat|podpis/);
 
@@ -513,7 +605,7 @@ test('serwer odrzuca wygasly certyfikat i podpis innego urzadzenia', () => {
   const wrongDevicePayload = resignMessage(payload, otherDevice.privateKey);
   assert.match(security.validateCloudMessagePayload(
     wrongDevicePayload,
-    { messageId: wrongDevicePayload.messageId },
+    messageRequestBody(wrongDevicePayload),
     auth
   ), /podpis/);
 });
@@ -724,6 +816,50 @@ test('publiczny profil moze ukryc liste urzadzen przed katalogiem', () => {
   assert.equal(minimal.deviceListHash, '');
 });
 
+test('serwer odrzuca duplikaty w podpisanej liscie urzadzen', () => {
+  const baseDevice = {
+    deviceId: 'device-duplicate',
+    deviceSigningPublicKey: 'x'.repeat(32),
+    certificateHash: 'h'.repeat(32),
+    addedAt: new Date().toISOString(),
+    deviceEpoch: 1
+  };
+  const baseRevoked = {
+    deviceId: 'device-revoked',
+    deviceSigningPublicKey: 'x'.repeat(32),
+    deviceCertificateHash: 'h'.repeat(32),
+    revokedDeviceEpoch: 1,
+    revokedAt: new Date().toISOString(),
+    reasonCode: 'test'
+  };
+  const list = {
+    v: 1,
+    accountId: crypto.randomUUID(),
+    serverOrigin: 'https://chat.example',
+    deviceListEpoch: 1,
+    previousDeviceListHash: '',
+    identityRotationEpoch: 0,
+    devices: [baseDevice],
+    revokedDevices: [baseRevoked],
+    signature: 's'.repeat(32),
+    updatedAt: new Date().toISOString()
+  };
+  assert.equal(security.isValidDeviceList(list), true);
+  assert.equal(security.isValidDeviceList({
+    ...list,
+    devices: [baseDevice, { ...baseDevice }]
+  }), false);
+  assert.equal(security.isValidDeviceList({
+    ...list,
+    revokedDevices: [baseRevoked, { ...baseRevoked }]
+  }), false);
+  assert.equal(security.isValidDeviceList({
+    ...list,
+    devices: [baseDevice],
+    revokedDevices: [{ ...baseRevoked, deviceId: baseDevice.deviceId }]
+  }), false);
+});
+
 test('serwer anonimizuje nazwy urzadzen przed zapisem i publikacja', () => {
   const { store, user } = fixture();
   const legacyDeviceId = 'legacy-device';
@@ -744,7 +880,7 @@ test('serwer anonimizuje nazwy urzadzen przed zapisem i publikacja', () => {
   assert.equal(user.devices['new-device'].deviceName, 'Device');
   assert.equal(store.publicSession(hash, store.sessions.sessions[hash]).deviceName, 'Device');
 
-  const pending = store.createPendingLogin(user, 'pending-device', 'Windows device');
+  const pending = store.createPendingLogin(user, 'pending-device', 'Windows device', 'https://chat.example');
   assert.equal(pending.deviceName, 'Windows device');
 });
 

@@ -2,15 +2,7 @@ enum MessageDirection { inbound, outbound, system }
 
 enum MessageStatus { pending, sent, delivered, read, failed }
 
-enum PlainPayloadType {
-  text,
-  file,
-  retraction,
-  reaction,
-  pin,
-  receipt,
-  edit,
-}
+enum PlainPayloadType { text, file, retraction, reaction, pin, receipt, edit }
 
 enum ReceiptKind { delivered, read }
 
@@ -203,9 +195,7 @@ class PlainPayload {
             'Brak identyfikatora cofanej wiadomosci.',
           );
         }
-        return PlainPayload.retraction(
-          targetMessageId: targetMessageId,
-        );
+        return PlainPayload.retraction(targetMessageId: targetMessageId);
       case 'reaction':
         final targetMessageId = json['targetMessageId'] as String?;
         if (targetMessageId == null || targetMessageId.isEmpty) {

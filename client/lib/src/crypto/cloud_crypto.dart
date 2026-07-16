@@ -72,6 +72,7 @@ class CloudCrypto {
 
   static const vaultAad = 'secure-p2p-cloud-vault/v1';
   static const keyWrapAad = 'secure-p2p-cloud-keywrap/v1';
+  static const keyWrapAadVersion = 2;
   static const messageProtocol = 'secure-p2p-cloud-message/v1';
   static const messageChainProtocol = 'secure-chat/message-chain/v1';
   static const identityBindingProtocol = 'secure-p2p-identity-key-binding/v2';
@@ -886,12 +887,17 @@ class CloudCrypto {
       rightUserId: recipientUserId,
     );
     final nonce = secureRandomBytes(12);
-    final aad = canonicalJsonBytes({
-      'protocol': keyWrapAad,
-      'senderUserId': senderUserId,
-      'recipientUserId': recipientUserId,
-      'senderPublicKey': vault.keyAgreementPublicKey,
-    });
+    final aad = _keyWrapAadBytes(
+      conversationId: conversationId,
+      keyEpoch: keyEpoch,
+      senderUserId: senderUserId,
+      senderDeviceId: senderDeviceId,
+      recipientUserId: recipientUserId,
+      senderPublicKey: vault.keyAgreementPublicKey,
+      senderIdentityPublicKey: vault.identityPublicKey,
+      recipientPublicKey: recipientPublicKey,
+      version: keyWrapAadVersion,
+    );
     final box = await _aead.encrypt(
       unb64(conversationKey),
       secretKey: wrappingKey,
@@ -909,6 +915,8 @@ class CloudCrypto {
       'recipientUserId': recipientUserId,
       'senderPublicKey': vault.keyAgreementPublicKey,
       'senderIdentityPublicKey': vault.identityPublicKey,
+      'recipientPublicKey': recipientPublicKey,
+      'keyWrapAadVersion': keyWrapAadVersion,
       'nonce': b64(box.nonce),
       'ciphertext': b64(box.cipherText),
       'mac': b64(box.mac.bytes),
@@ -932,6 +940,8 @@ class CloudCrypto {
     required String challenge,
     required String userId,
     required String deviceId,
+    required String serverOrigin,
+    required int issuedAtMs,
     required int expiresAtMs,
   }) async {
     final keyPair = SimpleKeyPairData(
@@ -945,9 +955,11 @@ class CloudCrypto {
     final payload = utf8Bytes(
       jsonEncode({
         'protocol': 'secure-chat/login-challenge/v1',
+        'serverOrigin': serverOrigin,
         'challenge': challenge,
         'userId': userId,
         'deviceId': deviceId,
+        'issuedAtMs': issuedAtMs,
         'expiresAtMs': expiresAtMs,
       }),
     );
@@ -992,12 +1004,32 @@ class CloudCrypto {
       leftUserId: senderUserId,
       rightUserId: localUserId,
     );
-    final aad = canonicalJsonBytes({
-      'protocol': keyWrapAad,
-      'senderUserId': senderUserId,
-      'recipientUserId': localUserId,
-      'senderPublicKey': senderPublicKey,
-    });
+    final aadVersion = envelope['keyWrapAadVersion'] == keyWrapAadVersion
+        ? keyWrapAadVersion
+        : 1;
+    if (aadVersion == keyWrapAadVersion &&
+        requiredString(envelope, 'recipientPublicKey') !=
+            vault.keyAgreementPublicKey) {
+      throw StateError(
+        'Koperta klucza rozmowy jest dla innego klucza odbiorcy.',
+      );
+    }
+    final aad = _keyWrapAadBytes(
+      conversationId: requiredString(envelope, 'conversationId'),
+      keyEpoch: requiredInt(envelope, 'keyEpoch'),
+      senderUserId: senderUserId,
+      senderDeviceId: requiredString(envelope, 'senderDeviceId'),
+      recipientUserId: localUserId,
+      senderPublicKey: senderPublicKey,
+      senderIdentityPublicKey: requiredString(
+        envelope,
+        'senderIdentityPublicKey',
+      ),
+      recipientPublicKey: aadVersion == keyWrapAadVersion
+          ? requiredString(envelope, 'recipientPublicKey')
+          : vault.keyAgreementPublicKey,
+      version: aadVersion,
+    );
     final box = SecretBox(
       unb64(requiredString(envelope, 'ciphertext')),
       nonce: unb64(requiredString(envelope, 'nonce')),
@@ -1005,6 +1037,41 @@ class CloudCrypto {
     );
     final clear = await _aead.decrypt(box, secretKey: wrappingKey, aad: aad);
     return b64(clear);
+  }
+
+  Uint8List _keyWrapAadBytes({
+    required String conversationId,
+    required int keyEpoch,
+    required String senderUserId,
+    required String senderDeviceId,
+    required String recipientUserId,
+    required String senderPublicKey,
+    required String senderIdentityPublicKey,
+    required String recipientPublicKey,
+    required int version,
+  }) {
+    if (version == keyWrapAadVersion) {
+      return canonicalJsonBytes({
+        'protocol': keyWrapAad,
+        'keyWrapAadVersion': keyWrapAadVersion,
+        'envelopeProtocolVersion': 1,
+        'algorithm': 'X25519-HKDF-SHA256-AES-256-GCM',
+        'conversationId': conversationId,
+        'keyEpoch': keyEpoch,
+        'senderUserId': senderUserId,
+        'senderDeviceId': senderDeviceId,
+        'recipientUserId': recipientUserId,
+        'senderPublicKey': senderPublicKey,
+        'senderIdentityPublicKey': senderIdentityPublicKey,
+        'recipientPublicKey': recipientPublicKey,
+      });
+    }
+    return canonicalJsonBytes({
+      'protocol': keyWrapAad,
+      'senderUserId': senderUserId,
+      'recipientUserId': recipientUserId,
+      'senderPublicKey': senderPublicKey,
+    });
   }
 
   Future<Map<String, dynamic>> encryptMessage({

@@ -14,8 +14,9 @@ class SetupScreen extends StatefulWidget {
 
 class _SetupScreenState extends State<SetupScreen> {
   final _cloudFormKey = GlobalKey<FormState>();
-  final _cloudServerUrl =
-      TextEditingController(text: 'https://chat.example.com');
+  final _cloudServerUrl = TextEditingController(
+    text: 'https://chat.example.com',
+  );
   final _cloudUsername = TextEditingController();
   final _cloudPassword = TextEditingController();
   final _cloudVaultSecret = TextEditingController();

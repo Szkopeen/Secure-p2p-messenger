@@ -40,6 +40,7 @@ Opcje:
   --manifest     Sciezka manifestu. Domyslnie UPDATE_MANIFEST_FILE albo ./updates/manifest.json.
   --files-dir    Katalog plikow. Domyslnie UPDATE_FILES_DIR albo ./updates/files.
   --signing-key  Prywatny klucz Ed25519 PEM. Domyslnie UPDATE_SIGNING_KEY_FILE.
+  --key-id       Identyfikator klucza podpisu. Domyslnie UPDATE_SIGNING_KEY_ID albo primary-ed25519-v1.
 `.trim();
 }
 
@@ -145,6 +146,10 @@ function main() {
   if (!signingKeyFile) {
     throw new Error('Brak --signing-key albo UPDATE_SIGNING_KEY_FILE. Nie publikuje niepodpisanego manifestu.');
   }
+  const keyId = (args['key-id'] || process.env.UPDATE_SIGNING_KEY_ID || 'primary-ed25519-v1').trim();
+  if (!/^[a-zA-Z0-9_.:-]{3,80}$/.test(keyId)) {
+    throw new Error('--key-id ma niepoprawny format.');
+  }
 
   const artifacts = {};
   for (const platform of platforms) {
@@ -159,6 +164,7 @@ function main() {
   const latest = {
     version,
     buildNumber,
+    keyId,
     releasedAt: new Date().toISOString(),
     notes: args.notes.length > 0 ? args.notes : ['Nowa wersja aplikacji.'],
     artifacts
@@ -169,6 +175,7 @@ function main() {
     signature: {
       protocol: 'secure-chat-update-manifest/v1',
       algorithm: 'Ed25519',
+      keyId,
       signature: signManifestLatest(latest, signingKeyFile)
     }
   };

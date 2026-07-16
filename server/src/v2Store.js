@@ -16,6 +16,7 @@ const MAX_ACCOUNT_BYTES = 1024 * 1024 * 1024;
 const MAX_INSTANCE_BYTES = 10 * 1024 * 1024 * 1024;
 const MAX_DAILY_ACCOUNT_BYTES = 100 * 1024 * 1024;
 const MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
+const STATFS_CACHE_MS = 5000;
 const DEFAULT_SESSION_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const DEFAULT_SESSION_IDLE_TTL_MS = 24 * 60 * 60 * 1000;
 const WS_TICKET_TTL_MS = 30 * 1000;
@@ -23,6 +24,13 @@ const WS_TICKET_MAX_GLOBAL = 10_000;
 const WS_TICKET_MAX_PER_SESSION = 4;
 const WS_TICKET_WINDOW_MS = 60 * 1000;
 const WS_TICKET_MAX_PER_WINDOW = 30;
+const DEFAULT_WS_PREAUTH_LIMITS = Object.freeze({
+  timeoutMs: 5000,
+  maxGlobal: 500,
+  maxPerIp: 8,
+  maxPerWindow: 30,
+  windowMs: 10000
+});
 const AUTH_WINDOW_MS = 60 * 1000;
 const AUTH_PAIR_MAX_ATTEMPTS = 10;
 const AUTH_ACCOUNT_MAX_ATTEMPTS = 20;
@@ -43,9 +51,14 @@ const PASSWORD_SCRYPT_LEGACY_PARAMS = Object.freeze({ N: 16384, r: 8, p: 1 });
 const DEVICE_CERTIFICATE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 10 * 60 * 1000;
+const MAX_ACTIVE_DEVICES = 64;
+const MAX_REVOKED_DEVICES = 512;
 const authIpAttempts = new Map();
 const authAccountAttempts = new Map();
 const authPairAttempts = new Map();
+const wsPreAuthByIp = new Map();
+const wsPreAuthAttempts = new Map();
+let wsPreAuthGlobal = 0;
 const GENERIC_DEVICE_NAMES = new Set([
   'Device',
   'Windows device',
@@ -63,6 +76,13 @@ class ServerBusyError extends Error {
   constructor(message = 'Serwer jest chwilowo przeciazony.') {
     super(message);
     this.code = 'SERVER_BUSY';
+  }
+}
+
+class BodyReadError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
   }
 }
 
@@ -261,6 +281,15 @@ function verifyMemberKeyEnvelope(envelope, user) {
   return verifyEd25519(user.identityPublicKey, canonicalBytes(unsigned), envelope.signature);
 }
 
+function cachedFreeDiskBytes(store, now = Date.now()) {
+  const cached = store.diskFreeCache;
+  if (cached && now - cached.checkedAtMs < STATFS_CACHE_MS) return cached.freeBytes;
+  const disk = fs.statfsSync(store.dataDir);
+  const freeBytes = Number(disk.bavail) * Number(disk.bsize);
+  store.diskFreeCache = { checkedAtMs: now, freeBytes };
+  return freeBytes;
+}
+
 function storageQuotaError(store, userId, conversationId, payloadBytes, now = Date.now()) {
   if (store.database.messageCount(conversationId) >= store.limits.messagesPerConversation) {
     return { status: 507, error: 'Rozmowa osiagnela limit przechowywania.' };
@@ -279,8 +308,7 @@ function storageQuotaError(store, userId, conversationId, payloadBytes, now = Da
       store.limits.dailyAccountBytes) {
     return { status: 429, error: 'Przekroczono dobowy limit uploadu konta.' };
   }
-  const disk = fs.statfsSync(store.dataDir);
-  const freeBytes = Number(disk.bavail) * Number(disk.bsize);
+  const freeBytes = cachedFreeDiskBytes(store, now);
   if (!Number.isFinite(freeBytes) || freeBytes - payloadBytes < store.limits.minFreeDiskBytes) {
     return { status: 507, error: 'Za malo wolnego miejsca na serwerze.' };
   }
@@ -353,11 +381,14 @@ function isValidDeviceList(value) {
       value.identityRotationEpoch < 0 ||
       !Array.isArray(value.devices) ||
       !Array.isArray(value.revokedDevices) ||
+      value.devices.length > MAX_ACTIVE_DEVICES ||
+      value.revokedDevices.length > MAX_REVOKED_DEVICES ||
       typeof value.signature !== 'string' ||
       value.signature.length < 16 ||
       typeof value.updatedAt !== 'string') {
     return false;
   }
+  const activeIds = new Set();
   for (const device of value.devices) {
     if (!isObject(device) ||
         typeof device.deviceId !== 'string' ||
@@ -371,7 +402,10 @@ function isValidDeviceList(value) {
         device.deviceEpoch < 1) {
       return false;
     }
+    if (activeIds.has(device.deviceId)) return false;
+    activeIds.add(device.deviceId);
   }
+  const revokedIds = new Set();
   for (const device of value.revokedDevices) {
     if (!isObject(device) ||
         typeof device.deviceId !== 'string' ||
@@ -386,8 +420,9 @@ function isValidDeviceList(value) {
         typeof device.reasonCode !== 'string') {
       return false;
     }
+    if (revokedIds.has(device.deviceId)) return false;
+    revokedIds.add(device.deviceId);
   }
-  const activeIds = new Set(value.devices.map((device) => device.deviceId));
   for (const device of value.revokedDevices) {
     if (activeIds.has(device.deviceId)) return false;
   }
@@ -421,6 +456,9 @@ function validateCloudMessagePayload(payload, body, auth) {
   }
   if (String(payload.aad.messageId || '') !== String(body.messageId || '')) {
     return 'messageId w AAD nie zgadza sie z zadaniem.';
+  }
+  if (String(payload.aad.conversationId || '') !== String(body.conversationId || '')) {
+    return 'conversationId w AAD nie zgadza sie z zadaniem.';
   }
   if (String(payload.aad.senderUserId || '') !== auth.user.userId) {
     return 'senderUserId w AAD nie zgadza sie z sesja.';
@@ -592,9 +630,11 @@ function ed25519PublicKey(rawBase64) {
 function loginChallengePayload(pending) {
   return Buffer.from(JSON.stringify({
     protocol: 'secure-chat/login-challenge/v1',
+    serverOrigin: pending.serverOrigin,
     challenge: pending.challenge,
     userId: pending.userId,
     deviceId: pending.deviceId,
+    issuedAtMs: pending.issuedAtMs,
     expiresAtMs: pending.expiresAtMs
   }), 'utf8');
 }
@@ -691,6 +731,64 @@ function resetAuthRateLimits() {
   authPairAttempts.clear();
 }
 
+function normalizeWsPreAuthLimits(limits = {}) {
+  return {
+    timeoutMs: limits.timeoutMs ?? DEFAULT_WS_PREAUTH_LIMITS.timeoutMs,
+    maxGlobal: limits.maxGlobal ?? DEFAULT_WS_PREAUTH_LIMITS.maxGlobal,
+    maxPerIp: limits.maxPerIp ?? DEFAULT_WS_PREAUTH_LIMITS.maxPerIp,
+    maxPerWindow: limits.maxPerWindow ?? DEFAULT_WS_PREAUTH_LIMITS.maxPerWindow,
+    windowMs: limits.windowMs ?? DEFAULT_WS_PREAUTH_LIMITS.windowMs
+  };
+}
+
+function wsPreAuthIp(request) {
+  return request.clientIp || request.socket?.remoteAddress || 'unknown';
+}
+
+function pruneWsPreAuthAttempts(now, limits) {
+  const cutoff = now - limits.windowMs;
+  for (const [ip, hits] of wsPreAuthAttempts.entries()) {
+    const fresh = hits.filter((time) => time > cutoff);
+    if (fresh.length === 0) wsPreAuthAttempts.delete(ip);
+    else wsPreAuthAttempts.set(ip, fresh);
+  }
+}
+
+function acquireWsPreAuthSlot(request, rawLimits = {}) {
+  const limits = normalizeWsPreAuthLimits(rawLimits);
+  const now = Date.now();
+  pruneWsPreAuthAttempts(now, limits);
+  const ip = wsPreAuthIp(request);
+  const hits = wsPreAuthAttempts.get(ip) || [];
+  if (wsPreAuthGlobal >= limits.maxGlobal ||
+      (wsPreAuthByIp.get(ip) || 0) >= limits.maxPerIp ||
+      hits.length >= limits.maxPerWindow) {
+    return null;
+  }
+  hits.push(now);
+  wsPreAuthAttempts.set(ip, hits);
+  wsPreAuthGlobal += 1;
+  wsPreAuthByIp.set(ip, (wsPreAuthByIp.get(ip) || 0) + 1);
+  let released = false;
+  return {
+    ip,
+    release() {
+      if (released) return;
+      released = true;
+      wsPreAuthGlobal = Math.max(0, wsPreAuthGlobal - 1);
+      const nextCount = Math.max(0, (wsPreAuthByIp.get(ip) || 0) - 1);
+      if (nextCount === 0) wsPreAuthByIp.delete(ip);
+      else wsPreAuthByIp.set(ip, nextCount);
+    }
+  };
+}
+
+function resetWsPreAuthLimits() {
+  wsPreAuthByIp.clear();
+  wsPreAuthAttempts.clear();
+  wsPreAuthGlobal = 0;
+}
+
 async function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url'), params = PASSWORD_SCRYPT_PARAMS) {
   const normalizedParams = normalizeScryptParams(params);
   if (!normalizedParams) throw new Error('invalid_scrypt_params');
@@ -724,17 +822,25 @@ async function verifyPassword(password, stored) {
 }
 
 async function readBody(req, maxBytes = DEFAULT_MAX_BODY_BYTES) {
+  const contentType = String(req.headers['content-type'] || '');
+  if (contentType && !contentType.toLowerCase().startsWith('application/json')) {
+    throw new BodyReadError('UNSUPPORTED_MEDIA_TYPE', 'UNSUPPORTED_MEDIA_TYPE');
+  }
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
     if (size > maxBytes) {
-      throw new Error('Payload jest za duzy.');
+      throw new BodyReadError('PAYLOAD_TOO_LARGE', 'PAYLOAD_TOO_LARGE');
     }
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new BodyReadError('INVALID_JSON', 'INVALID_JSON');
+  }
 }
 
 function tokenHash(token) {
@@ -758,6 +864,12 @@ function validateMemberKeys(memberKeys, memberIds, auth) {
     }
     if (envelope.algorithm !== 'X25519-HKDF-SHA256-AES-256-GCM') {
       return 'Nieobslugiwany algorytm koperty memberKeys.';
+    }
+    if (envelope.keyWrapAadVersion !== undefined &&
+        (envelope.keyWrapAadVersion !== 2 ||
+        typeof envelope.recipientPublicKey !== 'string' ||
+        envelope.recipientPublicKey.length < 16)) {
+      return 'Koperta memberKeys ma niepoprawny kontekst AAD.';
     }
     if (envelope.recipientUserId !== memberId) {
       return 'Odbiorca koperty memberKeys nie zgadza sie z kluczem mapy.';
@@ -863,6 +975,7 @@ export class V2Store {
     this.liveSockets = new Map();
     this.sessionSockets = new Map();
     this.accountQueues = new Map();
+    this.diskFreeCache = null;
     this.wsTickets = new Map();
     this.wsTicketAttempts = new Map();
     this.pendingLogins = new Map();
@@ -876,16 +989,19 @@ export class V2Store {
     }
   }
 
-  createPendingLogin(user, deviceId, deviceName) {
+  createPendingLogin(user, deviceId, deviceName, serverOrigin) {
     this.prunePendingLogins();
     if (this.pendingLogins.size >= PENDING_LOGIN_MAX_GLOBAL) return null;
     const token = crypto.randomBytes(32).toString('base64url');
+    const issuedAtMs = Date.now();
     const pending = {
       userId: user.userId,
       deviceId,
       deviceName: sanitizeDeviceName(deviceName),
+      serverOrigin,
       challenge: crypto.randomBytes(32).toString('base64url'),
-      expiresAtMs: Date.now() + PENDING_LOGIN_TTL_MS
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + PENDING_LOGIN_TTL_MS
     };
     this.pendingLogins.set(tokenHash(token), pending);
     return { token, ...pending };
@@ -1429,6 +1545,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         keyAgreementPublicKey: body.keyAgreementPublicKey,
         identityPublicKey: body.identityPublicKey,
         keyAgreementPublicKeySignature: body.keyAgreementPublicKeySignature,
+        serverOrigin: typeof body.serverOrigin === 'string' ? body.serverOrigin : '',
         identityRotationProof: isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null,
         encryptedVault: isObject(body.encryptedVault) ? body.encryptedVault : null,
         vaultKdf: body.vaultKdf,
@@ -1477,12 +1594,18 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       if (isDeviceRevoked(user, deviceId)) {
         return sendJson(res, 403, { ok: false, error: 'Urzadzenie zostalo uniewaznione.' });
       }
-      const pending = store.createPendingLogin(user, deviceId, body.deviceName);
+      const serverOrigin = String(body.serverOrigin || '');
+      if (serverOrigin.length < 8 ||
+          (user.serverOrigin && user.serverOrigin !== serverOrigin)) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny origin serwera w challenge logowania.' });
+      }
+      const pending = store.createPendingLogin(user, deviceId, body.deviceName, serverOrigin);
       if (!pending) return sendJson(res, 503, { ok: false, error: 'Serwer obsluguje zbyt wiele logowan.' });
       return sendJson(res, 200, {
         ok: true,
         pendingToken: pending.token,
         challenge: pending.challenge,
+        challengeIssuedAtMs: pending.issuedAtMs,
         challengeExpiresAtMs: pending.expiresAtMs,
         user: store.publicUser(user),
         deviceId,
@@ -1931,6 +2054,14 @@ export async function handleV2Http(store, req, res, url, options = {}) {
     return sendJson(res, 404, { ok: false, error: 'Nieznany endpoint v2.' });
   } catch (error) {
     const requestId = crypto.randomUUID();
+    if (error instanceof BodyReadError) {
+      const status = error.code === 'PAYLOAD_TOO_LARGE'
+        ? 413
+        : error.code === 'UNSUPPORTED_MEDIA_TYPE'
+        ? 415
+        : 400;
+      return sendJson(res, status, { ok: false, error: error.code, requestId });
+    }
     console.error(JSON.stringify({ requestId, error: String(error?.stack || error) }));
     if (error?.code === 'SERVER_BUSY') {
       return sendJson(res, 503, { ok: false, error: 'SERVER_BUSY', requestId });
@@ -1939,16 +2070,33 @@ export async function handleV2Http(store, req, res, url, options = {}) {
   }
 }
 
-export function handleV2WebSocket(store, ws, request) {
-  const timer = setTimeout(() => ws.close(1008, 'Brak biletu WebSocket.'), 10_000);
+export function handleV2WebSocket(store, ws, request, options = {}) {
+  const limits = normalizeWsPreAuthLimits(options.preAuth || {});
+  const preAuthSlot = acquireWsPreAuthSlot(request, limits);
+  if (!preAuthSlot) {
+    ws.close(1013, 'Za duzo nieuwierzytelnionych polaczen WebSocket.');
+    return;
+  }
+  let authenticated = false;
+  const releasePreAuth = () => {
+    if (!authenticated) preAuthSlot.release();
+  };
+  ws.once('close', releasePreAuth);
+  const timer = setTimeout(() => {
+    releasePreAuth();
+    ws.close(1008, 'Brak biletu WebSocket.');
+  }, limits.timeoutMs);
   ws.once('message', (raw) => {
     clearTimeout(timer);
     let message;
-    try { message = JSON.parse(String(raw)); } catch { ws.close(1008, 'Niepoprawne uwierzytelnienie.'); return; }
+    try { message = JSON.parse(String(raw)); } catch { releasePreAuth(); ws.close(1008, 'Niepoprawne uwierzytelnienie.'); return; }
     const auth = message?.type === 'auth' || message?.type === 'authenticate'
       ? store.consumeWsTicket(message.ticket)
       : null;
-    if (!auth) { ws.close(1008, 'Niepoprawny lub zuzyty bilet.'); return; }
+    if (!auth) { releasePreAuth(); ws.close(1008, 'Niepoprawny lub zuzyty bilet.'); return; }
+    authenticated = true;
+    preAuthSlot.release();
+    ws.off?.('close', releasePreAuth);
     store.attachSocket(auth.user.userId, auth.session.deviceId, auth.sessionHash, ws);
     ws.send(JSON.stringify({ type: 'ready', userId: auth.user.userId, deviceId: auth.session.deviceId, serverTime: nowIso() }));
     ws.on('message', () => ws.send(JSON.stringify({ type: 'pong', serverTime: nowIso() })));
@@ -1957,13 +2105,16 @@ export function handleV2WebSocket(store, ws, request) {
 
 export const securityTestInternals = Object.freeze({
   allowAuthAttempt,
+  acquireWsPreAuthSlot,
   canonicalJson,
   cloudMessageHash,
   genesisHash: CLOUD_MESSAGE_GENESIS_HASH,
   hashPassword,
+  isValidDeviceList,
   messageStreamError,
   recordAuthSuccess,
   resetAuthRateLimits,
+  resetWsPreAuthLimits,
   scryptAsync,
   storageQuotaError,
   validateCloudMessagePayload,
