@@ -32,7 +32,21 @@ Na Linuxie zainstaluj narzedzia:
 
 ```bash
 sudo apt update
-sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev libsqlite3-dev zip
+sudo apt install -y \
+  clang \
+  cmake \
+  ninja-build \
+  pkg-config \
+  libgtk-3-dev \
+  libsecret-1-dev \
+  libjsoncpp-dev \
+  libsqlite3-dev \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  libmpv-dev \
+  libepoxy-dev \
+  libnotify-dev \
+  zip
 ```
 
 Zbuduj paczke:
