@@ -36,7 +36,7 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final active = state == AppLifecycleState.resumed;
     DesktopNotifier.instance.setAppActive(active);
-    appState.handleLifecycleActive(active);
+    appState.handleLifecycleState(state.name);
   }
 
   @override

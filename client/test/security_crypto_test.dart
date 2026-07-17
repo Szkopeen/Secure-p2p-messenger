@@ -160,6 +160,33 @@ void main() {
         expect(first, isNot(legacy));
       },
     );
+
+    test('jedno haslo daje rozne sekrety logowania i vaultu', () async {
+      final crypto = CloudCrypto();
+      final first = await crypto.deriveAccountSecrets(
+        password: 'bardzo-dlugie-haslo-konta',
+        username: 'Alice',
+        serverOrigin: serverOrigin,
+      );
+      final second = await crypto.deriveAccountSecrets(
+        password: 'bardzo-dlugie-haslo-konta',
+        username: 'alice',
+        serverOrigin: serverOrigin,
+      );
+      final otherOrigin = await crypto.deriveAccountSecrets(
+        password: 'bardzo-dlugie-haslo-konta',
+        username: 'alice',
+        serverOrigin: 'https://inny-serwer.example',
+      );
+
+      expect(first.authPassword, startsWith('sc-auth-v1.'));
+      expect(first.vaultSecret, startsWith('sc-vault-v1.'));
+      expect(first.authPassword, isNot(first.vaultSecret));
+      expect(first.authPassword, second.authPassword);
+      expect(first.vaultSecret, second.vaultSecret);
+      expect(first.authPassword, isNot(otherOrigin.authPassword));
+      expect(first.vaultSecret, isNot(otherOrigin.vaultSecret));
+    });
   });
 
   group('Safety number', () {

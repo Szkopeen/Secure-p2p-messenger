@@ -120,6 +120,10 @@ class HomeScreen extends StatelessWidget {
     await appState.refreshCloudUsers();
     if (!context.mounted) return;
     final username = TextEditingController();
+    Future<void> searchUsers() async {
+      await appState.refreshCloudUsers(username: username.text);
+    }
+
     try {
       await showModalBottomSheet<void>(
         context: context,
@@ -144,14 +148,18 @@ class HomeScreen extends StatelessWidget {
                     child: TextField(
                       controller: username,
                       autocorrect: false,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Dokladny login',
                         hintText: 'np. anna',
-                        prefixIcon: Icon(Icons.search),
+                        prefixIcon: const Icon(Icons.search),
+                        suffixIcon: IconButton(
+                          tooltip: 'Szukaj',
+                          onPressed: searchUsers,
+                          icon: const Icon(Icons.arrow_forward),
+                        ),
                       ),
                       textInputAction: TextInputAction.search,
-                      onSubmitted: (value) =>
-                          appState.refreshCloudUsers(username: value),
+                      onSubmitted: (_) => searchUsers(),
                     ),
                   ),
                   if (users.isEmpty)
@@ -360,7 +368,11 @@ class _CloudUserTile extends StatelessWidget {
         ? '?'
         : user.displayName.substring(0, 1).toUpperCase();
     return ListTile(
-      leading: _AvatarView(bytesBase64: null, fallback: initial, online: true),
+      leading: _AvatarView(
+        bytesBase64: user.profile?.avatarBytesBase64,
+        fallback: initial,
+        online: true,
+      ),
       title: Text(user.displayName),
       subtitle: Text(user.username),
       trailing: FilledButton.icon(

@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../crypto/codec.dart';
 import '../crypto/cloud_crypto.dart';
 import '../models/cloud_account.dart';
+import '../models/user_profile.dart';
 
 class CloudAuthResult {
   const CloudAuthResult({required this.session, required this.encryptedVault});
@@ -75,6 +76,12 @@ class CloudProblem extends CloudEvent {
   final String message;
 }
 
+class CloudProfileUpdated extends CloudEvent {
+  const CloudProfileUpdated(this.user);
+
+  final CloudPublicUser user;
+}
+
 class MessagePage {
   const MessagePage({required this.messages, required this.nextAfterSeq});
 
@@ -96,6 +103,7 @@ class CloudApiClient {
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Completer<void>? _connectReady;
+  Timer? _heartbeatTimer;
 
   Stream<CloudEvent> get events => _events.stream;
 
@@ -286,6 +294,30 @@ class CloudApiClient {
     return CloudPublicUser.fromJson(asStringKeyMap(raw['user'], 'user'));
   }
 
+  Future<CloudPublicUser> updateProfile(UserProfile profile) async {
+    final raw = await _put('/v2/profile', {'profile': profile.toJson()});
+    return CloudPublicUser.fromJson(asStringKeyMap(raw['user'], 'user'));
+  }
+
+  Future<VaultVersion> migrateVaultKey({
+    required String newPassword,
+    required Map<String, dynamic> encryptedVault,
+    required Map<String, dynamic> vaultKdf,
+  }) async {
+    final current = await _get('/v2/vault');
+    final saved = await _put('/v2/vault/migrate-key', {
+      'newPassword': newPassword,
+      'encryptedVault': encryptedVault,
+      'expectedVaultEpoch': current['vaultEpoch'] as int? ?? 0,
+      'expectedVaultHash': current['vaultHash'] as String? ?? '',
+      'vaultKdf': vaultKdf,
+    });
+    return VaultVersion(
+      epoch: requiredInt(saved, 'vaultEpoch'),
+      hash: requiredString(saved, 'vaultHash'),
+    );
+  }
+
   Future<Map<String, dynamic>> keyTransparency({
     required String userId,
     int after = 0,
@@ -426,6 +458,7 @@ class CloudApiClient {
     _channel!.sink.add(jsonEncode({'type': 'auth', 'ticket': ticket}));
     try {
       await ready.future.timeout(const Duration(seconds: 10));
+      _startHeartbeat();
     } catch (_) {
       await disconnectEvents();
       rethrow;
@@ -444,6 +477,8 @@ class CloudApiClient {
   }
 
   Future<void> disconnectEvents() async {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     await _subscription?.cancel();
     await _channel?.sink.close();
     _subscription = null;
@@ -484,12 +519,39 @@ class CloudApiClient {
             ),
           );
           break;
+        case 'profile_updated':
+          _events.add(
+            CloudProfileUpdated(
+              CloudPublicUser.fromJson(asStringKeyMap(json['user'], 'user')),
+            ),
+          );
+          break;
+        case 'pong':
+          break;
         default:
           break;
       }
     } catch (error) {
       _events.add(CloudProblem('Nie mozna przetworzyc eventu cloud: $error'));
     }
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      final channel = _channel;
+      if (channel == null) return;
+      try {
+        channel.sink.add(
+          jsonEncode({
+            'type': 'ping',
+            'sentAtMs': DateTime.now().toUtc().millisecondsSinceEpoch,
+          }),
+        );
+      } catch (error) {
+        _events.add(CloudProblem('Heartbeat cloud nie powiodl sie: $error'));
+      }
+    });
   }
 
   Future<Map<String, dynamic>> _get(

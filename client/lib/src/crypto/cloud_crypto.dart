@@ -67,6 +67,16 @@ class CloudIdentityRotation {
   final IdentityRotationProof proof;
 }
 
+class CloudAccountSecrets {
+  const CloudAccountSecrets({
+    required this.authPassword,
+    required this.vaultSecret,
+  });
+
+  final String authPassword;
+  final String vaultSecret;
+}
+
 class CloudCrypto {
   CloudCrypto();
 
@@ -144,6 +154,58 @@ class CloudCrypto {
       nonce: unb64(salt),
     );
     return b64(await key.extractBytes());
+  }
+
+  Future<CloudAccountSecrets> deriveAccountSecrets({
+    required String password,
+    required String username,
+    required String serverOrigin,
+  }) async {
+    final normalizedUsername = username.trim().toLowerCase();
+    final normalizedOrigin = serverOrigin.trim().toLowerCase();
+    if (password.length < 8 || normalizedUsername.length < 3) {
+      throw ArgumentError('Haslo albo login sa za krotkie.');
+    }
+    final salt = crypto_hash.sha256
+        .convert(
+          canonicalJsonBytes({
+            'v': 1,
+            'protocol': 'secure-chat-account-root-salt/v1',
+            'serverOrigin': normalizedOrigin,
+            'username': normalizedUsername,
+          }),
+        )
+        .bytes;
+    final root = await Isolate.run(
+      () => _deriveArgon2id(
+        secret: utf8Bytes(password),
+        salt: salt,
+        keyBytes: 32,
+        iterations: defaultVaultKdf['iterations'] as int,
+        memoryKiB: defaultVaultKdf['memoryKiB'] as int,
+        lanes: defaultVaultKdf['lanes'] as int,
+      ),
+    );
+    final context = canonicalJsonBytes({
+      'v': 1,
+      'protocol': 'secure-chat-account-secret-context/v1',
+      'serverOrigin': normalizedOrigin,
+      'username': normalizedUsername,
+    });
+    final authKey = await _hkdf.deriveKey(
+      secretKey: SecretKey(root),
+      nonce: context,
+      info: utf8Bytes('secure-chat-auth-password/v1'),
+    );
+    final vaultKey = await _hkdf.deriveKey(
+      secretKey: SecretKey(root),
+      nonce: context,
+      info: utf8Bytes('secure-chat-vault-secret/v1'),
+    );
+    return CloudAccountSecrets(
+      authPassword: 'sc-auth-v1.${b64(await authKey.extractBytes())}',
+      vaultSecret: 'sc-vault-v1.${b64(await vaultKey.extractBytes())}',
+    );
   }
 
   Future<CloudVault> createVault({

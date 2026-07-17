@@ -6,6 +6,8 @@ import { SqliteStateStore } from './sqliteStore.js';
 const SAFE_ID = /^[a-zA-Z0-9_.:@-]{3,64}$/;
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const AUTH_MAX_BODY_BYTES = 32 * 1024;
+const PROFILE_MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_PROFILE_IMAGE_BYTES = 1024 * 1024;
 const MAX_MESSAGE_PAGE = 500;
 const DEFAULT_MESSAGE_PAGE = 100;
 const MAX_MEMBER_KEY_BYTES = 16 * 1024;
@@ -113,6 +115,41 @@ function isValidVaultKdf(value, { allowLegacy = false } = {}) {
     value.memoryKiB <= 65536 && Number.isInteger(value.iterations) &&
     value.iterations >= 2 && value.iterations <= 4 && value.lanes === 1 &&
     value.keyBytes === 32;
+}
+
+function normalizedPublicProfile(value) {
+  if (!isObject(value)) return null;
+  const avatarMimeType = typeof value.avatarMimeType === 'string'
+    ? value.avatarMimeType.slice(0, 80)
+    : '';
+  const avatarBytes = typeof value.avatarBytes === 'string'
+    ? value.avatarBytes
+    : '';
+  if (avatarBytes) {
+    if (!/^[-_A-Za-z0-9]+$/.test(avatarBytes)) return null;
+    let decoded;
+    try {
+      decoded = Buffer.from(avatarBytes, 'base64url');
+    } catch {
+      return null;
+    }
+    if (decoded.length < 1 || decoded.length > MAX_PROFILE_IMAGE_BYTES) {
+      return null;
+    }
+    if (!/^image\/(jpeg|png|gif|webp|bmp)$/.test(avatarMimeType)) {
+      return null;
+    }
+  }
+  const updatedAt = typeof value.updatedAt === 'string'
+    ? new Date(value.updatedAt)
+    : new Date();
+  if (Number.isNaN(updatedAt.getTime())) return null;
+  return {
+    v: 1,
+    avatarMimeType: avatarBytes ? avatarMimeType : null,
+    avatarBytes: avatarBytes || null,
+    updatedAt: updatedAt.toISOString()
+  };
 }
 
 function canonicalJson(value) {
@@ -1354,6 +1391,7 @@ export class V2Store {
       keyAgreementPublicKey: user.keyAgreementPublicKey,
       identityPublicKey: user.identityPublicKey || '',
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
+      profile: normalizedPublicProfile(user.profile) || null,
       devices,
       deviceList: includeDevices && isValidDeviceList(user.deviceList) ? user.deviceList : null,
       deviceListHash: includeDevices && typeof user.deviceListHash === 'string' ? user.deviceListHash : '',
@@ -1852,15 +1890,40 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       return sendJson(res, 200, { ok: true, ticket, expiresInSeconds: 30 });
     }
 
+    if (method === 'PUT' && url.pathname === '/v2/profile') {
+      const body = await readBody(req, PROFILE_MAX_BODY_BYTES);
+      const profile = normalizedPublicProfile(body.profile);
+      if (!profile) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny profil publiczny.' });
+      }
+      return await store.withAccountLock(auth.user.userId, async () => {
+        const user = store.users.users[auth.user.userId];
+        if (!user) return sendJson(res, 401, { ok: false, error: 'Brak logowania.' });
+        const currentProfile = normalizedPublicProfile(user.profile);
+        const currentUpdatedAt = currentProfile?.updatedAt ? Date.parse(currentProfile.updatedAt) : 0;
+        const nextUpdatedAt = Date.parse(profile.updatedAt);
+        if (currentProfile && nextUpdatedAt < currentUpdatedAt) {
+          return sendJson(res, 409, { ok: false, error: 'Profil zostal zaktualizowany przez inne urzadzenie.' });
+        }
+        user.profile = profile;
+        user.updatedAt = nowIso();
+        store.persistUser(user);
+        const recipients = new Set([user.userId]);
+        for (const conversation of store.conversationsForUser(user.userId)) {
+          for (const memberId of conversation.memberIds) recipients.add(memberId);
+        }
+        store.broadcast([...recipients], { type: 'profile_updated', user: store.publicUser(user) });
+        return sendJson(res, 200, { ok: true, user: store.publicUser(user) });
+      });
+    }
+
     if (method === 'GET' && url.pathname === '/v2/users') {
       const exactUsername = normalizeUsername(url.searchParams.get('username'));
-      if (!exactUsername) {
-        return sendJson(res, 200, { ok: true, users: [] });
-      }
-      if (!safeUsername(exactUsername)) {
+      const hasSearch = exactUsername.length > 0;
+      if (hasSearch && !safeUsername(exactUsername)) {
         return sendJson(res, 400, { ok: false, error: 'Wyszukiwanie wymaga dokladnego loginu.' });
       }
-      if (!allowAuthAttempt(req, `directory:${exactUsername}`)) {
+      if (hasSearch && !allowAuthAttempt(req, `directory:${exactUsername}`)) {
         return sendJson(res, 429, { ok: false, error: 'Sprobuj ponownie pozniej.' });
       }
       const visibleUserIds = new Set([auth.user.userId]);
@@ -1869,7 +1932,9 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       }
       const users = Object.values(store.users.users)
         .filter((user) => user.userId !== auth.user.userId &&
-          (visibleUserIds.has(user.userId) || user.username === exactUsername))
+          (hasSearch
+            ? (visibleUserIds.has(user.userId) || user.username === exactUsername)
+            : visibleUserIds.has(user.userId)))
         .map((user) => store.publicUser(user, {
           includeDevices: visibleUserIds.has(user.userId)
         }))
@@ -2013,6 +2078,44 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         store.revokeDeviceSessions(auth.user.userId, newlyRevoked);
       }
       return sendJson(res, 200, { ok: true, user: store.publicUser(auth.user) });
+      });
+    }
+
+    if (method === 'PUT' && url.pathname === '/v2/vault/migrate-key') {
+      const body = await readBody(req);
+      const newPassword = String(body.newPassword || '');
+      if (newPassword.length < 8) {
+        return sendJson(res, 400, { ok: false, error: 'Nowe haslo ma minimum 8 znakow.' });
+      }
+      if (!isObject(body.encryptedVault)) {
+        return sendJson(res, 400, { ok: false, error: 'Brak zaszyfrowanego vaulta.' });
+      }
+      if (!isValidVaultKdf(body.vaultKdf)) {
+        return sendJson(res, 400, { ok: false, error: 'Migracja vaultu wymaga Argon2id.' });
+      }
+      return await store.withAccountLock(auth.user.userId, async () => {
+        const user = store.users.users[auth.user.userId];
+        const currentEpoch = Number.isInteger(user.vaultEpoch) ? user.vaultEpoch : 0;
+        const currentHash = typeof user.vaultHash === 'string' ? user.vaultHash : '';
+        if (!Number.isInteger(body.expectedVaultEpoch) || typeof body.expectedVaultHash !== 'string') {
+          return sendJson(res, 400, { ok: false, error: 'Migracja vaultu wymaga expectedVaultEpoch i expectedVaultHash.' });
+        }
+        if (body.expectedVaultEpoch !== currentEpoch || body.expectedVaultHash !== currentHash) {
+          return sendJson(res, 409, { ok: false, error: 'Vault zostal zmieniony przez inne urzadzenie.' });
+        }
+        const serialized = JSON.stringify(body.encryptedVault);
+        if (Buffer.byteLength(serialized, 'utf8') > DEFAULT_MAX_BODY_BYTES) {
+          return sendJson(res, 413, { ok: false, error: 'Vault jest za duzy.' });
+        }
+        user.password = await hashPassword(newPassword);
+        user.encryptedVault = body.encryptedVault;
+        user.vaultKdf = body.vaultKdf;
+        user.vaultEpoch = currentEpoch + 1;
+        user.vaultHash = crypto.createHash('sha256').update(serialized).digest('base64url');
+        user.updatedAt = nowIso();
+        store.persistUser(user);
+        store.broadcast([user.userId], { type: 'vault_updated', vaultEpoch: user.vaultEpoch, vaultHash: user.vaultHash });
+        return sendJson(res, 200, { ok: true, vaultEpoch: user.vaultEpoch, vaultHash: user.vaultHash });
       });
     }
 

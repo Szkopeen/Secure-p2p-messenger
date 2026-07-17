@@ -1,6 +1,7 @@
 import 'package:crypto/crypto.dart' as crypto_hash;
 
 import '../crypto/codec.dart';
+import 'user_profile.dart';
 
 class CloudSession {
   const CloudSession({
@@ -82,6 +83,7 @@ class CloudPublicUser {
     this.deviceCertificates = const {},
     this.deviceList,
     this.identityRotationProof,
+    this.profile,
   });
 
   final String userId;
@@ -93,6 +95,7 @@ class CloudPublicUser {
   final Map<String, CloudDeviceCertificate> deviceCertificates;
   final CloudDeviceList? deviceList;
   final IdentityRotationProof? identityRotationProof;
+  final UserProfile? profile;
 
   factory CloudPublicUser.fromJson(Map<String, dynamic> json) {
     final devices = <String, CloudDeviceCertificate>{};
@@ -124,6 +127,11 @@ class CloudPublicUser {
       identityRotationProof: IdentityRotationProof.fromOptionalJson(
         json['identityRotationProof'],
       ),
+      profile: json['profile'] is Map
+          ? UserProfile.fromJson(
+              (json['profile'] as Map).cast<String, dynamic>(),
+            )
+          : null,
     );
   }
 }

@@ -878,6 +878,119 @@ test('publiczny profil moze ukryc liste urzadzen przed katalogiem', () => {
   assert.equal(minimal.deviceListHash, '');
 });
 
+test('publiczny profil zapisuje avatar na serwerze i zwraca go w sesji', async () => {
+  const { store, user } = fixture();
+  const session = store.createSession(user, 'profile-device', 'Device');
+  const profile = {
+    v: 1,
+    avatarMimeType: 'image/png',
+    avatarBytes: Buffer.from([1, 2, 3, 4]).toString('base64url'),
+    updatedAt: new Date().toISOString()
+  };
+
+  const saved = await httpRequest(store, 'PUT', '/v2/profile', {
+    token: session.token,
+    body: { profile }
+  });
+
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.user.profile.avatarMimeType, 'image/png');
+  assert.equal(saved.body.user.profile.avatarBytes, profile.avatarBytes);
+  assert.equal(store.users.users[user.userId].profile.avatarBytes, profile.avatarBytes);
+
+  const loaded = await httpRequest(store, 'GET', '/v2/session', {
+    token: session.token
+  });
+  assert.equal(loaded.status, 200);
+  assert.equal(loaded.body.user.profile.avatarBytes, profile.avatarBytes);
+});
+
+test('katalog bez zapytania zwraca znanych rozmowcow z profilem', async () => {
+  const { store, user } = fixture();
+  const peer = {
+    userId: crypto.randomUUID(),
+    username: 'bob',
+    displayName: 'Bob',
+    identityPublicKey: 'i'.repeat(32),
+    keyAgreementPublicKey: 'k'.repeat(32),
+    keyAgreementPublicKeySignature: 's'.repeat(32),
+    devices: {},
+    profile: {
+      v: 1,
+      avatarMimeType: 'image/png',
+      avatarBytes: Buffer.from([9, 8, 7]).toString('base64url'),
+      updatedAt: new Date().toISOString()
+    },
+    updatedAt: new Date().toISOString()
+  };
+  store.users.users[peer.userId] = peer;
+  store.persistUsers();
+  store.conversations.conversations['known-peer'] = {
+    conversationId: 'known-peer',
+    type: 'direct',
+    memberIds: [user.userId, peer.userId].sort(),
+    keyEpoch: 1,
+    memberKeys: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.persistConversations();
+  const session = store.createSession(user, 'directory-device', 'Device');
+
+  const result = await httpRequest(store, 'GET', '/v2/users', {
+    token: session.token
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.users.length, 1);
+  assert.equal(result.body.users[0].username, 'bob');
+  assert.equal(result.body.users[0].profile.avatarBytes, peer.profile.avatarBytes);
+});
+
+test('migracja vault key zmienia haslo i vault atomowo', async () => {
+  const { store, user } = fixture();
+  user.password = await security.hashPassword('legacy-password');
+  user.encryptedVault = { nonce: 'old', ciphertext: 'old', mac: 'old' };
+  user.vaultKdf = {
+    algorithm: 'argon2id',
+    version: 19,
+    memoryKiB: 8192,
+    iterations: 2,
+    lanes: 1,
+    keyBytes: 32
+  };
+  user.vaultEpoch = 1;
+  user.vaultHash = crypto.createHash('sha256')
+    .update(JSON.stringify(user.encryptedVault))
+    .digest('base64url');
+  store.persistUser(user);
+  const session = store.createSession(user, 'migration-device', 'Device');
+  const encryptedVault = { nonce: 'new', ciphertext: 'new', mac: 'new' };
+
+  const migrated = await httpRequest(store, 'PUT', '/v2/vault/migrate-key', {
+    token: session.token,
+    body: {
+      newPassword: 'sc-auth-v1.new-separated-password',
+      encryptedVault,
+      expectedVaultEpoch: 1,
+      expectedVaultHash: user.vaultHash,
+      vaultKdf: user.vaultKdf
+    }
+  });
+
+  assert.equal(migrated.status, 200);
+  assert.equal(store.users.users[user.userId].vaultEpoch, 2);
+  assert.deepEqual(store.users.users[user.userId].encryptedVault, encryptedVault);
+  assert.equal(
+    await security.verifyPassword('sc-auth-v1.new-separated-password', store.users.users[user.userId].password),
+    true
+  );
+  assert.equal(
+    await security.verifyPassword('legacy-password', store.users.users[user.userId].password),
+    false
+  );
+});
+
 test('serwer odrzuca duplikaty w podpisanej liscie urzadzen', () => {
   const baseDevice = {
     deviceId: 'device-duplicate',

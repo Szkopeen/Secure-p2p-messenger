@@ -95,6 +95,10 @@ class AppState extends ChangeNotifier {
   StreamSubscription<CloudEvent>? _cloudSubscription;
   UserProfile? _ownProfile;
   Timer? _presenceTimer;
+  Timer? _cloudReconnectTimer;
+  int _cloudReconnectAttempts = 0;
+  bool _cloudReconnectInProgress = false;
+  bool _disposed = false;
   bool _cloudConnected = false;
   bool _initializing = true;
   String? _status;
@@ -159,10 +163,27 @@ class AppState extends ChangeNotifier {
         .length;
   }
 
-  void handleLifecycleActive(bool active) {
-    if (!active) {
+  void handleLifecycleState(String stateName) {
+    if (_shouldLockForLifecycleState(stateName)) {
       _lockPrivacy();
     }
+  }
+
+  bool _shouldLockForLifecycleState(String stateName) {
+    if (stateName == 'resumed') return false;
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.android || TargetPlatform.iOS => stateName == 'paused' ||
+          stateName == 'detached' ||
+          stateName == 'hidden',
+      TargetPlatform.windows ||
+      TargetPlatform.macOS ||
+      TargetPlatform.linux =>
+        stateName == 'inactive' ||
+            stateName == 'paused' ||
+            stateName == 'detached' ||
+            stateName == 'hidden',
+      _ => stateName != 'resumed',
+    };
   }
 
   Future<void> setPrivacyScreenEnabled(bool enabled) async {
@@ -306,7 +327,13 @@ class AppState extends ChangeNotifier {
       notifyListeners();
 
       if (_cloudSession != null) {
-        await connectCloud();
+        try {
+          await connectCloud();
+        } catch (error) {
+          _cloudConnected = false;
+          _setStatus('Nie udalo sie polaczyc z kontem: $error');
+          _scheduleCloudReconnect();
+        }
         unawaited(checkForUpdate(silent: true));
       }
     } catch (error) {
@@ -319,36 +346,36 @@ class AppState extends ChangeNotifier {
     required String serverUrl,
     required String username,
     required String password,
-    required String vaultSecret,
     String inviteToken = '',
   }) async {
     final normalizedServer = _normalizeCloudServerUrl(serverUrl);
     final normalizedUsername = username.trim().toLowerCase();
+    final serverOrigin = _cloudSignatureOrigin(normalizedServer);
     if (normalizedUsername.length < 3) {
       throw ArgumentError('Login musi miec minimum 3 znaki.');
     }
     if (password.length < 8) {
       throw ArgumentError('Haslo musi miec minimum 8 znakow.');
     }
-    if (vaultSecret.length < 16) {
-      throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
-    }
-    _validateVaultSecretSeparated(password, vaultSecret);
+    final accountSecrets = await _cloudCrypto.deriveAccountSecrets(
+      password: password,
+      username: normalizedUsername,
+      serverOrigin: serverOrigin,
+    );
 
     final vaultSalt = b64(secureRandomBytes(16));
     final vaultKey = await _cloudCrypto.deriveVaultKey(
-      vaultSecret: vaultSecret,
+      vaultSecret: accountSecrets.vaultSecret,
       salt: vaultSalt,
     );
     _cloudVaultKdf = Map<String, dynamic>.of(CloudCrypto.defaultVaultKdf);
-    final serverOrigin = _cloudSignatureOrigin(normalizedServer);
     var vault = await _cloudCrypto.createVault(serverOrigin: serverOrigin);
     final encryptedVault = await _cloudCrypto.encryptVault(vault, vaultKey);
     final deviceId = _uuid.v4();
     final client = CloudApiClient(serverUrl: normalizedServer);
     final result = await client.register(
       username: normalizedUsername,
-      password: password,
+      password: accountSecrets.authPassword,
       deviceId: deviceId,
       deviceName: _genericDeviceName(),
       keyAgreementPublicKey: vault.keyAgreementPublicKey,
@@ -375,25 +402,37 @@ class AppState extends ChangeNotifier {
     required String serverUrl,
     required String username,
     required String password,
-    required String vaultSecret,
+    String? legacyVaultSecret,
   }) async {
     final normalizedServer = _normalizeCloudServerUrl(serverUrl);
     final serverOrigin = _cloudSignatureOrigin(normalizedServer);
-    if (vaultSecret.length < 16) {
-      throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
+    final normalizedUsername = username.trim().toLowerCase();
+    final legacySecret = legacyVaultSecret?.trim() ?? '';
+    final legacyMode = legacySecret.isNotEmpty;
+    CloudAccountSecrets? accountSecrets;
+    if (legacyMode) {
+      if (legacySecret.length < 16) {
+        throw ArgumentError('Sekret vaultu musi miec minimum 16 znakow.');
+      }
+      _validateVaultSecretSeparated(password, legacySecret);
+    } else {
+      accountSecrets = await _cloudCrypto.deriveAccountSecrets(
+        password: password,
+        username: normalizedUsername,
+        serverOrigin: serverOrigin,
+      );
     }
-    _validateVaultSecretSeparated(password, vaultSecret);
     final deviceId = _uuid.v4();
     final probe = CloudApiClient(serverUrl: normalizedServer);
     final loginProbe = await probe.login(
-      username: username.trim().toLowerCase(),
-      password: password,
+      username: normalizedUsername,
+      password: legacyMode ? password : accountSecrets!.authPassword,
       deviceId: deviceId,
       deviceName: _genericDeviceName(),
       serverOrigin: serverOrigin,
     );
     final vaultKey = await _cloudCrypto.deriveVaultKey(
-      vaultSecret: vaultSecret,
+      vaultSecret: legacyMode ? legacySecret : accountSecrets!.vaultSecret,
       salt: loginProbe.vaultSalt,
       parameters: loginProbe.vaultKdf,
     );
@@ -441,7 +480,8 @@ class AppState extends ChangeNotifier {
     final activatedVaultKey = usesDefaultKdf
         ? vaultKey
         : await _cloudCrypto.deriveVaultKey(
-            vaultSecret: vaultSecret,
+            vaultSecret:
+                legacyMode ? legacySecret : accountSecrets!.vaultSecret,
             salt: loginProbe.vaultSalt,
           );
     final session = completed.session.copyWith(vaultKey: activatedVaultKey);
@@ -451,7 +491,11 @@ class AppState extends ChangeNotifier {
       loginProbe.vaultHash,
     );
     await _activateCloudSession(session, vault);
-    await _saveCloudVault();
+    if (legacyMode) {
+      await _migrateLegacyVaultToSeparatedPassword(password);
+    } else {
+      await _saveCloudVault();
+    }
     await _publishCloudKeyBundle();
     await connectCloud();
   }
@@ -668,6 +712,13 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> connectCloud() async {
+    _cloudReconnectTimer?.cancel();
+    _cloudReconnectTimer = null;
+    _cloudReconnectAttempts = 0;
+    await _connectCloudCore();
+  }
+
+  Future<void> _connectCloudCore() async {
     final session = _cloudSession;
     if (session == null) return;
     await _cloudSubscription?.cancel();
@@ -689,6 +740,8 @@ class AppState extends ChangeNotifier {
       await _saveCloudVault();
       await _publishCloudKeyBundle();
     }
+    final currentUser = await _cloudClient!.currentUser();
+    await _syncOwnProfileWithCloudUser(currentUser);
     await refreshCloudUsers();
     await _loadCloudConversations();
     _cloudSubscription = _cloudClient!.events.listen(
@@ -696,6 +749,7 @@ class AppState extends ChangeNotifier {
     );
     await _cloudClient!.connectEvents();
     _cloudConnected = true;
+    _cloudReconnectAttempts = 0;
     _setStatus('Konto polaczone.');
     notifyListeners();
   }
@@ -707,10 +761,19 @@ class AppState extends ChangeNotifier {
     _cloudUsers
       ..clear()
       ..addAll(users);
+    var contactsChanged = false;
+    for (final user in users) {
+      contactsChanged =
+          _syncContactProfileFromCloudUser(user) || contactsChanged;
+    }
+    if (contactsChanged) {
+      await _store.saveContacts(_contacts);
+    }
     notifyListeners();
   }
 
   Contact _contactFromCloudUser(CloudPublicUser user) {
+    final profile = user.profile;
     return Contact(
       userId: user.userId,
       displayName: user.displayName,
@@ -719,6 +782,9 @@ class AppState extends ChangeNotifier {
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature,
       identityRotationProof: user.identityRotationProof?.toJson(),
       deviceList: user.deviceList?.toJson(),
+      avatarMimeType: profile?.avatarMimeType,
+      avatarBytesBase64: profile?.avatarBytesBase64,
+      profileUpdatedAt: profile?.updatedAt,
     );
   }
 
@@ -1154,10 +1220,78 @@ class AppState extends ChangeNotifier {
           _setStatus(error.toString());
         }
         break;
+      case CloudProfileUpdated():
+        if (event.user.userId == _cloudSession?.userId) {
+          await _syncOwnProfileFromCloudUser(event.user);
+        } else if (_syncContactProfileFromCloudUser(event.user)) {
+          await _store.saveContacts(_contacts);
+        }
+        notifyListeners();
+        break;
       case CloudProblem():
         _cloudConnected = false;
         _setStatus(event.message);
+        _scheduleCloudReconnect();
         break;
+    }
+  }
+
+  Future<void> _migrateLegacyVaultToSeparatedPassword(String password) async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    final client = _cloudClient;
+    if (session == null || vault == null || client == null) return;
+    final secrets = await _cloudCrypto.deriveAccountSecrets(
+      password: password,
+      username: session.username,
+      serverOrigin: _cloudSignatureOrigin(session.serverUrl),
+    );
+    final migratedVaultKey = await _cloudCrypto.deriveVaultKey(
+      vaultSecret: secrets.vaultSecret,
+      salt: session.vaultSalt,
+    );
+    final encryptedVault = await _cloudCrypto.encryptVault(
+      vault,
+      migratedVaultKey,
+    );
+    _cloudVaultKdf = Map<String, dynamic>.of(CloudCrypto.defaultVaultKdf);
+    final version = await client.migrateVaultKey(
+      newPassword: secrets.authPassword,
+      encryptedVault: encryptedVault,
+      vaultKdf: _cloudVaultKdf,
+    );
+    final migratedSession = session.copyWith(vaultKey: migratedVaultKey);
+    _cloudSession = migratedSession;
+    await _store.saveCloudSession(migratedSession);
+    await _store.saveCloudVaultPin(session.userId, version.epoch, version.hash);
+    _setStatus('Konto przeniesione na jedno haslo.');
+  }
+
+  void _scheduleCloudReconnect() {
+    if (_disposed || _cloudSession == null) return;
+    if (_cloudReconnectTimer?.isActive == true) return;
+    final attempt =
+        _cloudReconnectAttempts >= 8 ? 8 : _cloudReconnectAttempts + 1;
+    _cloudReconnectAttempts = attempt;
+    final delay = Duration(seconds: attempt == 1 ? 2 : 1 << attempt);
+    _cloudReconnectTimer = Timer(delay, () {
+      unawaited(_runCloudReconnect());
+    });
+  }
+
+  Future<void> _runCloudReconnect() async {
+    if (_disposed || _cloudSession == null || _cloudReconnectInProgress) {
+      return;
+    }
+    _cloudReconnectInProgress = true;
+    try {
+      await _connectCloudCore();
+    } catch (error) {
+      _cloudConnected = false;
+      _setStatus('Ponawiam polaczenie: $error');
+      _scheduleCloudReconnect();
+    } finally {
+      _cloudReconnectInProgress = false;
     }
   }
 
@@ -2091,13 +2225,81 @@ class AppState extends ChangeNotifier {
       updatedAt: DateTime.now().toUtc(),
     );
     await _store.saveOwnProfile(_ownProfile!);
+    await _publishOwnProfile();
     notifyListeners();
   }
 
   Future<void> clearProfileImage() async {
     _ownProfile = UserProfile(updatedAt: DateTime.now().toUtc());
     await _store.saveOwnProfile(_ownProfile!);
+    await _publishOwnProfile();
     notifyListeners();
+  }
+
+  Future<void> _publishOwnProfile() async {
+    final client = _cloudClient;
+    final profile = _ownProfile;
+    if (client == null || _cloudSession == null || profile == null) return;
+    final current = await client.updateProfile(profile);
+    await _syncOwnProfileFromCloudUser(current);
+  }
+
+  Future<void> _syncOwnProfileFromCloudUser(CloudPublicUser user) async {
+    final profile = user.profile;
+    if (profile == null) return;
+    if (!_profileIsNewer(profile, _ownProfile)) return;
+    _ownProfile = profile;
+    await _store.saveOwnProfile(profile);
+  }
+
+  Future<void> _syncOwnProfileWithCloudUser(CloudPublicUser user) async {
+    final localProfile = _ownProfile;
+    final cloudProfile = user.profile;
+    if (localProfile != null &&
+        (cloudProfile == null || _profileIsNewer(localProfile, cloudProfile))) {
+      await _publishOwnProfile();
+      return;
+    }
+    await _syncOwnProfileFromCloudUser(user);
+  }
+
+  bool _syncContactProfileFromCloudUser(CloudPublicUser user) {
+    final profile = user.profile;
+    if (profile == null) return false;
+    final index = _contacts.indexWhere((item) => item.userId == user.userId);
+    if (index < 0) return false;
+    final existing = _contacts[index];
+    final existingProfile = UserProfile(
+      avatarMimeType: existing.avatarMimeType,
+      avatarBytesBase64: existing.avatarBytesBase64,
+      updatedAt: existing.profileUpdatedAt,
+    );
+    if (!_profileIsNewer(profile, existingProfile)) return false;
+    _contacts[index] = Contact(
+      userId: existing.userId,
+      displayName: user.displayName,
+      identityPublicKey: existing.identityPublicKey,
+      signingPublicKey: existing.signingPublicKey,
+      keyAgreementPublicKeySignature: existing.keyAgreementPublicKeySignature,
+      identityRotationProof: existing.identityRotationProof,
+      deviceList: existing.deviceList,
+      avatarMimeType: profile.avatarMimeType,
+      avatarBytesBase64: profile.avatarBytesBase64,
+      profileUpdatedAt: profile.updatedAt,
+    );
+    return true;
+  }
+
+  bool _profileIsNewer(UserProfile incoming, UserProfile? existing) {
+    final incomingUpdatedAt = incoming.updatedAt;
+    final existingUpdatedAt = existing?.updatedAt;
+    if (existing == null) return true;
+    if (incomingUpdatedAt == null) {
+      return existingUpdatedAt == null &&
+          incoming.avatarBytesBase64 != existing.avatarBytesBase64;
+    }
+    if (existingUpdatedAt == null) return true;
+    return incomingUpdatedAt.isAfter(existingUpdatedAt);
   }
 
   Future<void> sendText(
@@ -2348,6 +2550,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> wipeLocalData() async {
+    _cloudReconnectTimer?.cancel();
+    _cloudReconnectTimer = null;
     await _cloudSubscription?.cancel();
     await _cloudClient?.dispose();
     await _store.wipeLocalSecrets();
@@ -2371,6 +2575,8 @@ class AppState extends ChangeNotifier {
     _ownCloudDeviceList = null;
     _cloudUsers.clear();
     _presenceTimer?.cancel();
+    _cloudReconnectAttempts = 0;
+    _cloudReconnectInProgress = false;
     _cloudConnected = false;
     _privacyScreenEnabled = true;
     _privacyLocked = false;
@@ -3348,7 +3554,9 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _presenceTimer?.cancel();
+    _cloudReconnectTimer?.cancel();
     unawaited(_cloudSubscription?.cancel());
     unawaited(_cloudClient?.dispose());
     super.dispose();

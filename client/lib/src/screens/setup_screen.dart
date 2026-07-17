@@ -21,6 +21,7 @@ class _SetupScreenState extends State<SetupScreen> {
   final _cloudPassword = TextEditingController();
   final _cloudVaultSecret = TextEditingController();
   final _cloudInviteToken = TextEditingController();
+  bool _legacyVaultMode = false;
   bool _saving = false;
   String? _error;
 
@@ -78,7 +79,7 @@ class _SetupScreenState extends State<SetupScreen> {
                   TextFormField(
                     controller: _cloudPassword,
                     decoration: const InputDecoration(
-                      labelText: 'Haslo konta',
+                      labelText: 'Haslo',
                       prefixIcon: Icon(Icons.password_outlined),
                     ),
                     obscureText: true,
@@ -90,21 +91,42 @@ class _SetupScreenState extends State<SetupScreen> {
                     },
                   ),
                   const SizedBox(height: 12),
-                  TextFormField(
-                    controller: _cloudVaultSecret,
-                    decoration: const InputDecoration(
-                      labelText: 'Sekret vaultu',
-                      helperText: 'Nie jest wysylany na serwer. Chroni klucze.',
-                      prefixIcon: Icon(Icons.enhanced_encryption_outlined),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    secondary: const Icon(Icons.history_toggle_off_outlined),
+                    title: const Text('Starsze konto z sekretem vaultu'),
+                    subtitle: const Text(
+                      'Uzyj tylko do jednorazowej migracji na jedno haslo.',
                     ),
-                    obscureText: true,
-                    validator: (value) {
-                      if ((value ?? '').length < 16) {
-                        return 'Minimum 16 znakow';
-                      }
-                      return null;
-                    },
+                    value: _legacyVaultMode,
+                    onChanged: _saving
+                        ? null
+                        : (value) {
+                            setState(() {
+                              _legacyVaultMode = value;
+                              if (!value) _cloudVaultSecret.clear();
+                            });
+                          },
                   ),
+                  if (_legacyVaultMode) ...[
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: _cloudVaultSecret,
+                      decoration: const InputDecoration(
+                        labelText: 'Stary sekret vaultu',
+                        helperText:
+                            'Po poprawnym logowaniu konto zostanie przeniesione na jedno haslo.',
+                        prefixIcon: Icon(Icons.enhanced_encryption_outlined),
+                      ),
+                      obscureText: true,
+                      validator: (value) {
+                        if ((value ?? '').length < 16) {
+                          return 'Minimum 16 znakow';
+                        }
+                        return null;
+                      },
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   TextFormField(
                     controller: _cloudInviteToken,
@@ -166,7 +188,7 @@ class _SetupScreenState extends State<SetupScreen> {
         serverUrl: _cloudServerUrl.text,
         username: _cloudUsername.text,
         password: _cloudPassword.text,
-        vaultSecret: _cloudVaultSecret.text,
+        legacyVaultSecret: _legacyVaultMode ? _cloudVaultSecret.text : null,
       );
     } catch (error) {
       setState(() => _error = error.toString());
@@ -186,7 +208,6 @@ class _SetupScreenState extends State<SetupScreen> {
         serverUrl: _cloudServerUrl.text,
         username: _cloudUsername.text,
         password: _cloudPassword.text,
-        vaultSecret: _cloudVaultSecret.text,
         inviteToken: _cloudInviteToken.text,
       );
     } catch (error) {
