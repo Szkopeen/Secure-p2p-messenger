@@ -54,7 +54,7 @@ class _SecureMessengerAppState extends State<SecureMessengerApp>
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Secure Chat',
+      title: 'szkpn.messenger',
       themeMode: ThemeMode.dark,
       darkTheme: ThemeData(
         colorScheme: darkScheme,

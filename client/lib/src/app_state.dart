@@ -94,6 +94,7 @@ class AppState extends ChangeNotifier {
   CloudApiClient? _cloudClient;
   StreamSubscription<CloudEvent>? _cloudSubscription;
   UserProfile? _ownProfile;
+  bool _directoryListed = false;
   Timer? _presenceTimer;
   Timer? _cloudReconnectTimer;
   int _cloudReconnectAttempts = 0;
@@ -132,6 +133,7 @@ class AppState extends ChangeNotifier {
       _cloudVault?.identityPublicKey ??
       (_identity == null ? null : b64(_identity!.publicKey.bytes));
   UserProfile? get ownProfile => _ownProfile;
+  bool get directoryListed => _directoryListed;
   List<Contact> get contacts => List.unmodifiable(_contacts);
   List<CloudPublicUser> get cloudUsers => List.unmodifiable(_cloudUsers);
   CloudDeviceList? get ownCloudDeviceList => _ownCloudDeviceList;
@@ -741,6 +743,7 @@ class AppState extends ChangeNotifier {
       await _publishCloudKeyBundle();
     }
     final currentUser = await _cloudClient!.currentUser();
+    _syncOwnDirectoryState(currentUser);
     await _syncOwnProfileWithCloudUser(currentUser);
     await refreshCloudUsers();
     await _loadCloudConversations();
@@ -769,6 +772,17 @@ class AppState extends ChangeNotifier {
     if (contactsChanged) {
       await _store.saveContacts(_contacts);
     }
+    notifyListeners();
+  }
+
+  Future<void> setDirectoryListed(bool listed) async {
+    final client = _cloudClient;
+    if (client == null || _cloudSession == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    final current = await client.setDirectoryListed(listed);
+    _syncOwnDirectoryState(current);
+    await refreshCloudUsers();
     notifyListeners();
   }
 
@@ -2093,12 +2107,12 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> startCloudConversation(CloudPublicUser user) async {
+  Future<Contact> startCloudConversation(CloudPublicUser user) async {
     await _assertCloudUserKeyBundle(user);
-    await _startCloudDirectContact(_contactFromCloudUser(user));
+    return _startCloudDirectContact(_contactFromCloudUser(user));
   }
 
-  Future<void> _startCloudDirectContact(Contact contact) async {
+  Future<Contact> _startCloudDirectContact(Contact contact) async {
     final session = _cloudSession;
     final vault = _cloudVault;
     final client = _cloudClient;
@@ -2146,7 +2160,7 @@ class AppState extends ChangeNotifier {
     final existingConversationId = _cloudContactToConversation[contact.userId];
     if (existingConversationId != null) {
       notifyListeners();
-      return;
+      return _contactById(contact.userId) ?? contact;
     }
 
     final conversationKey = await _cloudCrypto.newConversationKey();
@@ -2180,6 +2194,7 @@ class AppState extends ChangeNotifier {
     );
     await _rememberCloudConversation(conversation);
     notifyListeners();
+    return _contactById(contact.userId) ?? contact;
   }
 
   Future<void> removeContact(Contact contact) async {
@@ -2242,6 +2257,11 @@ class AppState extends ChangeNotifier {
     if (client == null || _cloudSession == null || profile == null) return;
     final current = await client.updateProfile(profile);
     await _syncOwnProfileFromCloudUser(current);
+  }
+
+  void _syncOwnDirectoryState(CloudPublicUser user) {
+    if (_cloudSession == null || user.userId != _cloudSession!.userId) return;
+    _directoryListed = user.directoryListed;
   }
 
   Future<void> _syncOwnProfileFromCloudUser(CloudPublicUser user) async {

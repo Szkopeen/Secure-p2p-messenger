@@ -21,7 +21,7 @@ class DesktopNotifier {
     try {
       if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
         await localNotifier.setup(
-          appName: 'Secure Chat',
+          appName: 'szkpn.messenger',
           shortcutPolicy: ShortcutPolicy.requireCreate,
         );
       }

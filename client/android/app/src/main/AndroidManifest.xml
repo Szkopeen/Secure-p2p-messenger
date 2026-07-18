@@ -3,7 +3,7 @@
     <application
         android:allowBackup="false"
         android:fullBackupContent="false"
-        android:label="secure_p2p_messenger"
+        android:label="szkpn.messenger"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

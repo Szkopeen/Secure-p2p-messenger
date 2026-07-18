@@ -23,7 +23,7 @@ if (releaseRequested && !keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "pl.szkpn.securep2pmessenger"
+    namespace = "szkpn.messenger"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -33,7 +33,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "pl.szkpn.securep2pmessenger"
+        applicationId = "szkpn.messenger"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

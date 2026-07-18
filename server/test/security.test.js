@@ -878,6 +878,163 @@ test('publiczny profil moze ukryc liste urzadzen przed katalogiem', () => {
   assert.equal(minimal.deviceListHash, '');
 });
 
+test('dokladne wyszukanie loginu zwraca bundle urzadzen do rozpoczecia rozmowy', async () => {
+  const { store, user } = fixture();
+  const now = new Date().toISOString();
+  const peerDeviceId = 'bob-device-1';
+  const peerCertificate = {
+    v: 1,
+    accountId: crypto.randomUUID(),
+    serverOrigin: 'https://chat.example',
+    deviceId: peerDeviceId,
+    deviceSigningPublicKey: 'd'.repeat(32),
+    deviceEpoch: 1,
+    createdAt: now,
+    signature: 's'.repeat(32)
+  };
+  const peer = {
+    userId: peerCertificate.accountId,
+    username: 'bob',
+    displayName: 'Bob',
+    identityPublicKey: 'i'.repeat(32),
+    keyAgreementPublicKey: 'k'.repeat(32),
+    keyAgreementPublicKeySignature: 's'.repeat(32),
+    devices: {
+      [peerDeviceId]: {
+        deviceName: 'Bob Android',
+        deviceCertificate: peerCertificate
+      }
+    },
+    deviceList: {
+      v: 1,
+      accountId: peerCertificate.accountId,
+      serverOrigin: 'https://chat.example',
+      deviceListEpoch: 1,
+      previousDeviceListHash: '',
+      identityRotationEpoch: 0,
+      devices: [{
+        deviceId: peerDeviceId,
+        deviceSigningPublicKey: peerCertificate.deviceSigningPublicKey,
+        certificateHash: sha256Canonical(peerCertificate),
+        addedAt: now,
+        deviceEpoch: 1
+      }],
+      revokedDevices: [],
+      signature: 'l'.repeat(32),
+      updatedAt: now
+    },
+    deviceListHash: 'h'.repeat(32),
+    updatedAt: now
+  };
+  store.users.users[peer.userId] = peer;
+  store.persistUsers();
+  const session = store.createSession(user, 'directory-device', 'Device');
+
+  const result = await httpRequest(store, 'GET', '/v2/users?username=bob', {
+    token: session.token
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.users.length, 1);
+  assert.equal(result.body.users[0].username, 'bob');
+  assert.ok(result.body.users[0].devices[peerDeviceId].deviceCertificate);
+  assert.equal(result.body.users[0].deviceList.devices[0].deviceId, peerDeviceId);
+  assert.equal(result.body.users[0].deviceListHash, peer.deviceListHash);
+});
+
+test('publiczny katalog pokazuje tylko uzytkownikow z wyrazona zgoda', async () => {
+  const { store, user } = fixture();
+  const now = new Date().toISOString();
+  const peerDeviceId = 'bob-device-1';
+  const peerCertificate = {
+    v: 1,
+    accountId: crypto.randomUUID(),
+    serverOrigin: 'https://chat.example',
+    deviceId: peerDeviceId,
+    deviceSigningPublicKey: 'd'.repeat(32),
+    deviceEpoch: 1,
+    createdAt: now,
+    signature: 's'.repeat(32)
+  };
+  const peer = {
+    userId: peerCertificate.accountId,
+    username: 'bob',
+    displayName: 'Bob',
+    identityPublicKey: 'i'.repeat(32),
+    keyAgreementPublicKey: 'k'.repeat(32),
+    keyAgreementPublicKeySignature: 's'.repeat(32),
+    directoryListed: false,
+    devices: {
+      [peerDeviceId]: {
+        deviceName: 'Bob Android',
+        deviceCertificate: peerCertificate
+      }
+    },
+    deviceList: {
+      v: 1,
+      accountId: peerCertificate.accountId,
+      serverOrigin: 'https://chat.example',
+      deviceListEpoch: 1,
+      previousDeviceListHash: '',
+      identityRotationEpoch: 0,
+      devices: [{
+        deviceId: peerDeviceId,
+        deviceSigningPublicKey: peerCertificate.deviceSigningPublicKey,
+        certificateHash: sha256Canonical(peerCertificate),
+        addedAt: now,
+        deviceEpoch: 1
+      }],
+      revokedDevices: [],
+      signature: 'l'.repeat(32),
+      updatedAt: now
+    },
+    deviceListHash: 'h'.repeat(32),
+    updatedAt: now
+  };
+  store.users.users[peer.userId] = peer;
+  store.persistUsers();
+  const session = store.createSession(user, 'directory-device', 'Device');
+
+  const hidden = await httpRequest(store, 'GET', '/v2/users', {
+    token: session.token
+  });
+  assert.equal(hidden.status, 200);
+  assert.equal(hidden.body.users.length, 0);
+
+  peer.directoryListed = true;
+  store.persistUser(peer);
+  const visible = await httpRequest(store, 'GET', '/v2/users', {
+    token: session.token
+  });
+  assert.equal(visible.status, 200);
+  assert.equal(visible.body.users.length, 1);
+  assert.equal(visible.body.users[0].username, 'bob');
+  assert.equal(visible.body.users[0].directoryListed, true);
+  assert.ok(visible.body.users[0].devices[peerDeviceId].deviceCertificate);
+  assert.equal(visible.body.users[0].deviceList.devices[0].deviceId, peerDeviceId);
+});
+
+test('uzytkownik moze wlaczyc i wylaczyc widocznosc w publicznym katalogu', async () => {
+  const { store, user } = fixture();
+  const session = store.createSession(user, 'directory-device', 'Device');
+
+  const enabled = await httpRequest(store, 'PUT', '/v2/directory', {
+    token: session.token,
+    body: { listed: true }
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.body.user.directoryListed, true);
+  assert.equal(store.users.users[user.userId].directoryListed, true);
+
+  const disabled = await httpRequest(store, 'PUT', '/v2/directory', {
+    token: session.token,
+    body: { listed: false }
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.user.directoryListed, false);
+  assert.equal(store.users.users[user.userId].directoryListed, false);
+});
+
 test('publiczny profil zapisuje avatar na serwerze i zwraca go w sesji', async () => {
   const { store, user } = fixture();
   const session = store.createSession(user, 'profile-device', 'Device');

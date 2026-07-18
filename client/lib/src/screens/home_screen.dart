@@ -26,7 +26,7 @@ class HomeScreen extends StatelessWidget {
             title: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Secure Chat'),
+                const Text('szkpn.messenger'),
                 if (totalUnread > 0) ...[
                   const SizedBox(width: 12),
                   Badge.count(count: totalUnread),
@@ -139,7 +139,7 @@ class HomeScreen extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.all(12),
                     child: Text(
-                      'Kontakty i wyszukiwanie',
+                      'Publiczna lista i wyszukiwanie',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                   ),
@@ -165,9 +165,9 @@ class HomeScreen extends StatelessWidget {
                   if (users.isEmpty)
                     const ListTile(
                       leading: Icon(Icons.info_outline),
-                      title: Text('Brak wspolnych kontaktow'),
+                      title: Text('Brak publicznych uzytkownikow'),
                       subtitle: Text(
-                        'Aby znalezc nowa osobe, wpisz jej dokladny login.',
+                        'Wpisz dokladny login albo popros druga osobe o wlaczenie publicznej listy w ustawieniach.',
                       ),
                     ),
                   for (final user in users)
@@ -377,14 +377,39 @@ class _CloudUserTile extends StatelessWidget {
       subtitle: Text(user.username),
       trailing: FilledButton.icon(
         onPressed: () async {
+          final navigator = Navigator.of(context);
+          final messenger = ScaffoldMessenger.of(context);
+          messenger.showSnackBar(
+            SnackBar(content: Text('Dodaje ${user.displayName}...')),
+          );
           try {
-            await appState.startCloudConversation(user);
-            if (context.mounted) Navigator.of(context).pop();
+            final contact = await appState.startCloudConversation(user);
+            if (!context.mounted) return;
+            messenger.showSnackBar(SnackBar(
+              content: Text('Dodano ${user.displayName}.'),
+            ));
+            navigator.pop();
+            navigator.push(
+              MaterialPageRoute(
+                builder: (_) =>
+                    ChatScreen(appState: appState, contact: contact),
+              ),
+            );
           } catch (error) {
             if (!context.mounted) return;
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text(error.toString())));
+            await showDialog<void>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Nie udalo sie dodac kontaktu'),
+                content: SelectableText(error.toString()),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
           }
         },
         icon: const Icon(Icons.chat_outlined),

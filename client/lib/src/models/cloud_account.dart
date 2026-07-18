@@ -84,6 +84,7 @@ class CloudPublicUser {
     this.deviceList,
     this.identityRotationProof,
     this.profile,
+    this.directoryListed = false,
   });
 
   final String userId;
@@ -96,6 +97,7 @@ class CloudPublicUser {
   final CloudDeviceList? deviceList;
   final IdentityRotationProof? identityRotationProof;
   final UserProfile? profile;
+  final bool directoryListed;
 
   factory CloudPublicUser.fromJson(Map<String, dynamic> json) {
     final devices = <String, CloudDeviceCertificate>{};
@@ -132,6 +134,7 @@ class CloudPublicUser {
               (json['profile'] as Map).cast<String, dynamic>(),
             )
           : null,
+      directoryListed: json['directoryListed'] == true,
     );
   }
 }

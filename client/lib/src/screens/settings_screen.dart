@@ -42,6 +42,19 @@ class SettingsScreen extends StatelessWidget {
                       icon: const Icon(Icons.copy),
                     ),
                   ),
+                  if (appState.cloudMode)
+                    SwitchListTile(
+                      secondary: const Icon(Icons.public_outlined),
+                      title: const Text('Publiczna lista uzytkownikow'),
+                      subtitle: const Text(
+                        'Pozwala innym znalezc Cie bez wpisywania dokladnego loginu.',
+                      ),
+                      value: appState.directoryListed,
+                      onChanged: (value) => _setDirectoryListed(
+                        context,
+                        value,
+                      ),
+                    ),
                 ],
               ),
               const SizedBox(height: 16),
@@ -225,6 +238,17 @@ class SettingsScreen extends StatelessWidget {
   Future<void> _clearProfileImage(BuildContext context) async {
     try {
       await appState.clearProfileImage();
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  Future<void> _setDirectoryListed(BuildContext context, bool listed) async {
+    try {
+      await appState.setDirectoryListed(listed);
     } catch (error) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(

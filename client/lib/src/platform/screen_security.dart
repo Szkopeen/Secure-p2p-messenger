@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 class ScreenSecurity {
   const ScreenSecurity._();
 
-  static const _channel = MethodChannel('secure_p2p_messenger/screen_security');
+  static const _channel = MethodChannel('szkpn.messenger/screen_security');
 
   static Future<void> setSecureScreen(bool enabled) async {
     try {

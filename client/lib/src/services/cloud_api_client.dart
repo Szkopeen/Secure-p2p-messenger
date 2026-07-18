@@ -299,6 +299,11 @@ class CloudApiClient {
     return CloudPublicUser.fromJson(asStringKeyMap(raw['user'], 'user'));
   }
 
+  Future<CloudPublicUser> setDirectoryListed(bool listed) async {
+    final raw = await _put('/v2/directory', {'listed': listed});
+    return CloudPublicUser.fromJson(asStringKeyMap(raw['user'], 'user'));
+  }
+
   Future<VaultVersion> migrateVaultKey({
     required String newPassword,
     required Map<String, dynamic> encryptedVault,

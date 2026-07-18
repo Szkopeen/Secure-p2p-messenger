@@ -1392,6 +1392,7 @@ export class V2Store {
       identityPublicKey: user.identityPublicKey || '',
       keyAgreementPublicKeySignature: user.keyAgreementPublicKeySignature || '',
       profile: normalizedPublicProfile(user.profile) || null,
+      directoryListed: user.directoryListed === true,
       devices,
       deviceList: includeDevices && isValidDeviceList(user.deviceList) ? user.deviceList : null,
       deviceListHash: includeDevices && typeof user.deviceListHash === 'string' ? user.deviceListHash : '',
@@ -1750,6 +1751,7 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         identityRotationProof: isValidIdentityRotationProof(body.identityRotationProof) ? body.identityRotationProof : null,
         encryptedVault: isObject(body.encryptedVault) ? body.encryptedVault : null,
         vaultKdf: body.vaultKdf,
+        directoryListed: body.directoryListed === true,
         devices: {},
         createdAt: nowIso(),
         updatedAt: nowIso()
@@ -1934,12 +1936,29 @@ export async function handleV2Http(store, req, res, url, options = {}) {
         .filter((user) => user.userId !== auth.user.userId &&
           (hasSearch
             ? (visibleUserIds.has(user.userId) || user.username === exactUsername)
-            : visibleUserIds.has(user.userId)))
+            : (visibleUserIds.has(user.userId) || user.directoryListed === true)))
         .map((user) => store.publicUser(user, {
-          includeDevices: visibleUserIds.has(user.userId)
+          includeDevices: visibleUserIds.has(user.userId) ||
+            user.directoryListed === true ||
+            (hasSearch && user.username === exactUsername)
         }))
         .sort((a, b) => a.displayName.localeCompare(b.displayName));
       return sendJson(res, 200, { ok: true, users });
+    }
+
+    if (method === 'PUT' && url.pathname === '/v2/directory') {
+      const body = await readBody(req, AUTH_MAX_BODY_BYTES);
+      if (typeof body.listed !== 'boolean') {
+        return sendJson(res, 400, { ok: false, error: 'Widocznosc katalogu musi byc true albo false.' });
+      }
+      return await store.withAccountLock(auth.user.userId, async () => {
+        const user = store.users.users[auth.user.userId];
+        if (!user) return sendJson(res, 401, { ok: false, error: 'Brak logowania.' });
+        user.directoryListed = body.listed;
+        user.updatedAt = nowIso();
+        store.persistUser(user);
+        return sendJson(res, 200, { ok: true, user: store.publicUser(user) });
+      });
     }
 
     if (method === 'PUT' && url.pathname === '/v2/keys') {
