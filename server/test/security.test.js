@@ -250,14 +250,14 @@ test('wektor klient-serwer ma identyczny canonical JSON i SHA-256', () => {
   assert.equal(sha256Canonical(vector.value), vector.sha256);
 });
 
-test('konfiguracja akceptuje produkcyjny limit WebSocket 16 MiB', async () => {
+test('konfiguracja akceptuje produkcyjny limit WebSocket 32 MiB', async () => {
   const previousPayload = process.env.MAX_PAYLOAD_BYTES;
   const previousAdmin = process.env.ADMIN_TOKEN;
   try {
-    process.env.MAX_PAYLOAD_BYTES = String(16 * 1024 * 1024);
+    process.env.MAX_PAYLOAD_BYTES = String(32 * 1024 * 1024);
     process.env.ADMIN_TOKEN = '';
     const { config } = await importFreshConfig();
-    assert.equal(config.maxPayloadBytes, 16 * 1024 * 1024);
+    assert.equal(config.maxPayloadBytes, 32 * 1024 * 1024);
   } finally {
     if (previousPayload === undefined) delete process.env.MAX_PAYLOAD_BYTES;
     else process.env.MAX_PAYLOAD_BYTES = previousPayload;

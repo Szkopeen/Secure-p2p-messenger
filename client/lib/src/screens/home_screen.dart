@@ -21,6 +21,12 @@ class HomeScreen extends StatelessWidget {
       builder: (context, _) {
         final totalUnread = appState.totalUnreadCount;
         final hasContent = appState.contacts.isNotEmpty;
+        final groups = appState.contacts
+            .where((contact) => contact.isGroup)
+            .toList(growable: false);
+        final directContacts = appState.contacts
+            .where((contact) => !contact.isGroup)
+            .toList(growable: false);
         return Scaffold(
           appBar: AppBar(
             title: Row(
@@ -34,6 +40,13 @@ class HomeScreen extends StatelessWidget {
               ],
             ),
             actions: [
+              IconButton(
+                tooltip: 'Utworz grupe',
+                onPressed: directContacts.length < 2
+                    ? null
+                    : () => _openCreateGroup(context),
+                icon: const Icon(Icons.group_add_outlined),
+              ),
               IconButton(
                 tooltip: 'Wyszukaj kontakt',
                 onPressed: () => _openCloudUsers(context),
@@ -90,9 +103,25 @@ class HomeScreen extends StatelessWidget {
                     ? const Center(child: Text('Brak kontaktow'))
                     : ListView(
                         children: [
-                          if (appState.contacts.isNotEmpty) ...[
+                          if (groups.isNotEmpty) ...[
+                            const _SectionHeader(title: 'Grupy'),
+                            for (final contact in groups)
+                              _ContactTile(
+                                appState: appState,
+                                contact: contact,
+                                subtitle: _contactSubtitle(
+                                  contact,
+                                  appState.messagesFor(contact.userId).isEmpty
+                                      ? null
+                                      : appState
+                                          .messagesFor(contact.userId)
+                                          .last,
+                                ),
+                              ),
+                          ],
+                          if (directContacts.isNotEmpty) ...[
                             const _SectionHeader(title: 'Kontakty'),
-                            for (final contact in appState.contacts)
+                            for (final contact in directContacts)
                               _ContactTile(
                                 appState: appState,
                                 contact: contact,
@@ -120,7 +149,9 @@ class HomeScreen extends StatelessWidget {
     await appState.refreshCloudUsers();
     if (!context.mounted) return;
     final username = TextEditingController();
+    var lastSearch = '';
     Future<void> searchUsers() async {
+      lastSearch = username.text.trim();
       await appState.refreshCloudUsers(username: username.text);
     }
 
@@ -163,11 +194,15 @@ class HomeScreen extends StatelessWidget {
                     ),
                   ),
                   if (users.isEmpty)
-                    const ListTile(
-                      leading: Icon(Icons.info_outline),
-                      title: Text('Brak publicznych uzytkownikow'),
-                      subtitle: Text(
-                        'Wpisz dokladny login albo popros druga osobe o wlaczenie publicznej listy w ustawieniach.',
+                    ListTile(
+                      leading: const Icon(Icons.info_outline),
+                      title: Text(
+                        lastSearch.isEmpty
+                            ? 'Brak publicznych uzytkownikow'
+                            : 'Nie znaleziono loginu "$lastSearch"',
+                      ),
+                      subtitle: const Text(
+                        'Wyszukiwanie po loginie dziala niezaleznie od publicznej listy. Sprawdz login, odswiez serwer i upewnij sie, ze druga osoba ma nowe konto cloud.',
                       ),
                     ),
                   for (final user in users)
@@ -180,6 +215,100 @@ class HomeScreen extends StatelessWidget {
       );
     } finally {
       username.dispose();
+    }
+  }
+
+  Future<void> _openCreateGroup(BuildContext context) async {
+    final candidates = appState.contacts
+        .where((contact) => !contact.isGroup)
+        .toList(growable: false);
+    if (candidates.length < 2) return;
+
+    final selected = <String>{};
+    final nameController = TextEditingController();
+    try {
+      final created = await showModalBottomSheet<Contact>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) {
+          return StatefulBuilder(
+            builder: (context, setModalState) {
+              return ListView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'Nowa grupa',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Nazwa grupy',
+                      prefixIcon: Icon(Icons.badge_outlined),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  for (final contact in candidates)
+                    CheckboxListTile(
+                      value: selected.contains(contact.userId),
+                      onChanged: (value) {
+                        setModalState(() {
+                          if (value == true) {
+                            selected.add(contact.userId);
+                          } else {
+                            selected.remove(contact.userId);
+                          }
+                        });
+                      },
+                      title: Text(contact.displayName),
+                      subtitle: Text(contact.userId),
+                    ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: selected.length < 2
+                        ? null
+                        : () async {
+                            final navigator = Navigator.of(context);
+                            final messenger = ScaffoldMessenger.of(context);
+                            try {
+                              final contact =
+                                  await appState.startCloudGroupConversation(
+                                name: nameController.text,
+                                members: [
+                                  for (final candidate in candidates)
+                                    if (selected.contains(candidate.userId))
+                                      candidate,
+                                ],
+                              );
+                              if (!context.mounted) return;
+                              navigator.pop(contact);
+                            } catch (error) {
+                              if (!context.mounted) return;
+                              messenger.showSnackBar(
+                                SnackBar(content: Text(error.toString())),
+                              );
+                            }
+                          },
+                    icon: const Icon(Icons.group_add_outlined),
+                    label: const Text('Utworz grupe'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+      if (!context.mounted || created == null) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(appState: appState, contact: created),
+        ),
+      );
+    } finally {
+      nameController.dispose();
     }
   }
 
@@ -226,7 +355,7 @@ class _ContactTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final online = appState.isContactOnline(contact.userId);
+    final online = !contact.isGroup && appState.isContactOnline(contact.userId);
     final unread = appState.unreadCountFor(contact.userId);
     final initial = contact.displayName.isEmpty
         ? '?'
@@ -253,25 +382,26 @@ class _ContactTile extends StatelessWidget {
           PopupMenuButton<String>(
             tooltip: 'Opcje kontaktu',
             onSelected: (value) {
-              if (value == 'safety') {
+              if (value == 'safety' && !contact.isGroup) {
                 _showSafetyNumber(context);
               } else if (value == 'remove') {
                 _confirmRemoveContact(context);
               }
             },
-            itemBuilder: (context) => const [
-              PopupMenuItem(
-                value: 'safety',
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.verified_user_outlined, size: 18),
-                    SizedBox(width: 10),
-                    Text('Kod bezpieczenstwa'),
-                  ],
+            itemBuilder: (context) => [
+              if (!contact.isGroup)
+                const PopupMenuItem(
+                  value: 'safety',
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.verified_user_outlined, size: 18),
+                      SizedBox(width: 10),
+                      Text('Kod bezpieczenstwa'),
+                    ],
+                  ),
                 ),
-              ),
-              PopupMenuItem(
+              const PopupMenuItem(
                 value: 'remove',
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -336,7 +466,9 @@ class _ContactTile extends StatelessWidget {
         return AlertDialog(
           title: const Text('Usun kontakt'),
           content: Text(
-            'Usunac kontakt ${contact.displayName}? Prywatna historia z tym kontaktem zostanie usunieta lokalnie.',
+            contact.isGroup
+                ? 'Usunac grupe ${contact.displayName} lokalnie? Historia tej grupy zostanie usunieta tylko u Ciebie.'
+                : 'Usunac kontakt ${contact.displayName}? Prywatna historia z tym kontaktem zostanie usunieta lokalnie.',
           ),
           actions: [
             TextButton(

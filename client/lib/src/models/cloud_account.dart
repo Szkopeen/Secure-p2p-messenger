@@ -493,6 +493,7 @@ class CloudConversation {
     required this.memberKeys,
     required this.keyEpoch,
     required this.updatedAt,
+    this.name,
   });
 
   final String conversationId;
@@ -501,6 +502,7 @@ class CloudConversation {
   final Map<String, dynamic> memberKeys;
   final int keyEpoch;
   final DateTime updatedAt;
+  final String? name;
 
   factory CloudConversation.fromJson(Map<String, dynamic> json) {
     return CloudConversation(
@@ -515,6 +517,7 @@ class CloudConversation {
       keyEpoch: json['keyEpoch'] is int ? json['keyEpoch'] as int : 1,
       updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+      name: json['name'] as String?,
     );
   }
 }

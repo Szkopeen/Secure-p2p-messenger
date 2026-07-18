@@ -55,8 +55,8 @@ class AppState extends ChangeNotifier {
     _messageArchive = MessageArchive(secureStore: _store);
   }
 
-  static const maxPlainFileBytes = 8 * 1024 * 1024;
-  static const maxCloudPlainFileBytes = 48 * 1024;
+  static const maxPlainFileBytes = 10 * 1024 * 1024;
+  static const maxCloudPlainFileBytes = 10 * 1024 * 1024;
   static const maxProfileImageBytes = 1024 * 1024;
   static const _maxUpdateArtifactBytes = 512 * 1024 * 1024;
   static const _maxUpdateManifestBytes = 1024 * 1024;
@@ -1158,25 +1158,29 @@ class AppState extends ChangeNotifier {
     final session = _cloudSession;
     if (session == null) return;
     _cloudConversations[conversation.conversationId] = conversation;
-    String? peerId;
-    for (final memberId in conversation.memberIds) {
-      if (memberId != session.userId) {
-        peerId = memberId;
-        break;
+    if (conversation.type == 'group') {
+      _cloudContactToConversation[conversation.conversationId] =
+          conversation.conversationId;
+      await _ensureGroupContact(conversation);
+      try {
+        await _ensureCloudConversationKey(conversation);
+      } catch (error) {
+        _setStatus(error.toString());
       }
+      return;
     }
-    if (peerId == null) return;
-    _cloudContactToConversation[peerId] = conversation.conversationId;
 
-    CloudPublicUser? peer;
-    for (final user in _cloudUsers) {
-      if (user.userId == peerId) {
-        peer = user;
-        break;
-      }
+    final contactId = _conversationContactId(conversation);
+    if (contactId.isEmpty) return;
+    _cloudContactToConversation[contactId] = conversation.conversationId;
+
+    CloudPublicUser? peer = _cloudUserById(contactId);
+    if (peer == null) {
+      await refreshCloudUsers();
+      peer = _cloudUserById(contactId);
     }
     try {
-      final existing = _contactById(peerId);
+      final existing = _contactById(contactId);
       if (existing == null && peer != null) {
         await _assertCloudUserKeyBundle(peer);
         _contacts.add(_contactFromCloudUser(peer));
@@ -1194,6 +1198,75 @@ class AppState extends ChangeNotifier {
     } catch (error) {
       _setStatus(error.toString());
     }
+  }
+
+  CloudPublicUser? _cloudUserById(String userId) {
+    for (final user in _cloudUsers) {
+      if (user.userId == userId) return user;
+    }
+    return null;
+  }
+
+  String _conversationContactId(CloudConversation conversation) {
+    final session = _cloudSession;
+    if (conversation.type == 'group') return conversation.conversationId;
+    for (final memberId in conversation.memberIds) {
+      if (memberId != session?.userId) return memberId;
+    }
+    return conversation.conversationId;
+  }
+
+  Future<void> _ensureGroupContact(CloudConversation conversation) async {
+    if (conversation.type != 'group') return;
+    final existing = _contactById(conversation.conversationId);
+    if (existing == null && _cloudUsers.isEmpty) {
+      await refreshCloudUsers();
+    }
+    final displayName = _groupDisplayName(conversation);
+    final next = Contact(
+      userId: conversation.conversationId,
+      displayName: displayName,
+      identityPublicKey: '',
+      isGroup: true,
+      memberIds: conversation.memberIds,
+    );
+    if (existing == null) {
+      _contacts.add(next);
+      _contacts.sort((a, b) => a.displayName.compareTo(b.displayName));
+      await _store.saveContacts(_contacts);
+      return;
+    }
+    if (!existing.isGroup ||
+        existing.displayName != displayName ||
+        existing.memberIds.join('|') != conversation.memberIds.join('|')) {
+      final index = _contacts.indexWhere(
+        (item) => item.userId == conversation.conversationId,
+      );
+      if (index >= 0) {
+        _contacts[index] = existing.copyWith(
+          displayName: displayName,
+          isGroup: true,
+          memberIds: conversation.memberIds,
+        );
+        await _store.saveContacts(_contacts);
+      }
+    }
+  }
+
+  String _groupDisplayName(CloudConversation conversation) {
+    final explicitName = conversation.name?.trim();
+    if (explicitName != null && explicitName.isNotEmpty) return explicitName;
+    final session = _cloudSession;
+    final names = conversation.memberIds
+        .where((memberId) => memberId != session?.userId)
+        .map((memberId) =>
+            _contactById(memberId)?.displayName ??
+            _cloudUserById(memberId)?.displayName ??
+            memberId)
+        .take(4)
+        .toList(growable: false);
+    if (names.isEmpty) return 'Grupa';
+    return 'Grupa: ${names.join(', ')}';
   }
 
   Future<void> _loadCloudMessages(CloudConversation conversation) async {
@@ -1664,17 +1737,40 @@ class AppState extends ChangeNotifier {
       expectedSenderKeyAgreementPublicKey = vault.keyAgreementPublicKey;
     } else {
       final contact = _contactById(senderUserId);
-      if (contact == null || !_contactHasSignedIdentity(contact)) {
+      if (contact != null && _contactHasSignedIdentity(contact)) {
+        expectedSenderIdentityPublicKey = contact.signingPublicKey!;
+        expectedSenderKeyAgreementPublicKey = contact.identityPublicKey;
+        if (contact.identityPublicKey != senderPublicKey ||
+            contact.signingPublicKey != senderIdentityPublicKey) {
+          throw StateError(
+            'Klucz kontaktu ${contact.displayName} nie zgadza sie z zapisana, podpisana tozsamoscia. Zweryfikuj safety number przed rozmowa.',
+          );
+        }
+      } else {
+        var sender = _cloudUserById(senderUserId);
+        if (sender == null) {
+          await refreshCloudUsers();
+          sender = _cloudUserById(senderUserId);
+        }
+        if (sender == null) {
+          throw StateError(
+            'Brak zaufanej, podpisanej tozsamosci nadawcy koperty klucza.',
+          );
+        }
+        await _assertCloudUserKeyBundle(sender);
+        expectedSenderIdentityPublicKey = sender.identityPublicKey;
+        expectedSenderKeyAgreementPublicKey = sender.keyAgreementPublicKey;
+        if (sender.keyAgreementPublicKey != senderPublicKey ||
+            sender.identityPublicKey != senderIdentityPublicKey) {
+          throw StateError(
+            'Klucz nadawcy koperty grupy nie zgadza sie z podpisana tozsamoscia.',
+          );
+        }
+      }
+      if (expectedSenderIdentityPublicKey.isEmpty ||
+          expectedSenderKeyAgreementPublicKey.isEmpty) {
         throw StateError(
           'Brak zaufanej, podpisanej tozsamosci nadawcy koperty klucza.',
-        );
-      }
-      expectedSenderIdentityPublicKey = contact.signingPublicKey!;
-      expectedSenderKeyAgreementPublicKey = contact.identityPublicKey;
-      if (contact.identityPublicKey != senderPublicKey ||
-          contact.signingPublicKey != senderIdentityPublicKey) {
-        throw StateError(
-          'Klucz kontaktu ${contact.displayName} nie zgadza sie z zapisana, podpisana tozsamoscia. Zweryfikuj safety number przed rozmowa.',
         );
       }
     }
@@ -1761,6 +1857,8 @@ class AppState extends ChangeNotifier {
     final senderDeviceId = decrypted.senderDeviceId.isNotEmpty
         ? decrypted.senderDeviceId
         : stored.senderDeviceId;
+    final contactId = _conversationContactId(conversation);
+    if (contactId.isEmpty) return;
     if (_hasCloudMessage(stored.conversationId, decrypted.messageId)) {
       await _advanceCloudReplayStateForStoredMessage(
         conversationId: stored.conversationId,
@@ -1793,7 +1891,7 @@ class AppState extends ChangeNotifier {
         ? MessageDirection.outbound
         : MessageDirection.inbound;
     final handledControlPayload = _applyCloudControlPayload(
-      peerId: peerId,
+      peerId: contactId,
       senderUserId: stored.senderUserId,
       direction: direction,
       payload: decrypted.payload,
@@ -1827,7 +1925,7 @@ class AppState extends ChangeNotifier {
     final added = _addMessage(
       ChatMessage(
         id: decrypted.messageId,
-        contactId: peerId,
+        contactId: contactId,
         direction: direction,
         payload: decrypted.payload,
         createdAt: decrypted.createdAt,
@@ -1856,10 +1954,10 @@ class AppState extends ChangeNotifier {
       _cloudLastSeq[stored.conversationId] = stored.seq;
     }
     if (added && direction == MessageDirection.inbound) {
-      final contact = _contactById(peerId);
+      final contact = _contactById(contactId);
       unawaited(
         DesktopNotifier.instance.notifyIncoming(
-          senderName: contact?.displayName ?? peerId,
+          senderName: contact?.displayName ?? contactId,
           payload: decrypted.payload,
         ),
       );
@@ -1939,8 +2037,7 @@ class AppState extends ChangeNotifier {
     if (session == null || client == null) {
       throw StateError('Najpierw zaloguj sie na konto.');
     }
-    await _startCloudDirectContact(contact);
-    final conversationId = _cloudContactToConversation[contact.userId];
+    final conversationId = await _cloudConversationIdForContact(contact);
     if (conversationId == null) {
       throw StateError('Nie mozna utworzyc rozmowy cloud.');
     }
@@ -1967,8 +2064,7 @@ class AppState extends ChangeNotifier {
     if (session == null || client == null) {
       throw StateError('Najpierw zaloguj sie na konto.');
     }
-    await _startCloudDirectContact(contact);
-    final conversationId = _cloudContactToConversation[contact.userId];
+    final conversationId = await _cloudConversationIdForContact(contact);
     if (conversationId == null) {
       throw StateError('Nie mozna utworzyc rozmowy cloud.');
     }
@@ -1984,6 +2080,19 @@ class AppState extends ChangeNotifier {
         recordLocally: false,
       ),
     );
+  }
+
+  Future<String?> _cloudConversationIdForContact(Contact contact) async {
+    if (contact.isGroup) {
+      final conversationId =
+          _cloudContactToConversation[contact.userId] ?? contact.userId;
+      if (_cloudConversations[conversationId] == null) {
+        throw StateError('Brak rozmowy grupowej cloud.');
+      }
+      return conversationId;
+    }
+    await _startCloudDirectContact(contact);
+    return _cloudContactToConversation[contact.userId];
   }
 
   Future<void> _sendCloudPayloadLocked({
@@ -2069,6 +2178,9 @@ class AppState extends ChangeNotifier {
 
   Future<void> addContact(Contact contact) async {
     if (cloudMode) {
+      if (contact.isGroup) {
+        throw StateError('Grupy tworzy sie z listy kontaktow.');
+      }
       await _startCloudDirectContact(contact);
       return;
     }
@@ -2110,6 +2222,80 @@ class AppState extends ChangeNotifier {
   Future<Contact> startCloudConversation(CloudPublicUser user) async {
     await _assertCloudUserKeyBundle(user);
     return _startCloudDirectContact(_contactFromCloudUser(user));
+  }
+
+  Future<Contact> startCloudGroupConversation({
+    required List<Contact> members,
+    String? name,
+  }) async {
+    final session = _cloudSession;
+    final vault = _cloudVault;
+    final client = _cloudClient;
+    if (session == null || vault == null || client == null) {
+      throw StateError('Najpierw zaloguj sie na konto.');
+    }
+    final uniqueMembers = <String, Contact>{};
+    for (final member in members) {
+      if (member.isGroup || member.userId == session.userId) continue;
+      uniqueMembers[member.userId] = member;
+    }
+    if (uniqueMembers.length < 2) {
+      throw StateError('Grupa wymaga minimum dwoch kontaktow poza Toba.');
+    }
+    for (final member in uniqueMembers.values) {
+      await _assertContactKeyBundle(member);
+    }
+
+    final conversationId = _uuid.v4();
+    final conversationKey = await _cloudCrypto.newConversationKey();
+    final memberIds = <String>[session.userId, ...uniqueMembers.keys]..sort();
+    final contactsById = {
+      for (final member in uniqueMembers.values) member.userId: member,
+    };
+    final memberKeys = <String, dynamic>{};
+    for (final memberId in memberIds) {
+      final recipientPublicKey = memberId == session.userId
+          ? vault.keyAgreementPublicKey
+          : contactsById[memberId]?.identityPublicKey;
+      if (recipientPublicKey == null || recipientPublicKey.isEmpty) {
+        throw StateError('Brak klucza czlonka grupy $memberId.');
+      }
+      memberKeys[memberId] = await _cloudCrypto.wrapConversationKey(
+        vault: vault,
+        conversationId: conversationId,
+        keyEpoch: 1,
+        senderUserId: session.userId,
+        senderDeviceId: session.deviceId,
+        recipientUserId: memberId,
+        recipientPublicKey: recipientPublicKey,
+        conversationKey: conversationKey,
+      );
+    }
+
+    final displayName = _cleanGroupName(name) ??
+        'Grupa: ${uniqueMembers.values.map((item) => item.displayName).take(4).join(', ')}';
+    final conversation = await client.createGroupConversation(
+      conversationId: conversationId,
+      name: displayName,
+      memberIds: memberIds,
+      memberKeys: memberKeys,
+    );
+    await _rememberCloudConversation(conversation);
+    notifyListeners();
+    return _contactById(conversation.conversationId) ??
+        Contact(
+          userId: conversation.conversationId,
+          displayName: displayName,
+          identityPublicKey: '',
+          isGroup: true,
+          memberIds: memberIds,
+        );
+  }
+
+  String? _cleanGroupName(String? name) {
+    final value = name?.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (value == null || value.isEmpty) return null;
+    return value.length <= 80 ? value : value.substring(0, 80);
   }
 
   Future<Contact> _startCloudDirectContact(Contact contact) async {
@@ -2201,6 +2387,7 @@ class AppState extends ChangeNotifier {
     final removed = _contacts.any((item) => item.userId == contact.userId);
     _contacts.removeWhere((item) => item.userId == contact.userId);
     _messages.remove(contact.userId);
+    _cloudContactToConversation.remove(contact.userId);
 
     if (!removed) return;
     await _store.saveContacts(_contacts);

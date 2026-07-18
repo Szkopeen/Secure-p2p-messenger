@@ -13,7 +13,7 @@ import '../models/message.dart';
 import 'codec.dart';
 import 'bounded_zlib.dart';
 
-const _maxDecompressedMessageBytes = 16 * 1024 * 1024;
+const _maxDecompressedMessageBytes = 32 * 1024 * 1024;
 
 List<int> _deriveArgon2id({
   required List<int> secret,

@@ -4,14 +4,14 @@ import path from 'node:path';
 import { SqliteStateStore } from './sqliteStore.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.:@-]{3,64}$/;
-const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
 const AUTH_MAX_BODY_BYTES = 32 * 1024;
 const PROFILE_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_PROFILE_IMAGE_BYTES = 1024 * 1024;
 const MAX_MESSAGE_PAGE = 500;
 const DEFAULT_MESSAGE_PAGE = 100;
 const MAX_MEMBER_KEY_BYTES = 16 * 1024;
-const MAX_STORED_MESSAGE_BYTES = 128 * 1024;
+const MAX_STORED_MESSAGE_BYTES = 32 * 1024 * 1024;
 const MAX_MESSAGES_PER_CONVERSATION = 50_000;
 const MAX_CONVERSATION_BYTES = 256 * 1024 * 1024;
 const MAX_ACCOUNT_BYTES = 1024 * 1024 * 1024;
@@ -575,6 +575,15 @@ function safeUsername(value) {
 
 function normalizeUsername(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function usernameMatches(user, normalizedUsername) {
+  return normalizeUsername(user?.username) === normalizedUsername;
+}
+
+function sanitizeConversationName(name) {
+  const value = String(name || '').trim().replace(/\s+/g, ' ');
+  return value.slice(0, 80);
 }
 
 function readJson(file, fallback) {
@@ -1368,7 +1377,7 @@ export class V2Store {
 
   userByName(username) {
     const normalized = normalizeUsername(username);
-    return Object.values(this.users.users).find((user) => user.username === normalized) || null;
+    return Object.values(this.users.users).find((user) => usernameMatches(user, normalized)) || null;
   }
 
   publicUser(user, { includeDevices = true } = {}) {
@@ -1935,12 +1944,12 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       const users = Object.values(store.users.users)
         .filter((user) => user.userId !== auth.user.userId &&
           (hasSearch
-            ? (visibleUserIds.has(user.userId) || user.username === exactUsername)
+            ? (visibleUserIds.has(user.userId) || usernameMatches(user, exactUsername))
             : (visibleUserIds.has(user.userId) || user.directoryListed === true)))
         .map((user) => store.publicUser(user, {
           includeDevices: visibleUserIds.has(user.userId) ||
             user.directoryListed === true ||
-            (hasSearch && user.username === exactUsername)
+            (hasSearch && usernameMatches(user, exactUsername))
         }))
         .sort((a, b) => a.displayName.localeCompare(b.displayName));
       return sendJson(res, 200, { ok: true, users });
@@ -2235,6 +2244,57 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       return sendJson(res, 200, { ok: true, conversation });
     }
 
+    if (method === 'POST' && url.pathname === '/v2/conversations/group') {
+      const body = await readBody(req);
+      const requestedConversationId = String(body.conversationId || '');
+      if (!SAFE_ID.test(requestedConversationId)) {
+        return sendJson(res, 400, { ok: false, error: 'Niepoprawny identyfikator rozmowy.' });
+      }
+      const requestedMemberIds = Array.isArray(body.memberIds)
+        ? body.memberIds.map((item) => String(item || '')).filter(Boolean)
+        : [];
+      const memberIds = [...new Set([auth.user.userId, ...requestedMemberIds])].sort();
+      if (memberIds.length < 3) {
+        return sendJson(res, 400, { ok: false, error: 'Grupa wymaga minimum dwoch kontaktow poza Toba.' });
+      }
+      for (const memberId of memberIds) {
+        if (!SAFE_ID.test(memberId) || !store.users.users[memberId]) {
+          return sendJson(res, 404, { ok: false, error: 'Jeden z czlonkow grupy nie istnieje.' });
+        }
+      }
+      const memberKeysError = validateMemberKeys(body.memberKeys || {}, memberIds, auth);
+      if (memberKeysError) return sendJson(res, 400, { ok: false, error: memberKeysError });
+      if (Object.keys(body.memberKeys || {}).length !== memberIds.length) {
+        return sendJson(res, 400, { ok: false, error: 'Tworzenie grupy wymaga koperty dla kazdego czlonka.' });
+      }
+      for (const envelope of Object.values(body.memberKeys)) {
+        if (envelope.conversationId !== requestedConversationId || envelope.senderUserId !== auth.user.userId ||
+            envelope.senderDeviceId !== auth.session.deviceId) {
+          return sendJson(res, 400, { ok: false, error: 'Kontekst koperty memberKeys nie zgadza sie z sesja lub grupa.' });
+        }
+      }
+      return await store.withAccountLock(`conversation:${requestedConversationId}`, async () => {
+        if (store.conversations.conversations[requestedConversationId]) {
+          return sendJson(res, 409, { ok: false, error: 'Taka grupa juz istnieje.' });
+        }
+        const now = nowIso();
+        const conversation = {
+          conversationId: requestedConversationId,
+          type: 'group',
+          name: sanitizeConversationName(body.name) || 'Grupa',
+          memberIds,
+          keyEpoch: 1,
+          memberKeys: isObject(body.memberKeys) ? body.memberKeys : {},
+          createdAt: now,
+          updatedAt: now
+        };
+        store.conversations.conversations[conversation.conversationId] = conversation;
+        store.persistConversation(conversation);
+        store.broadcast(memberIds, { type: 'conversation', conversation });
+        return sendJson(res, 200, { ok: true, conversation });
+      });
+    }
+
     if (method === 'PUT' && parts.length === 4 && parts[0] === 'v2' &&
         parts[1] === 'conversations' && parts[3] === 'keys') {
       const conversationId = parts[2];
@@ -2292,12 +2352,6 @@ export async function handleV2Http(store, req, res, url, options = {}) {
       const conversation = store.conversations.conversations[conversationId];
       if (!conversation || !conversation.memberIds.includes(auth.user.userId)) {
         return sendJson(res, 404, { ok: false, error: 'Nie ma takiej rozmowy.' });
-      }
-      if (conversation.type !== 'direct') {
-        return sendJson(res, 409, {
-          ok: false,
-          error: 'Wysylanie do grup jest zablokowane do czasu bezpiecznej rotacji kluczy.'
-        });
       }
       const payloadError = validateCloudMessagePayload(body.payload, body, auth);
       if (payloadError) {

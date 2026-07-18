@@ -360,6 +360,23 @@ class CloudApiClient {
     );
   }
 
+  Future<CloudConversation> createGroupConversation({
+    required String conversationId,
+    required String name,
+    required List<String> memberIds,
+    required Map<String, dynamic> memberKeys,
+  }) async {
+    final raw = await _post('/v2/conversations/group', {
+      'conversationId': conversationId,
+      'name': name,
+      'memberIds': memberIds,
+      'memberKeys': memberKeys,
+    });
+    return CloudConversation.fromJson(
+      asStringKeyMap(raw['conversation'], 'conversation'),
+    );
+  }
+
   Future<CloudConversation> rotateConversationKey({
     required String conversationId,
     required int expectedKeyEpoch,

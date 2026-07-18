@@ -10,6 +10,8 @@ class Contact {
     this.avatarMimeType,
     this.avatarBytesBase64,
     this.profileUpdatedAt,
+    this.isGroup = false,
+    this.memberIds = const [],
   });
 
   final String userId;
@@ -24,6 +26,8 @@ class Contact {
   final String? avatarMimeType;
   final String? avatarBytesBase64;
   final DateTime? profileUpdatedAt;
+  final bool isGroup;
+  final List<String> memberIds;
 
   bool get hasAvatar =>
       avatarBytesBase64 != null && avatarBytesBase64!.isNotEmpty;
@@ -39,6 +43,8 @@ class Contact {
         'avatarMimeType': avatarMimeType,
         'avatarBytes': avatarBytesBase64,
         'profileUpdatedAt': profileUpdatedAt?.toUtc().toIso8601String(),
+        'isGroup': isGroup,
+        'memberIds': memberIds,
       };
 
   factory Contact.fromJson(Map<String, dynamic> json) {
@@ -61,6 +67,10 @@ class Contact {
       profileUpdatedAt: profileUpdatedAtRaw == null
           ? null
           : DateTime.parse(profileUpdatedAtRaw),
+      isGroup: json['isGroup'] == true,
+      memberIds: ((json['memberIds'] as List?) ?? const [])
+          .map((item) => item.toString())
+          .toList(growable: false),
     );
   }
 
@@ -74,6 +84,8 @@ class Contact {
     String? avatarMimeType,
     String? avatarBytesBase64,
     DateTime? profileUpdatedAt,
+    bool? isGroup,
+    List<String>? memberIds,
   }) {
     return Contact(
       userId: userId,
@@ -88,6 +100,8 @@ class Contact {
       avatarMimeType: avatarMimeType ?? this.avatarMimeType,
       avatarBytesBase64: avatarBytesBase64 ?? this.avatarBytesBase64,
       profileUpdatedAt: profileUpdatedAt ?? this.profileUpdatedAt,
+      isGroup: isGroup ?? this.isGroup,
+      memberIds: memberIds ?? this.memberIds,
     );
   }
 }

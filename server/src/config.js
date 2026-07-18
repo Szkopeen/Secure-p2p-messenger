@@ -22,15 +22,16 @@ function readList(name, fallback = []) {
   return raw.split(',').map((value) => value.trim()).filter(Boolean);
 }
 
-const MAX_WEBSOCKET_PAYLOAD_BYTES = 16 * 1024 * 1024;
+const MAX_MESSAGE_ENVELOPE_BYTES = 32 * 1024 * 1024;
+const MAX_WEBSOCKET_PAYLOAD_BYTES = MAX_MESSAGE_ENVELOPE_BYTES;
 
 export const config = Object.freeze({
   host: process.env.HOST || '127.0.0.1',
   port: readInt('PORT', 8443, 1, 65535),
   adminToken: process.env.ADMIN_TOKEN || '',
-  maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', 64 * 1024, 1024, MAX_WEBSOCKET_PAYLOAD_BYTES),
+  maxPayloadBytes: readInt('MAX_PAYLOAD_BYTES', MAX_MESSAGE_ENVELOPE_BYTES, 1024, MAX_WEBSOCKET_PAYLOAD_BYTES),
   v2DataDir: process.env.V2_DATA_DIR || './data-v2',
-  messageMaxBytes: readInt('MESSAGE_MAX_BYTES', 128 * 1024, 16 * 1024, 1024 * 1024),
+  messageMaxBytes: readInt('MESSAGE_MAX_BYTES', MAX_MESSAGE_ENVELOPE_BYTES, 16 * 1024, MAX_MESSAGE_ENVELOPE_BYTES),
   messagesPerConversation: readInt('MESSAGES_PER_CONVERSATION', 50_000, 100, 1_000_000),
   conversationQuotaBytes: readInt('CONVERSATION_QUOTA_BYTES', 256 * 1024 * 1024, 1024 * 1024, 10 * 1024 * 1024 * 1024),
   accountQuotaBytes: readInt('ACCOUNT_QUOTA_BYTES', 1024 * 1024 * 1024, 1024 * 1024, 100 * 1024 * 1024 * 1024),
