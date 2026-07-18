@@ -1339,6 +1339,43 @@ test('endpoint HTTP przyjmuje tylko podpisany ciag wiadomosci z aktualna epoka',
   assert.match(staleEpoch.body.error, /epoki/);
 });
 
+test('endpoint HTTP pozwala czlonkowi grupy wyslac podpisana wiadomosc', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-chat-group-http-'));
+  const store = new V2Store({ dataDir, limits: { minFreeDiskBytes: 0 } });
+  const { auth, payload, user } = signedProtocolFixture();
+  user.username = `group-${crypto.randomBytes(6).toString('hex')}`;
+  user.displayName = 'Group sender';
+  user.devices = {};
+  user.updatedAt = new Date().toISOString();
+  store.users.users[user.userId] = user;
+  store.persistUsers();
+  const session = store.createSession(user, auth.session.deviceId, 'test');
+  store.conversations.conversations['conversation-1'] = {
+    conversationId: 'conversation-1',
+    type: 'group',
+    name: 'Test group',
+    memberIds: [user.userId, 'peer-user'].sort(),
+    keyEpoch: 1,
+    memberKeys: {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  store.persistConversations();
+
+  const accepted = await httpRequest(store, 'POST', '/v2/messages', {
+    token: session.token,
+    body: {
+      conversationId: 'conversation-1',
+      messageId: payload.messageId,
+      payload
+    }
+  });
+
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.message.conversationId, 'conversation-1');
+  assert.equal(accepted.body.message.senderUserId, user.userId);
+});
+
 test('kolejka KDF ma twardy limit i odrzuca nadmiar', async () => {
   const requests = Array.from({ length: 40 }, (_, index) =>
     security.scryptAsync(`password-${index}`, `salt-${index}`));

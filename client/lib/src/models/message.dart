@@ -263,6 +263,8 @@ class ChatMessage {
     this.senderId,
     this.transport,
     this.error,
+    this.deliveredBy = const {},
+    this.readBy = const {},
   });
 
   final String id;
@@ -278,6 +280,8 @@ class ChatMessage {
   final String? senderId;
   final String? transport;
   final String? error;
+  final Map<String, String> deliveredBy;
+  final Map<String, String> readBy;
 
   Map<String, dynamic> toJson() => {
         'v': 1,
@@ -294,6 +298,8 @@ class ChatMessage {
         'senderId': senderId,
         'transport': transport,
         'error': error,
+        'deliveredBy': deliveredBy,
+        'readBy': readBy,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
@@ -317,6 +323,12 @@ class ChatMessage {
       senderId: json['senderId'] as String?,
       transport: json['transport'] as String?,
       error: json['error'] as String?,
+      deliveredBy: ((json['deliveredBy'] as Map?) ?? const {}).map(
+        (key, value) => MapEntry(key.toString(), value.toString()),
+      ),
+      readBy: ((json['readBy'] as Map?) ?? const {}).map(
+        (key, value) => MapEntry(key.toString(), value.toString()),
+      ),
     );
   }
 
@@ -331,6 +343,8 @@ class ChatMessage {
     String? senderId,
     String? transport,
     String? error,
+    Map<String, String>? deliveredBy,
+    Map<String, String>? readBy,
   }) {
     return ChatMessage(
       id: id,
@@ -346,6 +360,8 @@ class ChatMessage {
       senderId: senderId ?? this.senderId,
       transport: transport ?? this.transport,
       error: error ?? this.error,
+      deliveredBy: deliveredBy ?? this.deliveredBy,
+      readBy: readBy ?? this.readBy,
     );
   }
 }

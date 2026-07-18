@@ -165,6 +165,29 @@ class AppState extends ChangeNotifier {
         .length;
   }
 
+  String displayNameForUser(String userId) {
+    if (userId == ownUserId) return ownDisplayName ?? 'Ty';
+    final contact = _contactById(userId);
+    if (contact != null) return contact.displayName;
+    final user = _cloudUserById(userId);
+    return user?.displayName ?? user?.username ?? userId;
+  }
+
+  String? avatarForUser(String userId) {
+    if (userId == ownUserId) return _ownProfile?.avatarBytesBase64;
+    final contact = _contactById(userId);
+    if (contact?.avatarBytesBase64?.isNotEmpty == true) {
+      return contact!.avatarBytesBase64;
+    }
+    return _cloudUserById(userId)?.profile?.avatarBytesBase64;
+  }
+
+  List<String> displayNamesForUsers(Iterable<String> userIds) {
+    return userIds.map((userId) => displayNameForUser(userId)).toList(
+          growable: false,
+        );
+  }
+
   void handleLifecycleState(String stateName) {
     if (_shouldLockForLifecycleState(stateName)) {
       _lockPrivacy();
@@ -281,13 +304,6 @@ class AppState extends ChangeNotifier {
   bool isContactOnline(String contactId) {
     if (cloudMode) return true;
     return false;
-  }
-
-  String displayNameForUser(String userId) {
-    return _contactById(userId)?.displayName ??
-        (userId == _cloudSession?.userId || userId == _identity?.userId
-            ? 'Ty'
-            : userId);
   }
 
   String safetyNumberFor(Contact contact) {
@@ -1219,7 +1235,14 @@ class AppState extends ChangeNotifier {
   Future<void> _ensureGroupContact(CloudConversation conversation) async {
     if (conversation.type != 'group') return;
     final existing = _contactById(conversation.conversationId);
-    if (existing == null && _cloudUsers.isEmpty) {
+    final session = _cloudSession;
+    final missingMemberProfile = conversation.memberIds.any(
+      (memberId) =>
+          memberId != session?.userId &&
+          _contactById(memberId) == null &&
+          _cloudUserById(memberId) == null,
+    );
+    if ((existing == null && _cloudUsers.isEmpty) || missingMemberProfile) {
       await refreshCloudUsers();
     }
     final displayName = _groupDisplayName(conversation);
@@ -2015,6 +2038,8 @@ class AppState extends ChangeNotifier {
             peerId,
             targetMessageId,
             payload.receiptKind ?? ReceiptKind.delivered,
+            senderUserId,
+            createdAt: createdAt,
           );
         }
         return true;
@@ -2086,6 +2111,9 @@ class AppState extends ChangeNotifier {
     if (contact.isGroup) {
       final conversationId =
           _cloudContactToConversation[contact.userId] ?? contact.userId;
+      if (_cloudConversations[conversationId] == null) {
+        await _loadCloudConversations();
+      }
       if (_cloudConversations[conversationId] == null) {
         throw StateError('Brak rozmowy grupowej cloud.');
       }
@@ -2924,7 +2952,13 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
-  bool _applyReceipt(String contactId, String messageId, ReceiptKind kind) {
+  bool _applyReceipt(
+    String contactId,
+    String messageId,
+    ReceiptKind kind,
+    String readerId, {
+    DateTime? createdAt,
+  }) {
     final list = _messages[contactId];
     if (list == null) return false;
     final index = list.indexWhere((message) => message.id == messageId);
@@ -2933,16 +2967,42 @@ class AppState extends ChangeNotifier {
     final message = list[index];
     if (message.direction != MessageDirection.outbound) return false;
 
+    final timestamp = (createdAt ?? DateTime.now()).toUtc().toIso8601String();
+    final deliveredBy = Map<String, String>.of(message.deliveredBy);
+    final readBy = Map<String, String>.of(message.readBy);
+    if (kind == ReceiptKind.delivered) {
+      deliveredBy[readerId] = timestamp;
+    } else {
+      deliveredBy[readerId] = deliveredBy[readerId] ?? timestamp;
+      readBy[readerId] = timestamp;
+    }
+
     final nextStatus = switch (kind) {
       ReceiptKind.delivered => MessageStatus.delivered,
       ReceiptKind.read => MessageStatus.read,
     };
     final promotedStatus = _promoteStatus(message.status, nextStatus);
-    if (promotedStatus == message.status) return true;
+    if (promotedStatus == message.status &&
+        _mapsEqual(deliveredBy, message.deliveredBy) &&
+        _mapsEqual(readBy, message.readBy)) {
+      return true;
+    }
 
-    list[index] = message.copyWith(status: promotedStatus);
+    list[index] = message.copyWith(
+      status: promotedStatus,
+      deliveredBy: deliveredBy,
+      readBy: readBy,
+    );
     unawaited(_persistMessages());
     notifyListeners();
+    return true;
+  }
+
+  bool _mapsEqual(Map<String, String> left, Map<String, String> right) {
+    if (left.length != right.length) return false;
+    for (final entry in left.entries) {
+      if (right[entry.key] != entry.value) return false;
+    }
     return true;
   }
 
@@ -3300,14 +3360,16 @@ class AppState extends ChangeNotifier {
       }
       deviceList = CloudDeviceList.fromOptionalJson(contact?.deviceList);
       if (identityPublicKeys.isEmpty) {
-        for (final user in _cloudUsers) {
-          if (user.userId == senderUserId) {
-            if (user.identityPublicKey.isNotEmpty) {
-              identityPublicKeys.add(user.identityPublicKey);
-            }
-            deviceList = user.deviceList;
-            break;
+        var user = _cloudUserById(senderUserId);
+        if (user == null) {
+          await refreshCloudUsers();
+          user = _cloudUserById(senderUserId);
+        }
+        if (user != null) {
+          if (user.identityPublicKey.isNotEmpty) {
+            identityPublicKeys.add(user.identityPublicKey);
           }
+          deviceList = user.deviceList;
         }
       }
     }

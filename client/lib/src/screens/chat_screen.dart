@@ -63,7 +63,8 @@ class _ChatScreenState extends State<ChatScreen> {
         final messages = widget.appState.messagesFor(_conversationId);
         _visibleMessages = messages;
         final contact = widget.contact;
-        final online = widget.appState.isContactOnline(contact.userId);
+        final online =
+            !contact.isGroup && widget.appState.isContactOnline(contact.userId);
         final searchResults = _searchResults(messages);
         final pinnedMessages =
             messages.where((message) => message.pinned).toList();
@@ -87,7 +88,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        online ? 'Online / Cloud' : 'Offline / Cloud',
+                        contact.isGroup
+                            ? '${contact.memberIds.length} osob / Cloud'
+                            : (online ? 'Online / Cloud' : 'Offline / Cloud'),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -168,6 +171,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             contact: widget.contact,
                             message: message,
                             senderName: _senderNameFor(message),
+                            senderAvatarBase64: _senderAvatarFor(message),
+                            senderFallback: _senderFallbackFor(message),
+                            groupReceiptLine: _readByLine(message),
                             highlighted: message.id == _highlightedMessageId,
                             onReply: _startReply,
                             onJumpToMessage: _highlightAndScrollToMessage,
@@ -490,7 +496,56 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String? _senderNameFor(ChatMessage message) {
-    return null;
+    if (!widget.contact.isGroup ||
+        message.direction == MessageDirection.system) {
+      return null;
+    }
+    final senderId = message.senderId;
+    if (senderId == null || senderId.isEmpty) {
+      return message.direction == MessageDirection.outbound ? 'Ty' : null;
+    }
+    return widget.appState.displayNameForUser(senderId);
+  }
+
+  String? _senderAvatarFor(ChatMessage message) {
+    if (!widget.contact.isGroup ||
+        message.direction == MessageDirection.system) {
+      return null;
+    }
+    final senderId = message.senderId;
+    if (senderId == null || senderId.isEmpty) return null;
+    return widget.appState.avatarForUser(senderId);
+  }
+
+  String _senderFallbackFor(ChatMessage message) {
+    final name = _senderNameFor(message);
+    if (name == null || name.isEmpty) return '?';
+    return name.substring(0, 1).toUpperCase();
+  }
+
+  String _readByLine(ChatMessage message) {
+    if (!widget.contact.isGroup ||
+        message.direction != MessageDirection.outbound) {
+      return '';
+    }
+    final ownId = widget.appState.ownUserId;
+    final readers = message.readBy.keys
+        .where((userId) => userId != ownId)
+        .toList(growable: false);
+    if (readers.isNotEmpty) {
+      final names = widget.appState.displayNamesForUsers(readers);
+      final visible = names.take(3).join(', ');
+      final rest = names.length > 3 ? ' +${names.length - 3}' : '';
+      return ' / odczytali: $visible$rest';
+    }
+    final delivered = message.deliveredBy.keys
+        .where((userId) => userId != ownId)
+        .toList(growable: false);
+    if (delivered.isEmpty) return '';
+    final names = widget.appState.displayNamesForUsers(delivered);
+    final visible = names.take(3).join(', ');
+    final rest = names.length > 3 ? ' +${names.length - 3}' : '';
+    return ' / dostarczono: $visible$rest';
   }
 
   void _highlightAndScrollToMessage(String messageId) {
@@ -795,6 +850,35 @@ class _ContactAvatar extends StatelessWidget {
   }
 }
 
+class _SenderAvatar extends StatelessWidget {
+  const _SenderAvatar({required this.bytesBase64, required this.fallback});
+
+  final String? bytesBase64;
+  final String fallback;
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _avatarBytes();
+    return CircleAvatar(
+      radius: 15,
+      backgroundImage: bytes == null ? null : MemoryImage(bytes),
+      child: bytes == null
+          ? Text(fallback, style: Theme.of(context).textTheme.labelSmall)
+          : null,
+    );
+  }
+
+  Uint8List? _avatarBytes() {
+    final raw = bytesBase64;
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      return unb64(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 class _SearchBar extends StatelessWidget {
   const _SearchBar({
     required this.controller,
@@ -866,6 +950,9 @@ class _MessageBubble extends StatelessWidget {
     required this.contact,
     required this.message,
     required this.senderName,
+    required this.senderAvatarBase64,
+    required this.senderFallback,
+    required this.groupReceiptLine,
     required this.highlighted,
     required this.onReply,
     required this.onJumpToMessage,
@@ -875,6 +962,9 @@ class _MessageBubble extends StatelessWidget {
   final Contact contact;
   final ChatMessage message;
   final String? senderName;
+  final String? senderAvatarBase64;
+  final String senderFallback;
+  final String groupReceiptLine;
   final bool highlighted;
   final ValueChanged<ChatMessage> onReply;
   final ValueChanged<String> onJumpToMessage;
@@ -898,74 +988,96 @@ class _MessageBubble extends StatelessWidget {
         ? Theme.of(context).colorScheme.primaryContainer
         : Theme.of(context).colorScheme.surfaceContainerHighest;
 
+    final bubble = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 520),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(8),
+          border: highlighted
+              ? Border.all(
+                  color: Theme.of(context).colorScheme.primary,
+                  width: 2,
+                )
+              : null,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (senderName != null) ...[
+              Text(
+                senderName!,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+              ),
+              const SizedBox(height: 4),
+            ],
+            message.retracted
+                ? _RetractedMessageView(outbound: outbound)
+                : _PayloadView(
+                    payload: message.payload,
+                    onReplyTap: onJumpToMessage,
+                  ),
+            if (message.reactions.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _ReactionSummary(reactions: message.reactions),
+            ],
+            const SizedBox(height: 6),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (message.pinned) ...[
+                  const Icon(Icons.push_pin, size: 14),
+                  const SizedBox(width: 4),
+                ],
+                Flexible(
+                  child: Text(
+                    _statusLine(message, context),
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                _MessageActionsButton(
+                  canReply: _canReply(message),
+                  canReact: _canReact(message),
+                  canEdit: _canEdit(message),
+                  canRetract: _canRetract(message),
+                  pinned: message.pinned,
+                  onSelected: (action) => _handleAction(context, action),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (!contact.isGroup) {
+      return Align(
+        alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
+        child: bubble,
+      );
+    }
+
+    final avatar = _SenderAvatar(
+      bytesBase64: senderAvatarBase64,
+      fallback: senderFallback,
+    );
     return Align(
       alignment: outbound ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(8),
-            border: highlighted
-                ? Border.all(
-                    color: Theme.of(context).colorScheme.primary,
-                    width: 2,
-                  )
-                : null,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (senderName != null) ...[
-                Text(
-                  senderName!,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                ),
-                const SizedBox(height: 4),
-              ],
-              message.retracted
-                  ? _RetractedMessageView(outbound: outbound)
-                  : _PayloadView(
-                      payload: message.payload,
-                      onReplyTap: onJumpToMessage,
-                    ),
-              if (message.reactions.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                _ReactionSummary(reactions: message.reactions),
-              ],
-              const SizedBox(height: 6),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (message.pinned) ...[
-                    const Icon(Icons.push_pin, size: 14),
-                    const SizedBox(width: 4),
-                  ],
-                  Flexible(
-                    child: Text(
-                      _statusLine(message, context),
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  _MessageActionsButton(
-                    canReply: _canReply(message),
-                    canReact: _canReact(message),
-                    canEdit: _canEdit(message),
-                    canRetract: _canRetract(message),
-                    pinned: message.pinned,
-                    onSelected: (action) => _handleAction(context, action),
-                  ),
-                ],
-              ),
-            ],
-          ),
+        constraints: const BoxConstraints(maxWidth: 620),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: outbound
+              ? [Flexible(child: bubble), const SizedBox(width: 8), avatar]
+              : [avatar, const SizedBox(width: 8), Flexible(child: bubble)],
         ),
       ),
     );
@@ -978,7 +1090,7 @@ class _MessageBubble extends StatelessWidget {
     final transport =
         message.transport == null ? '' : ' / ${message.transport}';
     final edited = message.editedAt == null ? '' : ' / edytowano';
-    return '${_statusLabel(message.status)}$transport / $time$edited';
+    return '${_statusLabel(message.status)}$transport / $time$edited$groupReceiptLine';
   }
 
   String _statusLabel(MessageStatus status) {
