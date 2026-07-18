@@ -225,10 +225,10 @@ class CloudApiClient {
 
   Future<List<CloudPublicUser>> users({String? username}) async {
     final normalized = username?.trim().toLowerCase() ?? '';
-    final path = normalized.isEmpty
-        ? '/v2/users'
-        : '/v2/users?username=${Uri.encodeQueryComponent(normalized)}';
-    final raw = await _get(path);
+    final raw = await _get(
+      '/v2/users',
+      normalized.isEmpty ? null : {'username': normalized},
+    );
     final items = raw['users'] as List? ?? const [];
     return items
         .map(

@@ -11,6 +11,7 @@ import 'package:secure_p2p_messenger/src/crypto/codec.dart';
 import 'package:secure_p2p_messenger/src/crypto/safety_number.dart';
 import 'package:secure_p2p_messenger/src/models/cloud_account.dart';
 import 'package:secure_p2p_messenger/src/models/message.dart';
+import 'package:secure_p2p_messenger/src/services/cloud_api_client.dart';
 
 void main() {
   const accountId = 'uuid-alice';
@@ -28,6 +29,30 @@ void main() {
       crypto_hash.sha256.convert(utf8.encode(canonical)).toString(),
       vector['sha256'],
     );
+  });
+
+  test('wyszukiwanie uzytkownika wysyla username jako query parameter',
+      () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final requestFuture = server.first;
+    final client = CloudApiClient(
+      serverUrl: 'http://127.0.0.1:${server.port}',
+      token: 'test-token',
+    );
+
+    final usersFuture = client.users(username: ' SzKpN ');
+    final request = await requestFuture;
+    expect(request.method, 'GET');
+    expect(request.uri.path, '/v2/users');
+    expect(request.uri.queryParameters['username'], 'szkpn');
+    expect(request.headers.value(HttpHeaders.authorizationHeader),
+        'Bearer test-token');
+    request.response.headers.contentType = ContentType.json;
+    request.response.write(jsonEncode({'ok': true, 'users': []}));
+    await request.response.close();
+
+    expect(await usersFuture, isEmpty);
+    await server.close(force: true);
   });
 
   Future<String> legacyV1Signature(CloudVault vault) async {

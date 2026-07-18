@@ -942,6 +942,72 @@ test('dokladne wyszukanie loginu zwraca bundle urzadzen do rozpoczecia rozmowy',
   assert.equal(result.body.users[0].deviceListHash, peer.deviceListHash);
 });
 
+test('dokladne wyszukanie loginu ignoruje wielkosc liter dla starszych rekordow', async () => {
+  const { store, user } = fixture();
+  const now = new Date().toISOString();
+  const peerDeviceId = 'szkpn-device-1';
+  const peerCertificate = {
+    v: 1,
+    accountId: crypto.randomUUID(),
+    serverOrigin: 'https://chat.example',
+    deviceId: peerDeviceId,
+    deviceSigningPublicKey: 'd'.repeat(32),
+    deviceEpoch: 1,
+    createdAt: now,
+    signature: 's'.repeat(32)
+  };
+  const peer = {
+    userId: peerCertificate.accountId,
+    username: 'SzKpN',
+    displayName: 'SzKpN',
+    identityPublicKey: 'i'.repeat(32),
+    keyAgreementPublicKey: 'k'.repeat(32),
+    keyAgreementPublicKeySignature: 's'.repeat(32),
+    directoryListed: false,
+    devices: {
+      [peerDeviceId]: {
+        deviceName: 'Android',
+        deviceCertificate: peerCertificate
+      }
+    },
+    deviceList: {
+      v: 1,
+      accountId: peerCertificate.accountId,
+      serverOrigin: 'https://chat.example',
+      deviceListEpoch: 1,
+      previousDeviceListHash: '',
+      identityRotationEpoch: 0,
+      devices: [{
+        deviceId: peerDeviceId,
+        deviceSigningPublicKey: peerCertificate.deviceSigningPublicKey,
+        certificateHash: sha256Canonical(peerCertificate),
+        addedAt: now,
+        deviceEpoch: 1
+      }],
+      revokedDevices: [],
+      signature: 'l'.repeat(32),
+      updatedAt: now
+    },
+    deviceListHash: 'h'.repeat(32),
+    updatedAt: now
+  };
+  store.users.users[peer.userId] = peer;
+  store.persistUsers();
+  const session = store.createSession(user, 'directory-device', 'Device');
+
+  for (const username of ['szkpn', 'SZKPN', 'SzKpN']) {
+    const result = await httpRequest(store, 'GET', `/v2/users?username=${username}`, {
+      token: session.token
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.users.length, 1);
+    assert.equal(result.body.users[0].userId, peer.userId);
+    assert.equal(result.body.users[0].username, 'SzKpN');
+    assert.ok(result.body.users[0].devices[peerDeviceId].deviceCertificate);
+    assert.equal(result.body.users[0].deviceList.devices[0].deviceId, peerDeviceId);
+  }
+});
+
 test('publiczny katalog pokazuje tylko uzytkownikow z wyrazona zgoda', async () => {
   const { store, user } = fixture();
   const now = new Date().toISOString();
